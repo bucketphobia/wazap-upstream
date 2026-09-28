@@ -1,6 +1,6 @@
 {
   "name": "wazap",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "description": "WhatsApp for your AI agent: the wazap MCP server plus skills for inbox triage, recall, group catch-up and safe sending.",
   "author": {
     "name": "Răzvan Girgiz"

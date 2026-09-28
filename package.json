@@ -1,6 +1,6 @@
 {
   "name": "wazap-mcp",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "mcpName": "io.github.razvangirgiz/wazap",
   "description": "WhatsApp for your AI agent. MCP server over Baileys: pairing-code login, several accounts, stdio or HTTP.",
   "license": "MIT",

@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.razvangirgiz/wazap",
   "description": "WhatsApp for your agent: chats, messages, media, contacts and groups behind MCP tools.",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "repository": {
     "url": "https://github.com/razvangirgiz/wazap",
     "source": "github"
@@ -12,7 +12,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "wazap-mcp",
-      "version": "1.0.3",
+      "version": "1.1.0",
       "transport": {
         "type": "stdio"
       },
