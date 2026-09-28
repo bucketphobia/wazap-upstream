@@ -77,6 +77,19 @@ for (const [index, [name, args]] of CASES.entries()) {
   });
 }
 
+test("registrations naming one draft identity own its drafts; another identity does not", async () => {
+  const f = fixture();
+  const owner = f.client({ draftIdentity: "cred-a" });
+  const same = f.client({ draftIdentity: "cred-a" });
+  const other = f.client({ draftIdentity: "cred-b" });
+  const draft = await owner(...CASES[0]);
+  const args = { draft_id: draft.structuredContent.draft_id };
+  assert.equal((await other("confirm_send", args)).structuredContent.error, "DRAFT_NOT_FOUND");
+  assert.equal(f.confirms(), 0);
+  assert.equal((await same("confirm_send", args)).structuredContent.message_id, "sent");
+  assert.equal(f.confirms(), 1);
+});
+
 test("an unowned service draft fails closed even without send rules", async () => {
   const f = fixture();
   const draft = await f.wa.draft({ kind: "text", chatId: CHAT, text: "orphan" });
@@ -229,6 +242,8 @@ async function endpoint(t) {
     credentials: [
       { token: "shared-test-token", write: true },
       { token: "other-test-token", write: true },
+      // The daemon's own channel: remote sessions on it still get per-session drafts.
+      { token: "local-test-token", write: true, localFiles: true },
     ],
   });
   return { ...f, config, port };
@@ -245,24 +260,55 @@ async function httpClient(t, port, token = "shared-test-token") {
   return client;
 }
 
-for (const token of ["shared-test-token", "other-test-token"]) {
-  test(`HTTP: independent sessions using ${token} cannot exchange draft ids`, async (t) => {
-    const f = await endpoint(t);
-    const owner = await httpClient(t, f.port);
-    const other = await httpClient(t, f.port, token);
-    const draft = await owner.callTool({ name: "send_message", arguments: CASES[0][1] });
-    const args = { draft_id: draft.structuredContent.draft_id };
-    assert.equal(
-      (await other.callTool({ name: "confirm_send", arguments: args })).structuredContent.error,
-      "DRAFT_NOT_FOUND"
-    );
-    assert.equal(f.confirms(), 0);
-    assert.equal(
-      (await owner.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id,
-      "sent"
-    );
-  });
-}
+test("HTTP: one token's sessions share its drafts — a confirm over a new session still lands", async (t) => {
+  const f = await endpoint(t);
+  const owner = await httpClient(t, f.port);
+  const other = await httpClient(t, f.port);
+  const draft = await owner.callTool({ name: "send_message", arguments: CASES[0][1] });
+  const args = { draft_id: draft.structuredContent.draft_id };
+  assert.equal(
+    (await other.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id,
+    "sent"
+  );
+  assert.equal(f.confirms(), 1);
+  const replay = await owner.callTool({ name: "confirm_send", arguments: args });
+  assert.equal(replay.structuredContent.already_sent, true, "either session's replay answers the receipt");
+  assert.equal(f.sends(), 1);
+});
+
+test("HTTP: a session on another token cannot confirm it", async (t) => {
+  const f = await endpoint(t);
+  const owner = await httpClient(t, f.port);
+  const other = await httpClient(t, f.port, "other-test-token");
+  const draft = await owner.callTool({ name: "send_message", arguments: CASES[0][1] });
+  const args = { draft_id: draft.structuredContent.draft_id };
+  assert.equal(
+    (await other.callTool({ name: "confirm_send", arguments: args })).structuredContent.error,
+    "DRAFT_NOT_FOUND"
+  );
+  assert.equal(f.confirms(), 0);
+  assert.equal(
+    (await owner.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id,
+    "sent"
+  );
+});
+
+test("HTTP: the local channel keeps per-session drafts even on one credential", async (t) => {
+  const f = await endpoint(t);
+  const owner = await httpClient(t, f.port, "local-test-token");
+  const other = await httpClient(t, f.port, "local-test-token");
+  const draft = await owner.callTool({ name: "send_message", arguments: CASES[0][1] });
+  const args = { draft_id: draft.structuredContent.draft_id };
+  assert.equal(
+    (await other.callTool({ name: "confirm_send", arguments: args })).structuredContent.error,
+    "DRAFT_NOT_FOUND"
+  );
+  assert.equal(f.confirms(), 0);
+  assert.equal(
+    (await owner.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id,
+    "sent"
+  );
+});
 
 test("HTTP: resuming the same authenticated session preserves its drafts", async (t) => {
   const f = await endpoint(t);
@@ -300,7 +346,7 @@ test("HTTP: resuming the same authenticated session preserves its drafts", async
   assert.equal(f.confirms(), 1);
 });
 
-test("HTTP: reinitializing requires drafting again, even with the same token", async (t) => {
+test("HTTP: a new initialize on the same token still owns the earlier session's drafts", async (t) => {
   const f = await endpoint(t);
   const old = await httpClient(t, f.port);
   const draft = await old.callTool({ name: "send_message", arguments: CASES[0][1] });
@@ -308,22 +354,31 @@ test("HTTP: reinitializing requires drafting again, even with the same token", a
   const fresh = await httpClient(t, f.port);
   assert.equal(
     (await fresh.callTool({ name: "confirm_send", arguments: { draft_id: draft.structuredContent.draft_id } }))
-      .structuredContent.error,
-    "DRAFT_NOT_FOUND"
-  );
-  const redraft = await fresh.callTool({ name: "send_message", arguments: CASES[0][1] });
-  assert.equal(
-    (await fresh.callTool({ name: "confirm_send", arguments: { draft_id: redraft.structuredContent.draft_id } }))
       .structuredContent.message_id,
     "sent"
   );
   assert.equal(f.confirms(), 1);
 });
 
+test("HTTP: a new initialize on another token is still told nothing", async (t) => {
+  const f = await endpoint(t);
+  const old = await httpClient(t, f.port);
+  const draft = await old.callTool({ name: "send_message", arguments: CASES[0][1] });
+  await old.close();
+  const fresh = await httpClient(t, f.port, "other-test-token");
+  assert.equal(
+    (await fresh.callTool({ name: "confirm_send", arguments: { draft_id: draft.structuredContent.draft_id } }))
+      .structuredContent.error,
+    "DRAFT_NOT_FOUND"
+  );
+  assert.equal(f.confirms(), 0);
+});
+
 test("two real stdio bridges sharing a daemon cannot confirm each other's drafts", async (t) => {
   const f = await endpoint(t);
   const file = join(f.config.dataDir, "daemon.json");
-  const daemon = { pid: process.pid, port: f.port, token: "shared-test-token", version: "test" };
+  // The credential the daemon's loopback endpoint issues in production (localFiles).
+  const daemon = { pid: process.pid, port: f.port, token: "local-test-token", version: "test" };
   writeDaemon(file, daemon);
   async function bridge() {
     const child = spawn(

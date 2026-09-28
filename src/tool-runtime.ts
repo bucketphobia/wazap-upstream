@@ -26,7 +26,12 @@ export interface ToolCtx {
   hub: AccountSource;
   allowWrite: boolean;
   accountId: string;
-  /** Opaque, per MCP session; stored with the session's drafts, never shown to or taken from a caller. */
+  /**
+   * The identity the session's drafts answer to: the credential's stable
+   * identity on HTTP (RegisterOpts.draftIdentity), or an opaque id minted at
+   * registration where no credential names one. Stored with the drafts, never
+   * shown to or taken from a caller.
+   */
   draftOwner: string;
   /**
    * Who the session's credential names, stable across its sessions and token
@@ -70,6 +75,13 @@ export interface RegisterOpts {
   maxInFlightTotal?: number;
   /** See ToolCtx.client; `local` when omitted, which names each call after the MCP client making it. */
   client?: string;
+  /**
+   * The authenticated identity drafts of this session answer to (server.ts),
+   * so a confirm arriving over a reinitialized HTTP connection still reaches
+   * them. Omitted — stdio, the daemon's bridge and anonymous readers — keeps
+   * drafts owned by this registration alone.
+   */
+  draftIdentity?: string;
 }
 
 /** Agents fan out: Claude Code routinely sends several tool calls at once, and wait_for_messages holds one for up to 55 s. */
@@ -110,10 +122,12 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
     )
   );
   return function registerTools(server: McpServer, hub: AccountSource, opts: RegisterOpts): void {
-    // Each stdio server / HTTP session / upstream bridge session owns its drafts.
-    // New initialization intentionally requires re-drafting, even with the same token,
-    // and so does a restart: no later session is ever handed this id again.
-    const draftOwner = `session_${randomUUID()}`;
+    // A session's drafts answer to its draft identity: a remote credential's
+    // stable one where the server names it, so an async confirm over a fresh
+    // HTTP connection still owns the draft, and otherwise an opaque id minted
+    // here that no later session is ever handed again — a restart or a new
+    // initialize on the local channel still requires re-drafting.
+    const draftOwner = opts.draftIdentity ?? `session_${randomUUID()}`;
     // Which of this session's calls made each draft, so confirm_send can tell a
     // draft the user has just approved from one the conversation moved past.
     const sessionDrafts = new SessionDrafts();

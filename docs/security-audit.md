@@ -29,24 +29,30 @@ even from its own independently authenticated session. The same flaw reproduced
 through two actual stdio bridge processes attached to a stub daemon. All ten
 initial draft isolation regression cases failed before the fix.
 
-Each `registerTools` invocation now creates an opaque symbol, kept server-side.
-Every outgoing draft records that owner and its resolved account. Before account
-resolution or send-policy lookup, `confirm_send` checks ownership and rejects a
-conflicting explicit account. Foreign and unknown draft ids return
+Each `registerTools` invocation keeps one draft identity, kept server-side.
+On the local channels — stdio servers, the daemon's own credential, anonymous
+sessions — it is an opaque id minted per registration. On the remote endpoint
+it is the credential's stable identity: a static token's, or the OAuth client
+the grant belongs to — so an async confirm over a reinitialized HTTP connection
+still reaches the draft, and an OAuth access-token rotation does not strand it.
+Every outgoing draft records that identity and its resolved account. Before
+account resolution or send-policy lookup, `confirm_send` checks ownership and
+rejects a conflicting explicit account. Foreign and unknown draft ids return
 `DRAFT_NOT_FOUND` without revealing the recipient/policy or consuming the draft.
 An owned draft is resolved through its recorded account, not caller-provided
 routing hints. Existing live allow/deny checks still run before sending.
 
-The scope is deliberately **MCP session**, not bearer credential:
+The scope is deliberately **authenticated identity**, not connection:
 
 - Text, media, polls, locations and forwards all use the same ownership path.
-- Each stdio server and each bridge upstream session has a distinct owner.
-- A resumed authenticated session keeps its drafts.
-- A new initialize, session eviction, or OAuth token rotation requires a new
-  draft and fresh user approval. Drafts are not transferred to the new session.
-- Failed sends remain retryable by the owner according to the existing service
-  behavior. Ownership does not extend the service's 15-minute expiry.
-- Successful confirmation removes the owner metadata; replay is rejected.
+- Each stdio server and each bridge upstream session still has a distinct
+  identity; a new initialize there requires a new draft.
+- A remote credential is itself a shared identity: all of its sessions — after
+  eviction, reconnect or OAuth rotation — own the same drafts.
+- Failed sends remain retryable by the owner identity according to the existing
+  service behavior. Ownership does not extend the service's 15-minute expiry.
+- A confirmed draft keeps its owner record as long as its send record, so
+  another identity's replay is still rejected while the owner hears the receipt.
 
 `src/tool-runtime.ts` now owns tool registration/execution, annotations, account
 routing, error conversion and process-wide per-tool rate buckets. It is created
@@ -785,9 +791,10 @@ what hurt ordinary operation. Each item is its own commit with tests.
 
 ## Remaining limits and release gates
 
-- A shared static token is a shared identity. A caller with both the owner's
-  credential and session id can impersonate that session. Session-scoped drafts
-  do not turn shared credentials into a hostile-client security boundary.
+- A shared static token is a shared identity: its sessions share one draft
+  identity, and a caller holding the credential can confirm its drafts.
+  Identity-scoped drafts do not turn shared credentials into a hostile-client
+  security boundary — use distinct credentials/OAuth grants for isolation.
 - Account data and account-wide policies remain shared. There are no per-client
   account ACLs; do not describe this server as multi-tenant isolation.
 - Draft/confirm is not independent proof of human consent. An agent authorized

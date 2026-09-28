@@ -41,10 +41,12 @@ confirm again. Once the message is handed to WhatsApp's relay (which also looks
 up the recipient's devices and encrypts it before writing), a failure answers
 `SEND_OUTCOME_UNKNOWN`: WhatsApp may have the message, so that draft is never
 sent again. The agent checks the chat instead. When WhatsApp later echoes that
-message id, the send is recorded as sent, and the session that confirmed it gets
+message id, the send is recorded as sent, and the identity that confirmed it gets
 the receipt from then on. For 24 hours a confirmed draft answers its receipt or
-`SEND_OUTCOME_UNKNOWN` to that session; deleting the sent message, or clearing
-or deleting its chat, removes its words from the record. MCP sessions do not survive a restart: after one, no
+`SEND_OUTCOME_UNKNOWN` to that identity; deleting the sent message, or clearing
+or deleting its chat, removes its words from the record. On HTTP a draft's identity is the credential's, so a
+reinitialized session on the same credential still confirms it; on stdio,
+bridges and the daemon's own channel drafts stay per-session. Drafts do not survive a restart: after one, no
 session can confirm a draft made before it, sent or not, though a send the
 restart interrupted is still recorded as unknown and still settles when its id
 is echoed.
@@ -286,7 +288,7 @@ trace, so an agent can decide whether to retry, ask the user, or stop.
 | `READ_ONLY` | wazap is running read-only. |
 | `RATE_LIMITED` | Too many writes, or too many read marks, which have a budget of their own; `fix` says how long to wait. |
 | `ACCOUNT_RESTRICTED` | WhatsApp restricts or banned the account, and nothing was sent. Do not retry: `get_status` says what and until when under `health`. Under a reachout timelock only a first message to someone never written to is refused; existing chats go on. |
-| `DRAFT_NOT_FOUND` / `DRAFT_EXPIRED` | The draft is unknown, from another MCP session, sent more than 15 minutes ago, or expired unsent. Draft again. |
+| `DRAFT_NOT_FOUND` / `DRAFT_EXPIRED` | The draft is unknown, from another identity (another session on stdio, another credential on HTTP), sent more than 15 minutes ago, or expired unsent. Draft again. |
 | `SEND_OUTCOME_UNKNOWN` | The message reached the socket and then the send failed, so WhatsApp may have it. The draft is never sent again; check the chat before drafting anew. |
 | `SEND_BLOCKED` | The account's send rules refuse this recipient. `wazap config send` changes them; the agent must not route around. |
 | `AMBIGUOUS_ACCOUNT` | More than one account could handle this, or a write named a chat no account knows. Pass `account_id`. |
