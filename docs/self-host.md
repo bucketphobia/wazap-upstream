@@ -38,16 +38,18 @@ do not enable anonymous access on a sensitive endpoint. This is not per-client
 account isolation: authorized clients still share account data and account-level
 policies.
 
-Drafts are owned by the MCP session that created them, including stdio servers
-and each bridge's upstream session. Another session cannot confirm a draft even
-if it knows its id; it receives `DRAFT_NOT_FOUND`, without consuming the draft.
-Resuming the same authenticated session preserves its drafts. A new initialize
-(after eviction, reconnect with a new session, or OAuth token rotation) requires
-a new draft and fresh user approval. Two sessions using the same token have
-separate drafts, but sharing that token is still sharing an identity: anyone
-holding both that token and the owner's session id can act as that session.
-Draft/confirm is a workflow, not independent proof of human consent; the agent
-can call both tools unless a trusted harness enforces approval.
+Drafts answer to an identity, not a connection. On the remote endpoint that
+identity is the credential's: every session on a static token shares its
+drafts, and an OAuth client's drafts survive both a new session and an
+access-token rotation — so an async confirm that arrives over a reinitialized
+connection still lands. A session on another credential is told
+`DRAFT_NOT_FOUND`, without consuming the draft. stdio servers, anonymous
+sessions and the daemon's own credential keep per-session drafts, so each
+bridge's upstream session is still distinct and a new initialize there requires
+a new draft and fresh user approval. Sharing a token is still sharing an
+identity: use distinct credentials/OAuth grants for isolation. Draft/confirm is
+a workflow, not independent proof of human consent; the agent can call both
+tools unless a trusted harness enforces approval.
 
 ### Request budgets
 

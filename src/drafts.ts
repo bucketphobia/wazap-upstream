@@ -7,9 +7,9 @@ import { captionTravels, mimeOfSource } from "./outgoing-media.js";
 import type { MediaSource, OutgoingTarget, SentMessage } from "./wa-types.js";
 
 export const DRAFT_TTL_MS = 15 * 60_000;
-/** Drafts one MCP session keeps; its oldest go first. */
+/** Drafts one identity keeps — a session, or a credential's stable identity on HTTP; its oldest go first. */
 export const DRAFT_CAP = 20;
-/** Drafts one account keeps across every session; the oldest go first. */
+/** Drafts one account keeps across every identity; the oldest go first. */
 export const DRAFT_ACCOUNT_CAP = 200;
 /** How long a confirmed send is remembered: its receipt, and its key for echoes and reconciliation. */
 export const SEND_RECORD_TTL_MS = 24 * 60 * 60_000;
@@ -119,8 +119,8 @@ export function draftStale(id: string): WazapError {
  * confirm is refused (draftStale) and the draft is left untouched — a proper
  * retake goes through send_message, which makes a new one.
  *
- * In memory and per session, like the draft ownership itself: a session that
- * ends takes its drafts with it. A draft a confirm has reached is forgotten
+ * In memory and per session — it tracks the conversation's own calls, nothing
+ * the store keeps. A draft a confirm has reached is forgotten
  * here, so from then on the service's own answer stands — its receipt, or
  * SEND_OUTCOME_UNKNOWN — and the same message is never drafted twice.
  */
@@ -181,8 +181,9 @@ export function sendOutcomeUnknown(id: string, cause?: string): WazapError {
  * Drafts as confirm_send sees them, kept in the account database (`sends`)
  * so a confirm outlives a crash and never sends twice. Every call takes the
  * account's table, since the service may swap its database (a different
- * number linked). The owner is the MCP session that drafted: every other
- * session is told there is no such draft.
+ * number linked). The owner is the identity that drafted — the credential's
+ * stable identity on HTTP, an opaque id elsewhere (tool-runtime.ts): every
+ * other identity is told there is no such draft.
  *
  * A draft lapses after 15 minutes; an owner keeps at most 20 and an account
  * 200. Confirming claims it atomically; a send that failed before its key

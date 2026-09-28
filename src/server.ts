@@ -37,7 +37,14 @@ function isAuthorized(header: string | undefined, expected: string): boolean {
  * The one place a session is built, so the workflows reach stdio and HTTP alike:
  * a client that never installed the skill files still gets them here.
  */
-function buildMcpServer(hub: AccountSource, config: Config, allowWrite: boolean, allowLocalFiles: boolean, client = LOCAL_CLIENT): McpServer {
+function buildMcpServer(
+  hub: AccountSource,
+  config: Config,
+  allowWrite: boolean,
+  allowLocalFiles: boolean,
+  client = LOCAL_CLIENT,
+  draftIdentity?: string
+): McpServer {
   const skills = loadSkills();
   const writes = allowWrite && !config.readOnly && anyAccountAllowsWrites(hub);
   const server = new McpServer({ name: "wazap", version: WAZAP_VERSION }, { instructions: skillInstructions(skills, { allowWrite: writes, accounts: namedAccounts(hub) }) });
@@ -45,6 +52,7 @@ function buildMcpServer(hub: AccountSource, config: Config, allowWrite: boolean,
     allowWrite: writes,
     allowLocalFiles,
     client,
+    ...(draftIdentity === undefined ? {} : { draftIdentity }),
     ...(config.maxInFlight === undefined ? {} : { maxInFlight: config.maxInFlight }),
     ...(config.maxInFlightTotal === undefined ? {} : { maxInFlightTotal: config.maxInFlightTotal }),
   });
@@ -71,6 +79,8 @@ type AuthedRequest = Request & {
   /** Who the credential names (ToolCtx.client), never the token itself. */
   client?: string;
   sessionOwner?: string;
+  /** The stable identity a session's drafts answer to (RegisterOpts.draftIdentity). */
+  draftIdentity?: string;
   localFiles?: boolean;
 };
 
@@ -79,6 +89,19 @@ type AuthedRequest = Request & {
  */
 function sessionOwner(auth: string, write: boolean, localFiles: boolean): string {
   return `${write ? "write" : "read"}:${localFiles ? "local" : "remote"}:${createHash("sha256").update(auth.slice("Bearer ".length).trim()).digest("hex")}`;
+}
+
+/**
+ * Who a session's drafts answer to. A remote credential is a stable identity,
+ * so its drafts survive a dropped or reinitialized HTTP session — an async
+ * confirm over a fresh connection is the same client. An OAuth draft answers
+ * to the client the grant belongs to, so a rotated access token keeps it.
+ * The daemon's own credential (localFiles) and anonymous readers keep
+ * per-session drafts: processes sharing that channel stay distinct sessions.
+ */
+function draftIdentity(owner: string, access: { localFiles: boolean; oauthClient?: string }): string | undefined {
+  if (access.localFiles) return undefined;
+  return access.oauthClient === undefined ? owner : `oauth:${access.oauthClient}`;
 }
 
 export async function runStdio(hub: AccountSource, config: Config): Promise<void> {
@@ -286,7 +309,10 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
       (req as AuthedRequest).oauthClient = access.oauthClient;
       (req as AuthedRequest).client = access.client;
       (req as AuthedRequest).localFiles = access.localFiles;
-      (req as AuthedRequest).sessionOwner = sessionOwner(req.headers.authorization!, access.write, access.localFiles);
+      const owner = sessionOwner(req.headers.authorization!, access.write, access.localFiles);
+      (req as AuthedRequest).sessionOwner = owner;
+      const identity = draftIdentity(owner, access);
+      if (identity !== undefined) (req as AuthedRequest).draftIdentity = identity;
       next();
       return;
     }
@@ -365,7 +391,8 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
           config,
           (req as AuthedRequest).mcpWrite === true,
           (req as AuthedRequest).localFiles === true,
-          (req as AuthedRequest).client ?? LOCAL_CLIENT
+          (req as AuthedRequest).client ?? LOCAL_CLIENT,
+          (req as AuthedRequest).draftIdentity
         );
         await server.connect(newTransport);
         transport = newTransport;

@@ -15,12 +15,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startHttpEndpoint } from "../dist/server.js";
 import { WazapOAuthProvider, oauthProblem } from "../dist/oauth.js";
-import { offlineConfig, stubAccountSource, waitFor } from "./helpers.mjs";
+import { draftStub, offlineConfig, stubAccountSource, waitFor } from "./helpers.mjs";
 
 // The SDK refuses a plain-http issuer unless told this is a test.
 process.env.MCP_DANGEROUSLY_ALLOW_INSECURE_ISSUER_URL = "1";
 
 const PASSWORD = "correct horse battery";
+const CHAT = "40722123456@s.whatsapp.net";
 
 const stubWa = {
   getStatus: () => ({ status: "connected", status_since: new Date().toISOString(), account_id: "default" }),
@@ -55,6 +56,7 @@ async function boot(
     readOnly = false,
     now,
     trustedProxies,
+    wa = stubWa,
   } = {}
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), "wazap-oauth-"));
@@ -63,7 +65,7 @@ async function boot(
   const oauth = new WazapOAuthProvider({ publicUrl, password, stateFile: join(dataDir, "oauth.json"), now });
   const config = offlineConfig("wazap-oauth-cfg-", { readOnly, transport: "http", dataDir, trustedProxies });
   const stop = new AbortController();
-  await startHttpEndpoint(stubAccountSource(stubWa), config, {
+  await startHttpEndpoint(stubAccountSource(wa), config, {
     host: "127.0.0.1",
     port,
     credentials,
@@ -1040,4 +1042,63 @@ test("oauthProblem names what is missing or wrong", () => {
   assert.match(oauthProblem({ publicUrl: "https://h.example", oauthPassword: "short" }), /shorter/);
   assert.equal(oauthProblem({ publicUrl: "https://h.example", oauthPassword: "x".repeat(12) }), null);
   assert.equal(oauthProblem({ publicUrl: "http://127.0.0.1:8766", oauthPassword: "x".repeat(12) }), null);
+});
+
+test("a draft answers to its OAuth client across sessions and token rotations, not another client's", async (t) => {
+  const store = draftStub();
+  const receipts = new Map();
+  const wa = {
+    getStatus: () => ({ status: "connected", status_since: new Date().toISOString(), read_only: false }),
+    draft: async (payload) => store.view(store.put({ chat_id: CHAT, name: "Test" }, payload)),
+    confirm: async (id) => {
+      if (receipts.has(id)) return { ...receipts.get(id), already_sent: true };
+      const draft = store.take(id);
+      const receipt = { chat_id: CHAT, message_id: "sent", text: draft.preview, timestamp: "now" };
+      receipts.set(id, receipt);
+      return receipt;
+    },
+  };
+  const ctx = await boot(t, { wa });
+  const owner = await signIn(ctx, { access: "write", clientName: "Owner" });
+  const other = await signIn(ctx, { access: "write", clientName: "Other" });
+  const mcp = async (token) => {
+    const client = new Client({ name: "oauth-draft", version: "1" });
+    t.after(() => client.close());
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(`${ctx.base}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${token}` } },
+      })
+    );
+    return client;
+  };
+  const first = await mcp(owner.tokens.access_token);
+  const draft = await first.callTool({ name: "send_message", arguments: { chat_id: CHAT, text: "hello" } });
+  assert.equal(draft.structuredContent.status, "draft");
+  const args = { draft_id: draft.structuredContent.draft_id };
+
+  // The same grant's rotated access token is the same identity.
+  const { res, body: rotated } = await ctx.fetchJson("/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form({
+      grant_type: "refresh_token",
+      refresh_token: owner.tokens.refresh_token,
+      client_id: owner.client.client_id,
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.notEqual(rotated.access_token, owner.tokens.access_token);
+  await first.close();
+  const fresh = await mcp(rotated.access_token);
+  assert.equal((await fresh.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id, "sent");
+  assert.equal((await fresh.callTool({ name: "confirm_send", arguments: args })).structuredContent.already_sent, true);
+
+  // Another client's grant is a different identity.
+  const next = await fresh.callTool({ name: "send_message", arguments: { chat_id: CHAT, text: "again" } });
+  const otherSession = await mcp(other.tokens.access_token);
+  assert.equal(
+    (await otherSession.callTool({ name: "confirm_send", arguments: { draft_id: next.structuredContent.draft_id } }))
+      .structuredContent.error,
+    "DRAFT_NOT_FOUND"
+  );
 });

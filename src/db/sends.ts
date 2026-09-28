@@ -25,7 +25,7 @@ export const SENT_KEYS_RETENTION_MS = 90 * 86_400_000;
 
 export interface SendRecord {
   draftId: string;
-  /** The MCP session that drafted it; null for a draft made outside any session. */
+  /** The identity that drafted it (ToolCtx.draftOwner); null for a draft made outside any session. */
   owner: string | null;
   chatJid: string;
   kind: string;

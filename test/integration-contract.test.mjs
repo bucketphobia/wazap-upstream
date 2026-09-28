@@ -659,15 +659,23 @@ describe("Integration tool calls on a linked tenant", () => {
     assert.equal(f.sent.length, 1);
   });
 
-  test("after the integration re-initializes, confirm_send of the old session's draft is DRAFT_NOT_FOUND and sends nothing", async (t) => {
+  test("after the integration re-initializes, confirm_send still owns the draft and sends it once", async (t) => {
+    // The integration's transport retries confirm_send after the session it drafted in is
+    // gone. The token is the identity, so the re-initialized session still owns the draft.
     const f = await live(t);
     const client = integrationClient(f.url, WRITE_TOKEN);
     await client.initialize();
     const draft = answer(await client.tool("send_message", { chat_id: CLIENT, text: "salut", account_id: TENANT }), "draft");
     await client.initialize();
-    const replay = await client.tool("confirm_send", { draft_id: draft.draft_id, account_id: TENANT });
-    assert.equal(refusal(replay), "DRAFT_NOT_FOUND");
-    assert.equal(f.sent.length, 0, "a replay in a new session must never send");
+    const confirmed = answer(
+      await client.tool("confirm_send", { draft_id: draft.draft_id, account_id: TENANT }),
+      "confirm_send after re-init"
+    );
+    nonEmpty(confirmed.message_id, "message_id");
+    assert.equal(f.sent.length, 1, "the retried confirm sends the draft once");
+    const again = answer(await client.tool("confirm_send", { draft_id: draft.draft_id, account_id: TENANT }), "replay");
+    assert.equal(again.already_sent, true);
+    assert.equal(f.sent.length, 1);
   });
 
   test("confirm_send on a socket that is not usable answers a definitely-unsent code, sends nothing and keeps the draft", async (t) => {

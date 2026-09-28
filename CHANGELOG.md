@@ -62,6 +62,19 @@
   `wazap status`, a log line or an error, and the headers wazap sets itself
   cannot be replaced.
 
+### Fixed
+
+- **`confirm_send` over a fresh HTTP session no longer loses the draft.**
+  A draft's owner was the MCP session's own id, so when a client confirmed it
+  over a reinitialized connection — a dropped HTTP session, a restart of the
+  client, an OAuth access-token rotation — `confirm_send` answered
+  `DRAFT_NOT_FOUND` for a draft the user had just approved. Remote sessions now
+  answer to their credential's identity instead: every session on one static
+  token shares its drafts, and an OAuth client's drafts answer to the grant's
+  client. A session on another credential is still told `DRAFT_NOT_FOUND`, and
+  stdio, the daemon's own channel and each bridge's upstream session keep
+  per-session drafts.
+
 ### Changed
 
 - **Marking a chat read no longer spends the sends' budget.** `manage_chat`

@@ -143,7 +143,7 @@ interface DraftRef {
   accountId: string;
   target: OutgoingTarget;
   at: number;
-  /** Opaque identity of the MCP session that created this draft; never supplied by a caller. */
+  /** The identity that created this draft (a credential's on HTTP, an opaque session id otherwise); never supplied by a caller. */
   owner?: string;
 }
 
@@ -182,7 +182,7 @@ export function draftTargetOf(draftId: string): DraftRef | undefined {
   return draftTargets.get(draftId) ?? confirmedTargets.get(draftId);
 }
 
-/** Unknown and foreign drafts are indistinguishable, before account lookup or policy checks. */
+/** Unknown and foreign-identity drafts are indistinguishable, before account lookup or policy checks. */
 export function requireDraftOwner(draftId: string, owner: string, accountId?: string): DraftRef {
   const ref = draftTargetOf(draftId);
   if (ref === undefined || ref.owner !== owner || (accountId !== undefined && ref.accountId !== accountId)) {
