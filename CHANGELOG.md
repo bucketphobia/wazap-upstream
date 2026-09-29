@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+### Security
+
+- Require `@modelcontextprotocol/sdk` 1.30.0 or newer on the 1.x line and
+  `express-rate-limit` 8.6.2 or newer on the 8.x line, excluding older releases
+  covered by known security advisories. These are the versions already used
+  by the repository lockfile; the resolved dependencies and runtime behavior
+  are unchanged.
+
 ## 1.1.0
 
 ### Added
