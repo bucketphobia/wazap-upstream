@@ -7,6 +7,8 @@
  ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝
 ```
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/razvangirgiz/wazap)](https://m8ven.ai/mcp/razvangirgiz/wazap)
+
 **WhatsApp for your AI assistant.** wazap is an MCP server that puts your own
 WhatsApp account — chats, messages, media, contacts, groups — behind 20 tools
 any MCP client can call, so Claude, ChatGPT, Gemini, Cursor or Codex can read
