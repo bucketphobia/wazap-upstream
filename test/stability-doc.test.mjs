@@ -104,8 +104,8 @@ for (const meta of tools.values()) {
   for (const key of Object.keys(out?.shape ?? out ?? {})) vocabulary.add(key);
 }
 /** The webhook fields the webhook tests read off a delivered body. */
-for (const file of ["test/webhook.test.mjs", "test/integration-contract.test.mjs"]) {
-  for (const [, field] of read(file).matchAll(/\bbody\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
+for (const file of ["test/webhook.test.mjs", "test/webhook-outbox.test.mjs", "test/webhook-filter.test.mjs", "test/integration-contract.test.mjs"]) {
+  for (const [, field] of read(file).matchAll(/\b(?:body|webhook)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
 }
 /** The answer fields the integration contract test reads off the five tools, which declare no output schema. */
 for (const [, field] of contractTest.matchAll(/\b(?:draft|confirmed|code|applied|status)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);

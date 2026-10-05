@@ -221,6 +221,38 @@ test("an unknown webhook_events in accounts.json is refused, naming the account 
   );
 });
 
+test("webhook_chats and webhook_tag round-trip, and a bad chat is refused", () => {
+  const dir = dataDir();
+  const registry = AccountRegistry.load(dir);
+  registry.add("work", "Work");
+  registry.setWebhookChats("work", ["+40 722 000 002", "120363000000000001@g.us"]);
+  registry.setWebhookTag("work", "#Autopeloc");
+  registry.setWebhookCoalesce("work", 90);
+  registry.setWebhookRetry401("work", true);
+  const work = AccountRegistry.load(dir).get("work");
+  assert.deepEqual(work.webhook_chats, ["40722000002", "120363000000000001@g.us"]);
+  assert.equal(work.webhook_tag, "autopeloc");
+  assert.equal(work.webhook_coalesce, 90);
+  assert.equal(work.webhook_retry_401, true);
+
+  writeFileSync(
+    paths(dir).accountsFile,
+    JSON.stringify({
+      v: 2,
+      default: "default",
+      accounts: [{ id: "work", name: "Work", enabled: true, owner: null, webhook_chats: ["not a chat"] }],
+    })
+  );
+  assert.throws(
+    () => AccountRegistry.load(dir),
+    (err) => {
+      assert.equal(err.code, "INVALID_ID");
+      assert.match(err.message, /webhook_chats/);
+      return true;
+    }
+  );
+});
+
 test("config writes --account stores the override in accounts.json, not .env", async () => {
   const dir = dataDir();
   await wazap(dir, ["account", "add", "work"]);

@@ -20,7 +20,17 @@ import { WebhookSink, parseWebhookAuth, readWebhookSettings, webhookSignatureMat
 const binary = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.js");
 const SECRET = "webhook-test-secret";
 const TOKEN = "tok-4f9c2e7a1b";
-const WEBHOOK_KEYS = ["WAZAP_WEBHOOK", "WAZAP_WEBHOOK_URL", "WAZAP_WEBHOOK_SECRET", "WAZAP_WEBHOOK_EVENTS", "WAZAP_WEBHOOK_AUTH"];
+const WEBHOOK_KEYS = [
+  "WAZAP_WEBHOOK",
+  "WAZAP_WEBHOOK_URL",
+  "WAZAP_WEBHOOK_SECRET",
+  "WAZAP_WEBHOOK_EVENTS",
+  "WAZAP_WEBHOOK_AUTH",
+  "WAZAP_WEBHOOK_CHATS",
+  "WAZAP_WEBHOOK_TAG",
+  "WAZAP_WEBHOOK_COALESCE",
+  "WAZAP_WEBHOOK_RETRY_401",
+];
 
 function dataDir() {
   return mkdtempSync(join(tmpdir(), "wazap-webhook-auth-"), { mode: 0o700 });

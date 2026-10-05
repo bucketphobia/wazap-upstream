@@ -48,7 +48,7 @@ Usage:
   wazap service ${SERVICE_VERBS}
                                                            Keep the server running in the background, under launchd or systemd
   wazap expose [tailscale|cloudflare|off]                  Give the running service a public https URL cloud agents can reach
-  wazap config [writes on|off] [transcribe local|openai|off] [recall local|off] [webhook on|off] [draft-context on|off]
+  wazap config [writes on|off] [transcribe local|openai|off] [recall local|off] [webhook on|off|chats|tag|coalesce] [draft-context on|off]
                                                            Show the effective settings, or change one
   wazap webhook test [--event <name>] [--account <id>]     POST a test event to the configured webhook
   wazap transcribe download [--model <alias>]              Fetch the whisper.cpp model into the data dir
@@ -103,6 +103,7 @@ Options:
 Environment: WAZAP_DATA_DIR, WAZAP_READ_ONLY, WAZAP_PERSIST_HISTORY, WAZAP_HOST, WAZAP_PORT, WAZAP_READ_TOKEN, WAZAP_WRITE_TOKEN,
 WAZAP_PUBLIC_URL, WAZAP_OAUTH_PASSWORD, WAZAP_TRUST_PROXY, WAZAP_TRANSCRIBE, WAZAP_TRANSCRIBE_API_KEY,
 WAZAP_RECALL, WAZAP_WEBHOOK, WAZAP_WEBHOOK_URL, WAZAP_WEBHOOK_SECRET, WAZAP_WEBHOOK_EVENTS, WAZAP_WEBHOOK_AUTH,
+WAZAP_WEBHOOK_CHATS, WAZAP_WEBHOOK_TAG, WAZAP_WEBHOOK_COALESCE, WAZAP_WEBHOOK_RETRY_401,
 WAZAP_RETENTION, WAZAP_PRE_MIGRATION_BACKUP.
 An optional <data-dir>/.env is loaded if present.`;
 

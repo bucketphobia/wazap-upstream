@@ -14,7 +14,7 @@ breaking.
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
 | Storage | forward-only migrations, released migrations frozen, the pre-migration copy | new schema versions | the SQLite schema as a format for other tools |
-| Settings | the 20 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
+| Settings | the 24 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
 
 ## 1. The MCP surface
 
@@ -149,7 +149,11 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
   `timestamp`, `phone`, `contact_id`. `kind` is `text`, `audio`, `image` or
   `other` — a bucket, so a new message type falls into `other` rather than
   adding a value. `text` is cut at 2000 characters ending in an ellipsis, with
-  `truncated` true. `timestamp` is the message's own instant, in UTC.
+  `truncated` true. `timestamp` is the message's own instant, in UTC. When
+  `WAZAP_WEBHOOK_COALESCE` groups more than one message into the POST, those
+  fields name the latest message and the body also carries `count`,
+  `message_ids`, `texts`, `first_ts` and `first_timestamp`. One message is
+  the same body as before.
 - Connection-event fields: `event`, `account_id`, `status` and `timestamp`,
   where `status` is `linked`, `disconnected` or `expired`, and `health` with
   its `state`, `until` and `reason`, as `get_status` says them. A health
@@ -158,10 +162,14 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
   produces no events at all.
 
 Guarded by: `test/webhook.test.mjs`, `test/webhook-auth.test.mjs`,
-`test/integration-contract.test.mjs`. Delivery is
+`test/webhook-filter.test.mjs`, `test/integration-contract.test.mjs`. Delivery is
 at-least-once and ordered within a chat, retried on 408, 425, 429 and 5xx, and
+on 401 when `WAZAP_WEBHOOK_RETRY_401` is on, and
 given up on after 24 hours (`test/webhook-outbox.test.mjs`); the retry schedule
-itself is current behaviour, not a promise.
+itself is current behaviour, not a promise. With neither `WAZAP_WEBHOOK_CHATS`
+nor `WAZAP_WEBHOOK_TAG` set, every chat is posted. With either set, only a
+listed chat, or a direct chat whose contact carries the tag, is posted, and a
+contact tagged `#private` is not.
 
 ## 5. Data on disk
 
@@ -198,14 +206,15 @@ code or the tests supports a third-party reader.
 
 ## 6. Settings
 
-Stable: the 20 `WAZAP_*` listed in `.env.example` and in the settings table of
+Stable: the 24 `WAZAP_*` listed in `.env.example` and in the settings table of
 `docs/settings.md` — `WAZAP_DATA_DIR`, `WAZAP_READ_ONLY`, `WAZAP_PERSIST_HISTORY`,
 `WAZAP_HOST`, `WAZAP_PORT`, `WAZAP_READ_TOKEN`, `WAZAP_WRITE_TOKEN`,
 `WAZAP_PUBLIC_URL`, `WAZAP_OAUTH_PASSWORD`, `WAZAP_TRUST_PROXY`,
 `WAZAP_TRANSCRIBE`, `WAZAP_TRANSCRIBE_API_KEY`, `WAZAP_RECALL`,
 `WAZAP_WEBHOOK`, `WAZAP_WEBHOOK_URL`, `WAZAP_WEBHOOK_SECRET`,
-`WAZAP_WEBHOOK_EVENTS`, `WAZAP_WEBHOOK_AUTH`, `WAZAP_RETENTION`,
-`WAZAP_PRE_MIGRATION_BACKUP`.
+`WAZAP_WEBHOOK_EVENTS`, `WAZAP_WEBHOOK_AUTH`, `WAZAP_WEBHOOK_CHATS`,
+`WAZAP_WEBHOOK_TAG`, `WAZAP_WEBHOOK_COALESCE`, `WAZAP_WEBHOOK_RETRY_401`,
+`WAZAP_RETENTION`, `WAZAP_PRE_MIGRATION_BACKUP`.
 Any other `WAZAP_*` a running wazap reads is a development knob, documented in
 `AGENTS.md` and nowhere else; it may change or go at any time.
 

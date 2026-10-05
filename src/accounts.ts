@@ -4,7 +4,7 @@ import { readLinkedAccount } from "./auth-state.js";
 import { accountPaths, paths, type AccountPaths, type Config } from "./config.js";
 import { WazapError, asWazapError } from "./errors.js";
 import { normalizeSendRule } from "./send-guard.js";
-import { parseWebhookAuth, parseWebhookEvents } from "./webhook.js";
+import { parseWebhookAuth, parseWebhookChats, parseWebhookEvents, requireCoalesceSeconds, requireWebhookTag } from "./webhook.js";
 
 export const DEFAULT_ACCOUNT_ID = "default";
 export const ACCOUNT_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
@@ -21,6 +21,18 @@ export interface AccountRecord {
   webhook_events?: string;
   /** The header the receiver expects on top of the signature, as `WAZAP_WEBHOOK_AUTH` takes it. */
   webhook_auth?: string;
+  /**
+   * Present, even empty, this account's chat allowlist replaces the global one.
+   * Together with `webhook_tag` it is the whole filter: neither half is inherited
+   * once either is set.
+   */
+  webhook_chats?: string[];
+  /** The contact tag whose direct chats are posted. Set with or without `webhook_chats`. */
+  webhook_tag?: string;
+  /** Seconds a chat's messages wait to share one POST. `0` turns that wait off for this account. */
+  webhook_coalesce?: number;
+  /** Retry a 401 instead of failing the event at once. */
+  webhook_retry_401?: boolean;
   /** When present — even empty — only these recipients may be sent to. */
   send_allow?: string[];
   /** Refused no matter what send_allow says. Entries are chat ids or phone numbers. */
@@ -162,6 +174,7 @@ function parseAccountRecord(value: unknown, file: string): AccountRecord {
   return {
     ...record,
     ...webhookFields(value.id, value.webhook_url, value.webhook_secret, value.webhook_events, ` in ${file}`, FIX_POLICY, value.webhook_auth),
+    ...webhookPolicyFields(value.id, value, ` in ${file}`),
   };
 }
 
@@ -233,6 +246,60 @@ function webhookFields(
       throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_auth: ${asWazapError(err).message}`, fix);
     }
     fields.webhook_auth = auth.trim();
+  }
+  return fields;
+}
+
+/** The allowlist, the burst window and the 401 retry. A writer cannot persist what load refuses. */
+function webhookPolicyFields(
+  id: string,
+  value: Record<string, unknown>,
+  where = ""
+): Pick<AccountRecord, "webhook_chats" | "webhook_tag" | "webhook_coalesce" | "webhook_retry_401"> {
+  const fields: Pick<AccountRecord, "webhook_chats" | "webhook_tag" | "webhook_coalesce" | "webhook_retry_401"> = {};
+  if (value.webhook_chats !== undefined) {
+    if (!Array.isArray(value.webhook_chats) || value.webhook_chats.some((entry) => typeof entry !== "string")) {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_chats.`, FIX_POLICY);
+    }
+    try {
+      fields.webhook_chats = parseWebhookChats(value.webhook_chats.join(","));
+    } catch (err) {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_chats: ${asWazapError(err).message}`, FIX_POLICY);
+    }
+  }
+  if (value.webhook_tag !== undefined) {
+    if (typeof value.webhook_tag !== "string" || value.webhook_tag.trim() === "") {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_tag.`, FIX_POLICY);
+    }
+    try {
+      fields.webhook_tag = requireWebhookTag(value.webhook_tag);
+    } catch (err) {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_tag: ${asWazapError(err).message}`, FIX_POLICY);
+    }
+  }
+  if (value.webhook_coalesce !== undefined) {
+    if (typeof value.webhook_coalesce !== "number" || !Number.isInteger(value.webhook_coalesce)) {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_coalesce.`, FIX_POLICY);
+    }
+    if (value.webhook_coalesce !== 0) {
+      try {
+        fields.webhook_coalesce = requireCoalesceSeconds(value.webhook_coalesce);
+      } catch (err) {
+        throw new WazapError(
+          "INVALID_ID",
+          `Account "${id}"${where} has a bad webhook_coalesce: ${asWazapError(err).message}`,
+          FIX_POLICY
+        );
+      }
+    } else {
+      fields.webhook_coalesce = 0;
+    }
+  }
+  if (value.webhook_retry_401 !== undefined) {
+    if (typeof value.webhook_retry_401 !== "boolean") {
+      throw new WazapError("INVALID_ID", `Account "${id}"${where} has a bad webhook_retry_401.`, FIX_POLICY);
+    }
+    fields.webhook_retry_401 = value.webhook_retry_401;
   }
   return fields;
 }
@@ -417,6 +484,58 @@ export class AccountRegistry {
     );
   }
 
+  /**
+   * The account's chat allowlist. `null` drops it. An empty list is kept, and
+   * with no tag it posts nothing. Setting chats or the tag replaces the global
+   * filter as a whole.
+   */
+  setWebhookChats(id: string, chats: string[] | null): void {
+    this.commit(
+      this.withAccount(id, (account) => {
+        const next = { ...account };
+        if (chats === null) delete next.webhook_chats;
+        else next.webhook_chats = parseWebhookChats(chats.join(","));
+        return next;
+      })
+    );
+  }
+
+  /** `null` drops the account's tag so only its chat list, if it has one, remains. */
+  setWebhookTag(id: string, tag: string | null): void {
+    this.commit(
+      this.withAccount(id, (account) => {
+        const next = { ...account };
+        if (tag === null) delete next.webhook_tag;
+        else next.webhook_tag = requireWebhookTag(tag);
+        return next;
+      })
+    );
+  }
+
+  /** `null` drops the override. `0` forces the window off even when the global one is on. */
+  setWebhookCoalesce(id: string, seconds: number | null): void {
+    this.commit(
+      this.withAccount(id, (account) => {
+        const next = { ...account };
+        if (seconds === null) delete next.webhook_coalesce;
+        else next.webhook_coalesce = seconds === 0 ? 0 : requireCoalesceSeconds(seconds);
+        return next;
+      })
+    );
+  }
+
+  /** `null` drops the override so the global flag applies. */
+  setWebhookRetry401(id: string, enabled: boolean | null): void {
+    this.commit(
+      this.withAccount(id, (account) => {
+        const next = { ...account };
+        if (enabled === null) delete next.webhook_retry_401;
+        else next.webhook_retry_401 = enabled;
+        return next;
+      })
+    );
+  }
+
   /** Drop the per-account override so the account follows the global webhook again. */
   clearWebhook(id: string): void {
     this.commit(
@@ -426,6 +545,10 @@ export class AccountRegistry {
         delete next.webhook_secret;
         delete next.webhook_events;
         delete next.webhook_auth;
+        delete next.webhook_chats;
+        delete next.webhook_tag;
+        delete next.webhook_coalesce;
+        delete next.webhook_retry_401;
         return next;
       })
     );

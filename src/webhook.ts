@@ -1,17 +1,19 @@
 /**
  * W1 outbound webhook: three live events (`message_received`, `message_sent`
  * and `connection`), of which only `message_received` is posted unless
- * `WAZAP_WEBHOOK_EVENTS` asks for more. Global URL, secret and event list live
- * in `.env`; an account may override any of the three. This module is the
- * settings, the payloads and a single POST; the durable queue that decides
- * when to post, and retries, is src/webhook-outbox.ts. Nothing here throws into
- * the WhatsApp or MCP path.
+ * `WAZAP_WEBHOOK_EVENTS` asks for more. Global URL, secret, event list, chat
+ * allowlist, coalescing window and the optional 401 retry live in `.env`; an
+ * account may override any of them. This module is the settings, the payloads
+ * and a single POST; the durable queue that decides when to post, and retries,
+ * is src/webhook-outbox.ts. Who a message may be posted for is
+ * src/webhook-filter.ts. Nothing here throws into the WhatsApp or MCP path.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { WAZAP_VERSION } from "./config.js";
 import { WazapError, asWazapError } from "./errors.js";
 import { logError } from "./logger.js";
+import { normalizeSendRule } from "./send-guard.js";
 import { redact, stripPasted } from "./transcribe/index.js";
 import { discardResponse } from "./http-response.js";
 import { withCode } from "./error-code.js";
@@ -36,6 +38,16 @@ export const WEBHOOK_EVENTS_DEFAULT: readonly WebhookEvent[] = ["message_receive
 export const WEBHOOK_EVENTS_FIX = `set WAZAP_WEBHOOK_EVENTS to all or a comma-separated list of ${WEBHOOK_EVENTS.join(", ")}`;
 export const WEBHOOK_AUTH_FIX =
   "run `wazap config webhook auth` and paste what the receiver expects: `Bearer <token>` for Authorization, or `<Header-Name>: <value>`";
+/** A burst waits at most this long after its first message, however fast the chat keeps going. */
+export const WEBHOOK_COALESCE_MAX_S = 300;
+/** The same limit `remember` stores a tag under. A longer one could never match. */
+const WEBHOOK_TAG_MAX = 40;
+const WEBHOOK_CHATS_MAX = 200;
+export const WEBHOOK_CHATS_FIX =
+  'set WAZAP_WEBHOOK_CHATS to comma-separated chat ids or numbers, `none` for an empty list, or run `wazap config webhook chats off`';
+export const WEBHOOK_TAG_FIX = 'set WAZAP_WEBHOOK_TAG to a short label like "autopeloc", or run `wazap config webhook tag off`';
+export const WEBHOOK_COALESCE_FIX = `set WAZAP_WEBHOOK_COALESCE to a whole number of seconds from 1 to ${WEBHOOK_COALESCE_MAX_S}, or off`;
+export const WEBHOOK_RETRY_401_FIX = "set WAZAP_WEBHOOK_RETRY_401 to on or off";
 
 /** Headers wazap sets itself, and the ones fetch owns: the auth setting cannot replace them. */
 const RESERVED_HEADERS = new Set([
@@ -65,17 +77,53 @@ export interface WebhookAuth {
   value: string;
 }
 
+/**
+ * Which chats a message event may name. Absent (`null` on the ready settings)
+ * posts every chat, as before. Present posts a chat on the list or, for a
+ * direct chat, one whose contact carries `tag`. An empty list and no tag posts
+ * nothing. Groups match the list only.
+ */
+export interface WebhookFilter {
+  chats: readonly string[];
+  tag: string | null;
+}
+
+/** How long a chat's messages wait to share one POST, and the latest that wait may run. */
+export interface WebhookCoalesce {
+  windowMs: number;
+  capMs: number;
+}
+
 export type WebhookSettings =
   | { kind: "off" }
-  | { kind: "ready"; url: string; secret: string; events: readonly WebhookEvent[]; auth?: WebhookAuth }
+  | {
+      kind: "ready";
+      url: string;
+      secret: string;
+      events: readonly WebhookEvent[];
+      auth?: WebhookAuth;
+      /** Null posts every chat. */
+      filter: WebhookFilter | null;
+      /** Null posts one event per message. */
+      coalesce: WebhookCoalesce | null;
+      /** A 401 is retried on the same schedule as a 5xx. Off unless asked. */
+      retryUnauthorized: boolean;
+    }
   | { kind: "invalid"; detail: string; fix: string };
 
-/** Per-account values win over `WAZAP_WEBHOOK_URL`, `_SECRET`, `_EVENTS` and `_AUTH`. */
+/**
+ * Per-account values win over the global ones. `filter` set, even empty,
+ * replaces the global allowlist rather than merging with it; left unset, the
+ * global allowlist applies. `coalesce` null forces the window off.
+ */
 export interface WebhookOverride {
   url?: string;
   secret?: string;
   events?: string;
   auth?: string;
+  filter?: WebhookFilter | null;
+  coalesce?: number | null;
+  retryUnauthorized?: boolean;
 }
 
 /** The account the payload names, and whose override the sink prefers. */
@@ -86,6 +134,13 @@ export interface WebhookAccount {
   webhook_secret?: string;
   webhook_events?: string;
   webhook_auth?: string;
+  /** Present, even empty, replaces the global chat list. */
+  webhook_chats?: readonly string[];
+  /** Present replaces the global tag. The chats and the tag together are the account's filter. */
+  webhook_tag?: string;
+  /** Seconds. `0` forces coalescing off for this account. */
+  webhook_coalesce?: number;
+  webhook_retry_401?: boolean;
 }
 
 export type WebhookReady = Extract<WebhookSettings, { kind: "ready" }>;
@@ -109,6 +164,17 @@ export interface WebhookMessagePayload {
   message_id: string;
   account_id: string;
   account_name: string;
+  /**
+   * Set only when this POST carries more than one message from the chat.
+   * The fields above stay the latest message, so a reader that ignores what
+   * it does not know still sees that one.
+   */
+  count?: number;
+  message_ids?: string[];
+  texts?: string[];
+  /** The first message's `ts` and `timestamp`. */
+  first_ts?: string;
+  first_timestamp?: string;
 }
 
 /** What WhatsApp says about the account itself, as get_status's `health` says it. */
@@ -214,11 +280,133 @@ export function readWebhookSettings(
       secret,
       events: parseWebhookEvents(eventsRaw),
       ...(auth === null ? {} : { auth }),
+      filter: resolveWebhookFilter(env, override),
+      coalesce: resolveWebhookCoalesce(env, override),
+      retryUnauthorized: resolveWebhookRetry401(env, override),
     };
   } catch (err) {
     const failure = asWazapError(err);
     return { kind: "invalid", detail: failure.message, fix: failure.fix ?? WEBHOOK_URL_FIX };
   }
+}
+
+function resolveWebhookFilter(env: NodeJS.ProcessEnv, override: WebhookOverride): WebhookFilter | null {
+  if (override.filter !== undefined) return override.filter;
+  const chatsSet = Object.prototype.hasOwnProperty.call(env, "WAZAP_WEBHOOK_CHATS");
+  const tagRaw = stripPasted(env.WAZAP_WEBHOOK_TAG ?? "");
+  const tag = tagRaw === "" ? null : requireWebhookTag(tagRaw);
+  if (!chatsSet && tag === null) return null;
+  return { chats: chatsSet ? parseWebhookChats(stripPasted(env.WAZAP_WEBHOOK_CHATS ?? "")) : [], tag };
+}
+
+function resolveWebhookCoalesce(env: NodeJS.ProcessEnv, override: WebhookOverride): WebhookCoalesce | null {
+  if (override.coalesce !== undefined) {
+    if (override.coalesce === null || override.coalesce === 0) return null;
+    return coalesceOf(requireCoalesceSeconds(override.coalesce));
+  }
+  if (!Object.prototype.hasOwnProperty.call(env, "WAZAP_WEBHOOK_COALESCE")) return null;
+  const raw = stripPasted(env.WAZAP_WEBHOOK_COALESCE ?? "");
+  if (raw === "" || OFF.has(raw.toLowerCase())) return null;
+  return coalesceOf(requireCoalesceSeconds(raw));
+}
+
+function resolveWebhookRetry401(env: NodeJS.ProcessEnv, override: WebhookOverride): boolean {
+  if (override.retryUnauthorized !== undefined) return override.retryUnauthorized;
+  const raw = stripPasted(env.WAZAP_WEBHOOK_RETRY_401 ?? "");
+  if (raw === "") return false;
+  const flag = raw.toLowerCase();
+  if (ON.has(flag)) return true;
+  if (OFF.has(flag)) return false;
+  throw new WazapError("INVALID_ID", `Unknown webhook retry setting "${raw}".`, WEBHOOK_RETRY_401_FIX);
+}
+
+/**
+ * Chat ids and phone numbers, comma-separated, as `WAZAP_WEBHOOK_CHATS` or
+ * `wazap config webhook chats` takes them. An empty string is an empty list.
+ * A bad entry fails the webhook rather than being skipped.
+ */
+export function parseWebhookChats(raw: string): string[] {
+  const tokens = raw
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token !== "");
+  if (tokens.length > WEBHOOK_CHATS_MAX) {
+    throw new WazapError("INVALID_ID", `A webhook allowlist holds at most ${WEBHOOK_CHATS_MAX} chats.`, WEBHOOK_CHATS_FIX);
+  }
+  const chats: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    let normalized: string;
+    try {
+      normalized = normalizeSendRule(token);
+    } catch (err) {
+      throw new WazapError("INVALID_ID", asWazapError(err).message, WEBHOOK_CHATS_FIX);
+    }
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    chats.push(normalized);
+  }
+  return chats;
+}
+
+/** The same spelling `remember` stores: lowercase, no leading "#", spaces as hyphens. */
+export function normalizeWebhookTag(raw: string): string {
+  return raw.trim().toLowerCase().replace(/^#+/, "").replace(/\s+/g, "-");
+}
+
+export function requireWebhookTag(raw: string): string {
+  const tag = normalizeWebhookTag(raw);
+  if (tag === "" || tag.length > WEBHOOK_TAG_MAX) {
+    throw new WazapError("INVALID_ID", `"${raw}" is not a usable webhook tag.`, WEBHOOK_TAG_FIX);
+  }
+  return tag;
+}
+
+export function requireCoalesceSeconds(raw: string | number): number {
+  const seconds = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > WEBHOOK_COALESCE_MAX_S) {
+    throw new WazapError(
+      "INVALID_ID",
+      `Webhook coalescing must be a whole number of seconds from 1 to ${WEBHOOK_COALESCE_MAX_S}.`,
+      WEBHOOK_COALESCE_FIX
+    );
+  }
+  return seconds;
+}
+
+/** The window and the cap for a coalescing setting of `seconds`. The cap is twice the window, and never past five minutes. */
+export function coalesceOf(seconds: number): WebhookCoalesce {
+  const windowMs = seconds * 1000;
+  return { windowMs, capMs: Math.min(windowMs * 2, WEBHOOK_COALESCE_MAX_S * 1000) };
+}
+
+/**
+ * What `wazap config` and status say about the allowlist. Null when none is
+ * configured. `empty` posts no message events.
+ */
+export function describeWebhookFilter(filter: WebhookFilter | null): string | null {
+  if (filter === null) return null;
+  if (filter.chats.length === 0 && filter.tag === null) return "empty";
+  const parts: string[] = [];
+  if (filter.tag !== null) parts.push(`tag ${filter.tag}`);
+  if (filter.chats.length > 0) {
+    const n = filter.chats.length;
+    parts.push(`${n} ${n === 1 ? "chat" : "chats"}`);
+  }
+  return parts.join(", ");
+}
+
+/** The parenthetical `on (host)` doctor and status use, with the filter and the window when they are set. */
+export function webhookReadyDetail(settings: WebhookReady): string {
+  const host = new URL(settings.url).host;
+  const notes: string[] = [];
+  const filter = describeWebhookFilter(settings.filter);
+  if (filter !== null) notes.push(filter === "empty" ? "filter empty" : `filter ${filter}`);
+  if (settings.coalesce !== null) {
+    notes.push(`coalesce ${settings.coalesce.windowMs / 1000}s, by ${settings.coalesce.capMs / 1000}s`);
+  }
+  if (settings.retryUnauthorized) notes.push("retry 401");
+  return notes.length === 0 ? `on (${host})` : `on (${host}); ${notes.join("; ")}`;
 }
 
 /**
@@ -425,6 +613,28 @@ export function asWebhookPayload({ event, view, account, isSelfChat }: WebhookMe
   };
 }
 
+/**
+ * Several message payloads become one. The singular fields stay the latest
+ * message. The added fields name the whole burst, oldest first. One payload
+ * is returned unchanged, so a chat that only said one thing looks as it did
+ * before coalescing existed.
+ */
+export function coalescePayloads(payloads: readonly WebhookPayload[]): WebhookPayload {
+  if (payloads.length <= 1) return payloads[0]!;
+  const messages = payloads.filter((payload): payload is WebhookMessagePayload => payload.event !== "connection");
+  if (messages.length !== payloads.length) return payloads[payloads.length - 1]!;
+  const first = messages[0]!;
+  const last = messages[messages.length - 1]!;
+  return {
+    ...last,
+    count: messages.length,
+    message_ids: messages.map((payload) => payload.message_id),
+    texts: messages.map((payload) => payload.text),
+    first_ts: first.ts,
+    first_timestamp: first.timestamp,
+  };
+}
+
 export function asConnectionPayload({ status, account, at, health }: WebhookConnectionEvent): WebhookConnectionPayload {
   return {
     event: "connection",
@@ -444,10 +654,17 @@ export function webhookInfo(
   switch (settings.kind) {
     case "off":
       return { enabled: false, valid: true, last_error: null };
-    case "ready":
+    case "ready": {
+      const filter = describeWebhookFilter(settings.filter);
+      const extra = {
+        ...(filter === null ? {} : { allowlist: filter }),
+        ...(settings.coalesce === null ? {} : { coalesce_seconds: settings.coalesce.windowMs / 1000 }),
+        ...(settings.retryUnauthorized ? { retry_unauthorized: true as const } : {}),
+      };
       return delivery === undefined
-        ? { enabled: true, valid: true, last_error: lastError }
-        : { enabled: true, valid: true, last_error: lastError, delivery };
+        ? { enabled: true, valid: true, last_error: lastError, ...extra }
+        : { enabled: true, valid: true, last_error: lastError, delivery, ...extra };
+    }
     case "invalid":
       return { enabled: true, valid: false, last_error: settings.detail };
     default: {
@@ -478,12 +695,20 @@ export class WebhookSink {
   }
 
   settings(): WebhookSettings {
-    return readWebhookSettings(this.env, {
-      url: this.account?.webhook_url,
-      secret: this.account?.webhook_secret,
-      events: this.account?.webhook_events,
-      auth: this.account?.webhook_auth,
-    });
+    const account = this.account;
+    const override: WebhookOverride = {
+      url: account?.webhook_url,
+      secret: account?.webhook_secret,
+      events: account?.webhook_events,
+      auth: account?.webhook_auth,
+    };
+    // Chats and tag are one filter: setting either replaces the global list and tag together.
+    if (account?.webhook_chats !== undefined || account?.webhook_tag !== undefined) {
+      override.filter = { chats: account.webhook_chats ?? [], tag: account.webhook_tag ?? null };
+    }
+    if (account?.webhook_coalesce !== undefined) override.coalesce = account.webhook_coalesce;
+    if (account?.webhook_retry_401 !== undefined) override.retryUnauthorized = account.webhook_retry_401;
+    return readWebhookSettings(this.env, override);
   }
 
   /** The status block; `delivery` is what the account database says about the outbox. */
@@ -564,7 +789,9 @@ export class WebhookSink {
       await discardResponse(response);
       if (response.ok) return { ok: true, status: response.status };
       const host = hostOf(settings.url);
-      if (retryableStatus(response.status)) {
+      // A 401 is a refusal unless the operator asked for it to be retried. Cursor's
+      // receiver has answered 401 for a moment and then accepted the same body.
+      if (retryableStatus(response.status) || (response.status === 401 && settings.retryUnauthorized)) {
         return failAttempt(response.status, `HTTP ${response.status} from ${host}`, settings, WEBHOOK_REACH_FIX, true);
       }
       const refused = refusal(response.status);

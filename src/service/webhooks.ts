@@ -9,6 +9,7 @@
 import type { WAMessage } from "baileys";
 import type { AccountRecord } from "../accounts.js";
 import type { EventRecord, StoredMessage } from "../db/index.js";
+import { webhookAllowsMessage } from "../webhook-filter.js";
 import { logError } from "../logger.js";
 import { isUserMessage, messageIdFor } from "../messages.js";
 import {
@@ -131,6 +132,10 @@ export class AccountWebhooks {
       }
       const message = db.messages.get(sid);
       if (message === null || db.events.hasMessageEvent(message.id, event)) continue;
+      // A filter is read here and again at post time. Skipping the enqueue keeps
+      // a chat that was never allowed out of the outbox; the second check is
+      // what cancels one that was allowed and then removed.
+      if (!webhookAllowsMessage(db, settings.filter, message)) continue;
       db.events.enqueue({
         kind: event,
         lane: chatLane(message.chatId),
@@ -179,6 +184,15 @@ export class AccountWebhooks {
    * was queued goes with it; a connection event as it was queued, under the
    * account's current name.
    */
+  /** False when a configured allowlist does not want this message, `#private` included. */
+  allowsMessage(message: StoredMessage): boolean {
+    const settings = this.host.webhook().settings();
+    if (settings.kind !== "ready") return true;
+    const db = this.storage.readyDb();
+    if (db === null) return true;
+    return webhookAllowsMessage(db, settings.filter, message);
+  }
+
   webhookPayload(event: EventRecord, message: StoredMessage | null): WebhookPayload {
     const stored = JSON.parse(event.payload) as Record<string, unknown>;
     const account = this.accountRecord;

@@ -93,7 +93,18 @@ const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-
 const DIRECT_CHAT = /^(\d{8,15})@s\.whatsapp\.net$/;
 /** The events the integration routes on; wazap posts the last two only when asked. */
 const INTEGRATION_EVENTS = "message_received,message_sent,connection";
-const WEBHOOK_ENV = ["WAZAP_WEBHOOK", "WAZAP_WEBHOOK_URL", "WAZAP_WEBHOOK_SECRET", "WAZAP_WEBHOOK_EVENTS", "WAZAP_TRANSCRIBE"];
+const WEBHOOK_ENV = [
+  "WAZAP_WEBHOOK",
+  "WAZAP_WEBHOOK_URL",
+  "WAZAP_WEBHOOK_SECRET",
+  "WAZAP_WEBHOOK_EVENTS",
+  "WAZAP_WEBHOOK_AUTH",
+  "WAZAP_WEBHOOK_CHATS",
+  "WAZAP_WEBHOOK_TAG",
+  "WAZAP_WEBHOOK_COALESCE",
+  "WAZAP_WEBHOOK_RETRY_401",
+  "WAZAP_TRANSCRIBE",
+];
 
 // ---------------------------------------------------------------------------
 // The integration's side of the wire, reduced to what wazap has to satisfy.

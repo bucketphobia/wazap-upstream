@@ -178,6 +178,9 @@ function webhookStatusLine(webhook: StatusInfo["webhook"]): string {
   if (!webhook.enabled) return "- **webhook**: off";
   if (!webhook.valid) return `- **webhook**: invalid${webhook.last_error ? ` · ${webhook.last_error}` : ""}`;
   const parts = ["on"];
+  if (webhook.allowlist !== undefined) parts.push(`allowlist: ${webhook.allowlist}`);
+  if (webhook.coalesce_seconds !== undefined) parts.push(`coalesce ${webhook.coalesce_seconds}s`);
+  if (webhook.retry_unauthorized === true) parts.push("retry 401");
   const delivery = webhook.delivery;
   if (delivery !== undefined && delivery.delivered + delivery.failed + delivery.cancelled + delivery.pending + delivery.dropped > 0) {
     const counts = [`${delivery.delivered} delivered`, `${delivery.failed} failed`, `${delivery.cancelled} cancelled`, `${delivery.pending} pending`];

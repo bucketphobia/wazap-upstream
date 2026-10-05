@@ -818,3 +818,193 @@ test("an event whose POST a crash cut short is posted again: once to a receiver 
   assert.equal(row.state, "delivered");
   assert.equal(row.attempts, 2);
 });
+
+function coalesceEnv(seconds) {
+  return { ...readyEnv(), WAZAP_WEBHOOK_COALESCE: String(seconds) };
+}
+
+/** A payload close to a real message event, so a burst can carry the added fields. */
+function burstPayload(event, message) {
+  if (message === null) return JSON.parse(event.payload);
+  return {
+    event: event.kind,
+    message_id: message.sid,
+    text: message.text,
+    ts: "2026-09-01T13:00:00+03:00",
+    timestamp: new Date(message.ts).toISOString(),
+    chat_id: message.chatJid,
+  };
+}
+
+test("with no coalesce window each message is its own POST and the body has no burst fields", async (t) => {
+  const h = harness(t, { payload: burstPayload });
+  messageEvent(h, "A", "one");
+  messageEvent(h, "B", "two");
+  await h.run();
+  assert.equal(h.post.bodies.length, 2);
+  assert.equal(h.post.bodies[0].count, undefined);
+  assert.equal(h.post.bodies[0].message_ids, undefined);
+  assert.equal(h.post.bodies[1].message_id, sid(false, PEER, "B"));
+});
+
+test("a quiet window posts one chat's messages as one body, and another chat is not held", async (t) => {
+  const h = harness(t, { env: coalesceEnv(90), payload: burstPayload });
+  const start = h.clock.now;
+  messageEvent(h, "A", "one", { ts: start });
+  messageEvent(h, "B", "two", { ts: start + 1000 });
+  const other = messageEvent(h, "G", "group", { chat: GROUP, ts: start });
+  await h.run();
+  assert.equal(h.post.bodies.length, 0, "90s has not passed");
+
+  h.clock.now = start + 89_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 0);
+
+  h.clock.now = start + 90_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 2);
+  const body = h.post.bodies[0];
+  const alone = h.post.bodies[1];
+  assert.equal(body.count, 2);
+  assert.deepEqual(body.message_ids, [sid(false, PEER, "A"), sid(false, PEER, "B")]);
+  assert.deepEqual(body.texts, ["one", "two"]);
+  assert.equal(body.message_id, sid(false, PEER, "B"), "the fields that already existed name the latest message");
+  assert.equal(body.text, "two");
+  assert.equal(body.first_ts, "2026-09-01T13:00:00+03:00");
+  assert.equal(body.first_timestamp, new Date(start).toISOString());
+  assert.equal(alone.count, undefined, "a single message stays the old shape");
+  assert.equal(alone.message_id, other.sid);
+  assert.deepEqual(
+    [state(h, 1).state, state(h, 2).state, state(h, 3).state],
+    ["delivered", "delivered", "delivered"]
+  );
+});
+
+test("one chat's quiet window does not hold another chat", async (t) => {
+  const h = harness(t, { env: coalesceEnv(90), payload: burstPayload });
+  const start = h.clock.now;
+  messageEvent(h, "A", "one");
+  const other = messageEvent(h, "G", "elsewhere", { chat: GROUP });
+  h.clock.now = start + 80_000;
+  messageEvent(h, "B", "two");
+  h.clock.now = start + 90_000;
+  await h.run();
+  assert.deepEqual(
+    h.post.bodies.map((body) => body.message_id),
+    [other.sid],
+    "the other chat's window ended; this chat is still inside the quiet period the second message started"
+  );
+  assert.equal(state(h, 1).state, "pending");
+  h.clock.now = start + 170_000;
+  await h.run();
+  assert.deepEqual(h.post.bodies[1].message_ids, [sid(false, PEER, "A"), sid(false, PEER, "B")]);
+});
+
+test("a new message extends the quiet window, and the cap still delivers a conversation that does not pause", async (t) => {
+  const h = harness(t, { env: coalesceEnv(90), payload: burstPayload });
+  const start = h.clock.now;
+  messageEvent(h, "A", "one");
+  h.clock.now = start + 80_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 0);
+  messageEvent(h, "B", "two");
+  h.clock.now = start + 169_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 0, "the second message moved the quiet deadline to 170s");
+  h.clock.now = start + 170_000;
+  await h.run();
+  assert.deepEqual(h.post.bodies[0].texts, ["one", "two"]);
+
+  const later = h.clock.now;
+  for (let i = 0; i < 4; i++) {
+    h.clock.now = later + i * 50_000;
+    messageEvent(h, `C${i}`, `line ${i}`);
+  }
+  h.clock.now = later + 170_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 1, "still inside the 180s cap");
+  h.clock.now = later + 180_000;
+  await h.run();
+  assert.equal(h.post.bodies.length, 2);
+  assert.equal(h.post.bodies[1].count, 4);
+  assert.deepEqual(
+    h.post.bodies[1].message_ids,
+    ["C0", "C1", "C2", "C3"].map((key) => sid(false, PEER, key))
+  );
+});
+
+test("a burst that already failed retries as that burst, and a later message waits for its own window", async (t) => {
+  const post = answering(500, 204, 204);
+  const h = harness(t, { env: coalesceEnv(1), post, payload: burstPayload });
+  const start = h.clock.now;
+  messageEvent(h, "A", "one");
+  messageEvent(h, "B", "two");
+  h.clock.now = start + 1000;
+  await h.run();
+  assert.deepEqual(h.post.bodies[0].message_ids, [sid(false, PEER, "A"), sid(false, PEER, "B")]);
+  assert.equal(state(h, 1).state, "pending");
+  h.clock.now = state(h, 1).nextAttemptAt - 500;
+  messageEvent(h, "C", "three");
+  h.clock.now = state(h, 1).nextAttemptAt;
+  await h.run();
+  assert.deepEqual(h.post.bodies[1].message_ids, [sid(false, PEER, "A"), sid(false, PEER, "B")]);
+  assert.equal(state(h, 3).state, "pending", "the message after the failed POST is not pulled into the retry");
+  h.clock.now += 500;
+  await h.run();
+  assert.equal(h.post.bodies[2].message_id, sid(false, PEER, "C"));
+  assert.equal(h.post.bodies[2].count, undefined);
+});
+
+test("a burst still open at restart is posted once, after the window, by the next dispatcher", async (t) => {
+  const { db, clock } = openTemp();
+  const post = answering(204);
+  const env = coalesceEnv(1);
+  const sink = new WebhookSink(env, { post });
+  const host = {
+    db: () => (db.isOpen ? db : null),
+    sink: () => sink,
+    payload: burstPayload,
+    awaitingTranscript: () => false,
+  };
+  const h = { db, clock };
+  const first = new WebhookOutbox(host, { now: () => clock.now });
+  let second = null;
+  t.after(async () => {
+    await second?.stop();
+    await first.stop();
+    if (db.isOpen) db.close();
+  });
+  const start = clock.now;
+  messageEvent(h, "A", "one", { ts: start });
+  messageEvent(h, "B", "two", { ts: start });
+  first.kick();
+  await first.idle();
+  assert.equal(post.bodies.length, 0);
+  await first.stop();
+  second = new WebhookOutbox(host, { now: () => clock.now });
+  clock.now = start + 1000;
+  second.kick();
+  await second.idle();
+  assert.equal(post.bodies.length, 1);
+  assert.deepEqual(post.bodies[0].message_ids, [sid(false, PEER, "A"), sid(false, PEER, "B")]);
+  assert.equal(post.bodies[0].first_timestamp, new Date(start).toISOString());
+});
+
+test("a 401 is retried when the setting says so, and fails at once when it does not", async (t) => {
+  const refused = harness(t, { post: answering(401) });
+  const seq = messageEvent(refused, "NO").seq;
+  await refused.run();
+  assert.equal(state(refused, seq).state, "failed");
+  assert.equal(state(refused, seq).attempts, 1);
+
+  const post = answering(401, 204);
+  const retried = harness(t, { env: { ...readyEnv(), WAZAP_WEBHOOK_RETRY_401: "on" }, post });
+  const again = messageEvent(retried, "YES").seq;
+  await retried.run();
+  assert.equal(state(retried, again).state, "pending");
+  assert.match(state(retried, again).lastError, /^HTTP 401 from /);
+  retried.clock.now = state(retried, again).nextAttemptAt;
+  await retried.run();
+  assert.equal(state(retried, again).state, "delivered");
+  assert.equal(post.bodies.length, 2);
+});

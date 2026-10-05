@@ -18,10 +18,17 @@
  * - Retries: a timeout, an unreachable host, 408, 425, 429 or 5xx is tried
  *   again after 1 s, 5 s, 30 s and 2 min, then every 5 min, and one last time
  *   24 h after the event was created; then it has failed. Any other 4xx fails
- *   at once. New traffic brings a waiting retry forward: an event queued, or a
- *   POST that succeeded, retries at once every event whose last attempt is at
- *   least 30 s old, so a receiver that came back hears everything within a
- *   POST or two instead of at its next slot.
+ *   at once, except a 401 when the account asked for those to be retried. New
+ *   traffic brings a waiting retry forward: an event queued, or a POST that
+ *   succeeded, retries at once every event whose last attempt is at least
+ *   30 s old, so a receiver that came back hears everything within a POST or
+ *   two instead of at its next slot.
+ * - An allowlist, when configured, cancels a pending message event whose chat
+ *   no longer matches before it is posted. `allows` on the host is that check.
+ * - Coalescing, when configured, holds a chat's not-yet-attempted events until
+ *   the chat has been quiet for the window, or the cap since the first of them,
+ *   and posts them as one body. A batch that has already been attempted retries
+ *   as that same batch; messages that arrive after it wait their own window.
  * - At least once: a POST is marked as started before it is sent, and a crash
  *   during it leaves the event to be sent again, once the claim is older than
  *   a POST can run. Receivers dedupe by message_id.
@@ -36,6 +43,8 @@ import type { WebhookDelivery } from "./wa-types.js";
 import {
   WEBHOOK_EVENTS,
   WEBHOOK_TIMEOUT_MS,
+  coalescePayloads,
+  type WebhookCoalesce,
   type WebhookPayload,
   type WebhookReady,
   type WebhookSink,
@@ -100,6 +109,12 @@ export interface OutboxHost {
   payload(event: EventRecord, message: StoredMessage | null): WebhookPayload;
   /** Whether a transcript of this message is still being made, which is what makes waiting for it worthwhile. */
   awaitingTranscript(message: StoredMessage): boolean;
+  /**
+   * False cancels a pending message event instead of posting it. Absent allows
+   * every event. The service passes the allowlist check, read at post time so
+   * a tag removed since the event was queued still keeps it back.
+   */
+  allows?(event: EventRecord, message: StoredMessage): boolean;
 }
 
 export interface OutboxOptions {
@@ -118,7 +133,7 @@ type Step =
   | { kind: "idle" }
   | { kind: "wait"; until: number }
   | { kind: "next" }
-  | { kind: "post"; event: EventRecord; payload: WebhookPayload; settings: WebhookReady };
+  | { kind: "post"; events: EventRecord[]; payload: WebhookPayload; settings: WebhookReady };
 
 const IDLE: Step = { kind: "idle" };
 const NEXT: Step = { kind: "next" };
@@ -311,6 +326,40 @@ export class WebhookOutbox {
         db.events.cancel(event.seq, "superseded by a newer connection event", now);
         return NEXT;
       }
+      if (MESSAGE_EVENTS.has(event.kind)) {
+        const decision = this.decideChat(db, event, settings.coalesce, now);
+        switch (decision.kind) {
+          case "cancel":
+            db.events.cancel(decision.seq, decision.reason, now);
+            return NEXT;
+          case "fail":
+            db.events.fail(decision.seq, decision.status, decision.error, now);
+            this.noteFailure(decision.log);
+            return NEXT;
+          case "wait":
+            wake = Math.min(wake, decision.until);
+            continue;
+          case "ready": {
+            let payload: WebhookPayload;
+            try {
+              payload = this.payloadFor(decision.events, decision.messages);
+            } catch (err) {
+              // Whatever went wrong may have said what the message says; only its code is kept.
+              const error = `Webhook delivery failed${withCode(err)}.`;
+              db.events.fail(decision.events[0]!.seq, null, error, now);
+              this.noteFailure(error);
+              return NEXT;
+            }
+            const seqs = decision.events.map((row) => row.seq);
+            if (!db.events.claimMany(seqs, now, now - OUTBOX_SENDING_STALE_MS)) return NEXT;
+            return { kind: "post", events: decision.events, payload, settings };
+          }
+          default: {
+            const _exhaustive: never = decision;
+            return _exhaustive;
+          }
+        }
+      }
       const deadline = event.createdAt + this.giveUpMs;
       // Past the day, only the last attempt scheduled for its very end is still made.
       if (now >= deadline && (event.nextAttemptAt === null || event.nextAttemptAt < deadline)) {
@@ -323,57 +372,118 @@ export class WebhookOutbox {
         wake = Math.min(wake, event.nextAttemptAt);
         continue;
       }
-      let message: StoredMessage | null = null;
-      if (MESSAGE_EVENTS.has(event.kind)) {
-        message = event.messageId === null ? null : (db.messages.byIds([event.messageId])[0] ?? null);
-        if (message === null) {
-          db.events.cancel(event.seq, "the message was deleted, expired or cleared before it was posted", now);
-          return NEXT;
-        }
-        if (event.readyAt > now && message.transcript === null && this.host.awaitingTranscript(message)) {
-          wake = Math.min(wake, event.readyAt, now + this.transcriptPollMs);
-          continue;
-        }
-      }
       let payload: WebhookPayload;
       try {
-        payload = this.host.payload(event, message);
+        payload = this.host.payload(event, null);
       } catch (err) {
-        // Whatever went wrong may have said what the message says; only its code is kept.
         const error = `Webhook delivery failed${withCode(err)}.`;
         db.events.fail(event.seq, null, error, now);
         this.noteFailure(error);
         return NEXT;
       }
       if (!db.events.claim(event.seq, now, now - OUTBOX_SENDING_STALE_MS)) return NEXT;
-      return { kind: "post", event, payload, settings };
+      return { kind: "post", events: [event], payload, settings };
     }
     return wake === Infinity ? IDLE : { kind: "wait", until: wake };
   }
 
-  private async post({ event, payload, settings }: Extract<Step, { kind: "post" }>): Promise<void> {
+  /**
+   * What to do with the oldest open message event of a chat: cancel it, fail
+   * it, wait, or post it together with the later events of the same burst.
+   * One write at a time, so a cancel is visible to the next look.
+   */
+  private decideChat(
+    db: AccountDb,
+    head: EventRecord,
+    coalesce: WebhookCoalesce | null,
+    now: number
+  ):
+    | { kind: "cancel"; seq: number; reason: string }
+    | { kind: "fail"; seq: number; status: number | null; error: string; log: string }
+    | { kind: "wait"; until: number }
+    | { kind: "ready"; events: EventRecord[]; messages: StoredMessage[] } {
+    const closed = head.attempts > 0 || head.state === "sending";
+    const lane = coalesce === null && !closed ? [head] : db.events.openInLane(head.lane);
+    const batch = batchOf(lane, head, coalesce !== null || closed);
+    const chosen: { event: EventRecord; message: StoredMessage }[] = [];
+    for (const event of batch) {
+      const message = event.messageId === null ? null : (db.messages.byIds([event.messageId])[0] ?? null);
+      if (message === null) {
+        return { kind: "cancel", seq: event.seq, reason: "the message was deleted, expired or cleared before it was posted" };
+      }
+      // A removal takes effect before the next POST, including one already waiting out a retry.
+      if (this.host.allows?.(event, message) === false) {
+        return { kind: "cancel", seq: event.seq, reason: "the chat is not on the webhook allowlist" };
+      }
+      if (event.readyAt > now && message.transcript === null && this.host.awaitingTranscript(message)) {
+        if (chosen.length === 0) return { kind: "wait", until: Math.min(event.readyAt, now + this.transcriptPollMs) };
+        break;
+      }
+      chosen.push({ event, message });
+    }
+    const first = chosen[0];
+    if (first === undefined) return { kind: "wait", until: now + this.transcriptPollMs };
+    const deadline = first.event.createdAt + this.giveUpMs;
+    // Past the day, only the last attempt scheduled for its very end is still made.
+    if (now >= deadline && (first.event.nextAttemptAt === null || first.event.nextAttemptAt < deadline)) {
+      const error = first.event.lastError ?? "not posted";
+      return {
+        kind: "fail",
+        seq: first.event.seq,
+        status: first.event.lastStatus,
+        error: `${error}; gave up 24 h after the event`,
+        log: `gave up on ${first.event.kind} after ${first.event.attempts} attempts: ${error}`,
+      };
+    }
+    if (first.event.nextAttemptAt !== null && first.event.nextAttemptAt > now) {
+      return { kind: "wait", until: first.event.nextAttemptAt };
+    }
+    if (coalesce !== null && !closed) {
+      const newest = batch[batch.length - 1]!.createdAt;
+      const deliverAt = Math.min(batch[0]!.createdAt + coalesce.capMs, newest + coalesce.windowMs);
+      if (now < deliverAt) return { kind: "wait", until: deliverAt };
+    }
+    return {
+      kind: "ready",
+      events: chosen.map((row) => row.event),
+      messages: chosen.map((row) => row.message),
+    };
+  }
+
+  private payloadFor(events: EventRecord[], messages: StoredMessage[]): WebhookPayload {
+    if (events.length === 1) return this.host.payload(events[0]!, messages[0] ?? null);
+    return coalescePayloads(events.map((event, index) => this.host.payload(event, messages[index] ?? null)));
+  }
+
+  private async post({ events, payload, settings }: Extract<Step, { kind: "post" }>): Promise<void> {
     const result = await this.host.sink().attempt(payload, settings);
     const db = this.host.db();
     // Stays `sending`: another dispatcher posts it again once the claim is stale.
     if (db === null || !db.isOpen) return;
     const now = this.now();
-    const attempt = event.attempts + 1;
+    const head = events[0]!;
+    const deadline = head.createdAt + this.giveUpMs;
     if (result.ok) {
-      db.events.delivered(event.seq, result.status, now, attempt);
+      db.transaction(() => {
+        for (const event of events) db.events.delivered(event.seq, result.status, now, event.attempts + 1);
+      });
       this.noteDelivery();
       // The receiver answers again: what waits for a retry need not wait for its slot.
       this.nudged = true;
       return;
     }
+    // One next attempt for the whole body, so a retry cannot post half of it early.
+    const next = Math.min(now + retryDelay(head.attempts + 1, this.retryDelays, this.retryEveryMs), deadline);
+    const giveUp = !result.retry || now >= deadline;
+    const failure = result.retry && giveUp ? `${result.error}; gave up 24 h after the event` : result.error;
+    db.transaction(() => {
+      for (const event of events) {
+        const attempt = event.attempts + 1;
+        if (giveUp) db.events.fail(event.seq, result.status, failure, now, attempt);
+        else db.events.retry(event.seq, next, result.status, result.error, now, attempt);
+      }
+    });
     this.noteFailure(result.error);
-    const deadline = event.createdAt + this.giveUpMs;
-    if (result.retry && now < deadline) {
-      const next = Math.min(now + retryDelay(attempt, this.retryDelays, this.retryEveryMs), deadline);
-      db.events.retry(event.seq, next, result.status, result.error, now, attempt);
-    } else {
-      const error = result.retry ? `${result.error}; gave up 24 h after the event` : result.error;
-      db.events.fail(event.seq, result.status, error, now, attempt);
-    }
   }
 
   /**
@@ -422,6 +532,25 @@ export class WebhookOutbox {
       }
     });
   }
+}
+
+/**
+ * The events posted as one body. A burst that has not been attempted yet is
+ * every not-yet-attempted event from the head on. One that has is every
+ * already-attempted event from the head on, and stops where a newer message
+ * is still waiting for its own window.
+ */
+function batchOf(lane: readonly EventRecord[], head: EventRecord, group: boolean): EventRecord[] {
+  if (!group) return [head];
+  const closed = head.attempts > 0 || head.state === "sending";
+  const out: EventRecord[] = [];
+  for (const event of lane) {
+    if (event.seq < head.seq) continue;
+    const fresh = event.attempts === 0 && event.state !== "sending";
+    if (closed ? fresh : !fresh) break;
+    out.push(event);
+  }
+  return out.length > 0 ? out : [head];
 }
 
 function iso(at: number | null): string | null {

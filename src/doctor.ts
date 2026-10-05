@@ -29,7 +29,7 @@ import {
 import { checkTranscribeQueue } from "./transcribe-status.js";
 import { dim, fail, fix, green, info, ok, red, warn, yellow } from "./ui.js";
 import type { WebhookDelivery } from "./wa-types.js";
-import { WEBHOOK_FAILING_AFTER, readWebhookSettings, webhookFailureFix } from "./webhook.js";
+import { WEBHOOK_FAILING_AFTER, readWebhookSettings, webhookFailureFix, webhookReadyDetail } from "./webhook.js";
 import { readWebhookDelivery } from "./webhook-outbox.js";
 
 /** `warn` works but is losing something: nothing is broken yet, and nothing blocks setup. */
@@ -589,7 +589,7 @@ export function webhookCheck(
     case "off":
       return { name: "webhook", state: "info", detail: "off" };
     case "ready":
-      return deliveryCheck(`on (${new URL(settings.url).host})`, deliveries, now);
+      return deliveryCheck(webhookReadyDetail(settings), deliveries, now);
     case "invalid":
       return { name: "webhook", state: "fail", detail: settings.detail, fix: settings.fix };
     default: {

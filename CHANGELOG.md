@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The webhook can post only some chats.** `WAZAP_WEBHOOK_CHATS` lists chat
+  ids and phone numbers, and `WAZAP_WEBHOOK_TAG` names a contact tag such as
+  `autopeloc`. Set either and only a matching chat is posted. A direct chat
+  matches the tag when `remember` has filed it on that contact, so the set
+  changes without a restart, and a pending event for someone just removed is
+  cancelled. A group is posted only when its chat id is listed. A contact
+  tagged `#private` is never posted while a filter is set. An empty filter
+  posts no message events. With neither setting, every chat is posted as
+  before. An account's `webhook_chats` or `webhook_tag` replaces the global
+  filter. `wazap config webhook chats`, `tag` and `filter off` write them,
+  and `wazap config` prints the filter.
+- **Messages in one chat can share one POST.** `WAZAP_WEBHOOK_COALESCE` is a
+  quiet window in seconds, from 1 to 300. Several messages in that chat become
+  one signed body. A conversation that keeps going is still delivered by twice
+  the window, and never later than 5 minutes after the first message of the
+  burst. The existing fields name the latest message. A burst also carries
+  `count`, `message_ids`, `texts`, `first_ts` and `first_timestamp`. One
+  message is the same body as before. Order inside the chat, retries, the
+  signature and the outbox across a restart are unchanged.
+- **A 401 can be retried.** `WAZAP_WEBHOOK_RETRY_401=on` retries a 401 on the
+  same schedule as a 5xx. Unset, a 401 still fails the event at once.
+
 ## 1.1.1
 
 ### Security
