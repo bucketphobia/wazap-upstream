@@ -179,12 +179,12 @@ export class AccountWebhooks {
   }
 
   /**
-   * The body of an event as it is posted: a message event from the message as
-   * the database holds it now, so an edit or a transcript that landed since it
-   * was queued goes with it; a connection event as it was queued, under the
-   * account's current name.
+   * False when this message must not be posted: a contact tagged `#private`,
+   * or a chat the allowlist does not name. True when the settings are not
+   * ready or the database cannot be read. The outbox cancels what is waiting
+   * when the webhook is off or invalid, and it does not post while the
+   * database is null.
    */
-  /** False when a configured allowlist does not want this message, `#private` included. */
   allowsMessage(message: StoredMessage): boolean {
     const settings = this.host.webhook().settings();
     if (settings.kind !== "ready") return true;
@@ -193,6 +193,12 @@ export class AccountWebhooks {
     return webhookAllowsMessage(db, settings.filter, message);
   }
 
+  /**
+   * The body of an event as it is posted: a message event from the message as
+   * the database holds it now, so an edit or a transcript that landed since it
+   * was queued goes with it; a connection event as it was queued, under the
+   * account's current name.
+   */
   webhookPayload(event: EventRecord, message: StoredMessage | null): WebhookPayload {
     const stored = JSON.parse(event.payload) as Record<string, unknown>;
     const account = this.accountRecord;

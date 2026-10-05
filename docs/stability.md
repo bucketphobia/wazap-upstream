@@ -157,7 +157,9 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
 - Connection-event fields: `event`, `account_id`, `status` and `timestamp`,
   where `status` is `linked`, `disconnected` or `expired`, and `health` with
   its `state`, `until` and `reason`, as `get_status` says them. A health
-  change while the link stays up is a connection event too.
+  change while the link stays up is a connection event too. A connection
+  event is not a chat: the allowlist and `#private` do not apply to it,
+  because it carries no message content.
 - A message wazap itself sent produces no `message_sent`, and history sync
   produces no events at all.
 
@@ -167,9 +169,12 @@ at-least-once and ordered within a chat, retried on 408, 425, 429 and 5xx, and
 on 401 when `WAZAP_WEBHOOK_RETRY_401` is on, and
 given up on after 24 hours (`test/webhook-outbox.test.mjs`); the retry schedule
 itself is current behaviour, not a promise. With neither `WAZAP_WEBHOOK_CHATS`
-nor `WAZAP_WEBHOOK_TAG` set, every chat is posted. With either set, only a
-listed chat, or a direct chat whose contact carries the tag, is posted, and a
-contact tagged `#private` is not.
+nor `WAZAP_WEBHOOK_TAG` set, every chat is posted except a contact tagged
+`#private`. With either set, only a listed chat, or a direct chat whose
+contact carries the tag, is posted, and a contact tagged `#private` is not.
+Their own messages in a group are left out too. The owner's messages in that
+group are still posted when the group is. `connection` events are posted
+whenever that event is enabled.
 
 ## 5. Data on disk
 

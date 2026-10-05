@@ -552,7 +552,7 @@ async function setWebhookAuth(config: Config): Promise<void> {
 
 function filterLine(filter: WebhookFilter | null): string {
   const described = describeWebhookFilter(filter);
-  if (described === null) return "filter: off";
+  if (described === null) return "filter: off, #private excluded";
   if (described === "empty") return "filter: empty (nothing is posted)";
   return `filter: ${described}`;
 }
@@ -594,7 +594,13 @@ function setWebhookChats(config: Config, raw: string | undefined): void {
   if (raw === "off") {
     if (registry !== null) registry.setWebhookChats(config.accountId!, null);
     else unsetEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_CHATS");
-    say(ok(config.accountId === undefined ? "webhook chats removed. With no tag, every chat is posted again." : `webhook chats removed for ${config.accountId}.`));
+    say(
+      ok(
+        config.accountId === undefined
+          ? "webhook chats removed. With no tag, every chat is posted again, except contacts tagged #private."
+          : `webhook chats removed for ${config.accountId}.`
+      )
+    );
   } else if (raw === "none") {
     if (registry !== null) registry.setWebhookChats(config.accountId!, []);
     else setEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_CHATS", "");
@@ -672,13 +678,17 @@ function clearWebhookFilter(config: Config): void {
     const registry = AccountRegistry.load(config.dataDir);
     registry.setWebhookChats(config.accountId, null);
     registry.setWebhookTag(config.accountId, null);
-    say(ok(`webhook filter removed for ${config.accountId} — the global filter applies, if one is set.`));
+    say(
+      ok(
+        `webhook filter removed for ${config.accountId}. The global filter applies, if one is set. Contacts tagged #private are still left out.`
+      )
+    );
     say(dim(`Stored in ${shortPath(paths(config.dataDir).accountsFile)}.`));
   } else {
     const file = paths(config.dataDir).envFile;
     unsetEnvSetting(file, "WAZAP_WEBHOOK_CHATS");
     unsetEnvSetting(file, "WAZAP_WEBHOOK_TAG");
-    say(ok("webhook filter: off — every chat is posted, as before."));
+    say(ok("webhook filter: off. Every chat is posted, except contacts tagged #private."));
     say(dim(`Stored in ${shortPath(file)}.`));
   }
   warnIfServerRunning(config);

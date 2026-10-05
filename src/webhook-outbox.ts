@@ -23,8 +23,11 @@
  *   succeeded, retries at once every event whose last attempt is at least
  *   30 s old, so a receiver that came back hears everything within a POST or
  *   two instead of at its next slot.
- * - An allowlist, when configured, cancels a pending message event whose chat
- *   no longer matches before it is posted. `allows` on the host is that check.
+ * - Before a message event is posted, `allows` on the host may cancel it. The
+ *   service refuses a chat the allowlist does not name, and any message from a
+ *   contact tagged `#private`, including when no allowlist is set. A removal
+ *   that lands before the claim cancels the event. One already claimed still
+ *   goes out.
  * - Coalescing, when configured, holds a chat's not-yet-attempted events until
  *   the chat has been quiet for the window, or the cap since the first of them,
  *   and posts them as one body. A batch that has already been attempted retries
@@ -413,7 +416,7 @@ export class WebhookOutbox {
       }
       // A removal takes effect before the next POST, including one already waiting out a retry.
       if (this.host.allows?.(event, message) === false) {
-        return { kind: "cancel", seq: event.seq, reason: "the chat is not on the webhook allowlist" };
+        return { kind: "cancel", seq: event.seq, reason: "the webhook is not posting this message" };
       }
       if (event.readyAt > now && message.transcript === null && this.host.awaitingTranscript(message)) {
         if (chosen.length === 0) return { kind: "wait", until: Math.min(event.readyAt, now + this.transcriptPollMs) };

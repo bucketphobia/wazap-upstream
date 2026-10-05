@@ -95,8 +95,8 @@ posted after the restart; connection events still go out.
 ### Which chats are posted
 
 With neither `WAZAP_WEBHOOK_CHATS` nor `WAZAP_WEBHOOK_TAG` set, every chat is
-posted, as before. Set either and a message event is posted only when the chat
-matches.
+posted except a contact tagged `#private`. Set either and a message event is
+posted only when the chat matches. `#private` is still left out.
 
 - `WAZAP_WEBHOOK_CHATS` is a comma-separated list of chat ids
   (`15550100@s.whatsapp.net`, `120363000000000001@g.us`) and phone numbers
@@ -108,20 +108,27 @@ matches.
   restart. A pending event for someone just removed is cancelled and not posted.
 - A group is posted only when its chat id is in the list. A member's tag does
   not include the group.
-- A contact tagged `#private` is never posted while a filter is set, even if
-  their chat is listed or they also carry the allow tag. A message they wrote
-  in a listed group is left out too. The owner's own messages in that group
-  still go. With no filter, `#private` changes nothing.
+- A contact tagged `#private` is never posted, with a filter or without one.
+  That is their direct chat, including messages the owner sent there, and a
+  message they wrote in a group. Listing the chat or giving them the allow
+  tag does not put them back. The owner's own messages in a group are still
+  posted when that group is posted. Earlier versions posted these chats when
+  no filter was set.
 - An empty filter posts no message events. Set `WAZAP_WEBHOOK_CHATS` to an
   empty value and no tag, or `wazap config webhook chats none` with the tag
-  off. `connection` events are not chats, so they still follow
-  `WAZAP_WEBHOOK_EVENTS`.
+  off.
+- `connection` events are not filtered by the chat list, the tag, or
+  `#private`. They carry the link status and `health`, not a message. They
+  follow `WAZAP_WEBHOOK_EVENTS` only. An empty filter, and a webhook whose
+  only chats are `#private`, still posts a `connection` event when that event
+  is enabled. The default event list is `message_received` only, so the
+  default plus an empty filter posts nothing.
 
 ```bash
 npx wazap-mcp config webhook chats 15550100@s.whatsapp.net,+15550101
 npx wazap-mcp config webhook tag autopeloc
 npx wazap-mcp config webhook chats none          # the tag, if set, is the whole filter
-npx wazap-mcp config webhook filter off          # every chat again
+npx wazap-mcp config webhook filter off          # every chat again, except #private
 npx wazap-mcp config webhook tag autopeloc --account work
 ```
 

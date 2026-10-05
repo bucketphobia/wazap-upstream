@@ -48,7 +48,7 @@ Usage:
   wazap service ${SERVICE_VERBS}
                                                            Keep the server running in the background, under launchd or systemd
   wazap expose [tailscale|cloudflare|off]                  Give the running service a public https URL cloud agents can reach
-  wazap config [writes on|off] [transcribe local|openai|off] [recall local|off] [webhook on|off|chats|tag|coalesce] [draft-context on|off]
+  wazap config [writes on|off] [transcribe local|openai|off] [recall local|off] [webhook on|off|chats|tag|coalesce|retry-401|filter off] [draft-context on|off]
                                                            Show the effective settings, or change one
   wazap webhook test [--event <name>] [--account <id>]     POST a test event to the configured webhook
   wazap transcribe download [--model <alias>]              Fetch the whisper.cpp model into the data dir

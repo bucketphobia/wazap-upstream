@@ -62,6 +62,12 @@ test("no filter posts every chat, an empty one posts none, and a tag or a number
     assert.equal(allows(db, listed, business), false);
     assert.equal(allows(db, { chats: [GROUP], tag: null }, group), true);
     assert.equal(allows(db, { chats: [GROUP], tag: "autopeloc" }, business), true, "a tag and a list combine");
+
+    const self = store(db, ME, "ME", { fromMe: true });
+    const ownToBusiness = store(db, BUSINESS, "OB", { fromMe: true });
+    assert.equal(allows(db, null, self), true, "with no filter the owner's self-chat is posted");
+    assert.equal(allows(db, tag, self), false, "a filter does not treat self-chat as the tagged contact");
+    assert.equal(allows(db, tag, ownToBusiness), true, "the owner's own message in a tagged chat is that chat");
   } finally {
     db.close();
   }
@@ -81,7 +87,11 @@ test("a contact tagged #private is excluded even when listed or tagged, includin
     assert.equal(allows(db, filter, own), false, "the owner's messages in that chat stay out too");
     assert.equal(allows(db, filter, inGroup), false);
     assert.equal(allows(db, filter, ownerInGroup), true, "the owner's own messages in a listed group still go");
-    assert.equal(allows(db, null, direct), true, "with no filter, #private changes nothing");
+    assert.equal(allows(db, null, direct), false, "with no filter, #private is still excluded");
+    assert.equal(allows(db, null, own), false);
+    assert.equal(allows(db, null, inGroup), false, "what they write in a group stays out with no filter");
+    assert.equal(allows(db, null, ownerInGroup), true, "the owner's own messages in a group still go");
+    assert.equal(allows(db, { chats: [], tag: "private" }, direct), false, "the allow tag private does not put them back");
   } finally {
     db.close();
   }
@@ -95,6 +105,12 @@ test("a phone number matches a lid chat once the number is known", async () => {
     const message = store(db, PEER_LID, "L");
     assert.equal(allows(db, { chats: ["40700000002"], tag: null }, message), true);
     assert.equal(allows(db, { chats: [], tag: "autopeloc" }, message), true);
+    db.identity.updateFields(PEER, { addTags: ["private"] });
+    const hidden = store(db, PEER_LID, "LP");
+    const hiddenInGroup = store(db, GROUP, "LG", { senderJid: PEER_LID });
+    assert.equal(allows(db, { chats: ["40700000002"], tag: "autopeloc" }, hidden), false);
+    assert.equal(allows(db, { chats: [GROUP], tag: null }, hiddenInGroup), false);
+    assert.equal(allows(db, null, hidden), false);
   } finally {
     db.close();
   }
@@ -198,6 +214,16 @@ test("the service posts an allowlisted chat, skips the rest, and cancels a pendi
         message: { conversation: "from the private member" },
       },
       {
+        key: { remoteJid: "120363000000000099@g.us", fromMe: false, id: "UG", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "unlisted group" },
+      },
+      {
+        key: { remoteJid: ME, fromMe: true, id: "SELF" },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "note to self" },
+      },
+      {
         key: { remoteJid: GROUP, fromMe: true, id: "GO" },
         messageTimestamp: Math.floor(Date.now() / 1000),
         message: { conversation: "from me in the group" },
@@ -209,7 +235,7 @@ test("the service posts an allowlisted chat, skips the rest, and cancels a pendi
   assert.deepEqual(
     pending.map((row) => row.kind),
     ["message_received", "message_sent"],
-    "the stranger, the #private chat and the #private group message were not queued"
+    "the stranger, the #private chat, the unlisted group and self-chat were not queued"
   );
   assert.equal(server.received.length, 0, "the 60s window has not elapsed");
 
@@ -217,7 +243,7 @@ test("the service posts an allowlisted chat, skips the rest, and cancels a pendi
   await svc.outbox.idle();
   const after = storageRows(svc, "SELECT kind, state, last_error FROM events ORDER BY seq");
   assert.equal(after[0].state, "cancelled");
-  assert.match(after[0].last_error, /allowlist/);
+  assert.match(after[0].last_error, /not posting this message/);
   assert.equal(after[1].state, "pending", "the listed group is still allowed");
   assert.equal(server.received.length, 0);
 
@@ -295,6 +321,146 @@ test("a per-account tag replaces the global chat list", async (t) => {
   assert.equal(server.received.length, 1);
 });
 
+test("a listed group's coalesced POST leaves out a #private member, and the signature is over that body", async (t) => {
+  const server = await listen();
+  const { svc, sock } = connectedService(WhatsAppService, {
+    prefix: "wazap-filter-burst-",
+    id: ME,
+    name: "Răzvan",
+    config: { readOnly: false },
+  });
+  useEnv(svc, {
+    WAZAP_WEBHOOK: "on",
+    WAZAP_WEBHOOK_URL: server.url,
+    WAZAP_WEBHOOK_SECRET: SECRET,
+    WAZAP_WEBHOOK_AUTH: `Bearer ${TOKEN}`,
+    WAZAP_WEBHOOK_CHATS: GROUP,
+    WAZAP_WEBHOOK_COALESCE: "1",
+  });
+  t.after(async () => {
+    await svc.stop();
+    await server.close();
+  });
+  await svc.updateContactDetails(PRIVATE, { addTags: ["private"] });
+  sock.ev.emit("messages.upsert", {
+    type: "notify",
+    messages: [
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "G1", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "hello group" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "GP", participant: PRIVATE },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "secret aside" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "G2", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "second from the group" },
+      },
+      text("P1", "family", PRIVATE),
+      text("S1", "not a customer", STRANGER),
+    ],
+  });
+  await waitFor(() => server.received.length === 1, 5_000, "the group burst");
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.equal(server.received.length, 1, "the private member, their chat and the stranger's direct chat posted nothing");
+  const hit = server.received[0];
+  assert.equal(hit.event, "message_received");
+  assert.equal(hit.authorization, `Bearer ${TOKEN}`);
+  assert.equal(hit.signature, webhookSignature(hit.raw.toString("utf8"), SECRET));
+  assert.equal(hit.body.chat_id, GROUP);
+  assert.equal(hit.body.count, 2);
+  assert.deepEqual(hit.body.texts, ["hello group", "second from the group"]);
+  assert.equal(JSON.stringify(hit.body).includes("secret aside"), false);
+  assert.equal(JSON.stringify(hit.body).includes("family"), false);
+  assert.equal(JSON.stringify(hit.body).includes("not a customer"), false);
+});
+
+test("with no filter a #private contact is not posted, tagging one cancels a pending event, and connection still goes", async (t) => {
+  const server = await listen();
+  const { svc, sock } = connectedService(WhatsAppService, {
+    prefix: "wazap-filter-none-",
+    id: ME,
+    name: "Răzvan",
+    config: { readOnly: false },
+  });
+  useEnv(svc, {
+    WAZAP_WEBHOOK: "on",
+    WAZAP_WEBHOOK_URL: server.url,
+    WAZAP_WEBHOOK_SECRET: SECRET,
+    WAZAP_WEBHOOK_EVENTS: "all",
+    WAZAP_WEBHOOK_COALESCE: "60",
+  });
+  t.after(async () => {
+    await svc.stop();
+    await server.close();
+  });
+  await svc.updateContactDetails(PRIVATE, { addTags: ["private"] });
+  sock.ev.emit("messages.upsert", { type: "append", messages: [text("OLD", "history backlog", STRANGER)] });
+  sock.ev.emit("messages.upsert", {
+    type: "notify",
+    messages: [
+      text("B1", "business"),
+      text("S1", "stranger", STRANGER),
+      text("P1", "secret", PRIVATE),
+      {
+        key: { remoteJid: PRIVATE, fromMe: true, id: "PO" },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "reply in the private chat" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "GP", participant: PRIVATE },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "from the private member" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "GS", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "from a stranger in the group" },
+      },
+      {
+        key: { remoteJid: ME, fromMe: true, id: "SELF" },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "note to self" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: true, id: "GO" },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "from me in the group" },
+      },
+    ],
+  });
+  await svc.outbox.idle();
+  const queued = storageRows(svc, "SELECT m.text AS text FROM events e JOIN messages m ON m.id = e.message_id ORDER BY e.seq");
+  assert.deepEqual(
+    queued.map((row) => row.text),
+    ["business", "stranger", "from a stranger in the group", "note to self", "from me in the group"],
+    "history, the #private chat and what they wrote in the group were not queued"
+  );
+  assert.equal(server.received.length, 0, "the 60s window has not elapsed");
+
+  svc.setStatus("disconnected");
+  await waitFor(() => server.received.length === 1, 3_000, "the connection event");
+  assert.equal(server.received[0].body.event, "connection");
+  assert.equal(server.received[0].body.status, "disconnected");
+  assert.equal(server.received[0].signature, webhookSignature(server.received[0].raw.toString("utf8"), SECRET));
+
+  await svc.updateContactDetails(BUSINESS, { addTags: ["private"] });
+  await svc.outbox.idle();
+  const after = storageRows(svc, "SELECT m.text AS text, e.state, e.last_error FROM events e JOIN messages m ON m.id = e.message_id ORDER BY e.seq");
+  assert.equal(after[0].text, "business");
+  assert.equal(after[0].state, "cancelled");
+  assert.match(after[0].last_error, /not posting this message/);
+  assert.deepEqual(
+    after.slice(1).map((row) => row.state),
+    ["pending", "pending", "pending", "pending"]
+  );
+  assert.equal(server.received.length, 1, "tagging #private did not let the pending chats post");
+});
+
 function wazap(dir, args, { input = "", env = {} } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BINARY, ...args, "--data-dir", dir], { env: childEnv(env) });
@@ -354,11 +520,19 @@ test("CLI filter and coalesce: one signed POST for the allowlisted burst, nothin
       text("B2", "second line"),
       text("S1", "not a customer", STRANGER),
       text("P1", "family", PRIVATE),
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "UG", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "unlisted group" },
+      },
     ],
   });
   await waitFor(() => server.received.length === 1, 5_000, "the coalesced POST");
   await new Promise((resolve) => setTimeout(resolve, 1500));
-  assert.equal(server.received.length, 1, "the stranger and the #private chat posted nothing");
+  assert.equal(server.received.length, 1, "the stranger, the #private chat and the unlisted group posted nothing");
+  assert.equal(JSON.stringify(server.received[0].body).includes("unlisted group"), false);
+  assert.equal(JSON.stringify(server.received[0].body).includes("family"), false);
+  assert.equal(JSON.stringify(server.received[0].body).includes("not a customer"), false);
   const hit = server.received[0];
   assert.equal(hit.event, "message_received");
   assert.equal(hit.authorization, `Bearer ${TOKEN}`);
@@ -378,4 +552,82 @@ test("CLI filter and coalesce: one signed POST for the allowlisted burst, nothin
   assert.equal(server.received[1].body.text, "wazap webhook test");
   assert.equal(server.received[1].authorization, `Bearer ${TOKEN}`);
   assert.equal(server.received[1].signature, webhookSignature(server.received[1].raw.toString("utf8"), SECRET));
+});
+
+test("CLI with the filter turned off: #private posts nothing, other chats do, and webhook test still works", async (t) => {
+  const server = await listen();
+  const dir = mkdtempSync(join(tmpdir(), "wazap-filter-off-e2e-"));
+  t.after(async () => {
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const on = await wazap(dir, ["config", "webhook", "on"], {
+    input: `${SECRET}\n`,
+    env: { WAZAP_WEBHOOK_URL: server.url },
+  });
+  assert.equal(on.code, 0, on.stderr);
+  const auth = await wazap(dir, ["config", "webhook", "auth"], { input: `Bearer ${TOKEN}\n` });
+  assert.equal(auth.code, 0, auth.stderr);
+  const tag = await wazap(dir, ["config", "webhook", "tag", "autopeloc"]);
+  assert.equal(tag.code, 0, tag.stderr);
+  const cleared = await wazap(dir, ["config", "webhook", "filter", "off"]);
+  assert.equal(cleared.code, 0, cleared.stderr);
+  assert.match(cleared.stderr, /except contacts tagged #private/);
+  const shown = await wazap(dir, ["config"]);
+  assert.match(shown.stderr, /filter: off, #private excluded/);
+  const configured = parse(readFileSync(join(dir, ".env"), "utf8"));
+  assert.equal(configured.WAZAP_WEBHOOK_CHATS, undefined);
+  assert.equal(configured.WAZAP_WEBHOOK_TAG, undefined);
+
+  const { svc, sock } = connectedService(WhatsAppService, {
+    prefix: "wazap-filter-off-e2e-",
+    id: ME,
+    name: "Răzvan",
+    config: { dataDir: dir, readOnly: false },
+  });
+  useEnv(svc, configured);
+  t.after(() => svc.stop());
+  await svc.updateContactDetails(PRIVATE, { addTags: ["private", "autopeloc"] });
+
+  sock.ev.emit("messages.upsert", { type: "append", messages: [text("OLD", "history backlog")] });
+  sock.ev.emit("messages.upsert", {
+    type: "notify",
+    messages: [
+      text("B1", "customer"),
+      text("P1", "family secret", PRIVATE),
+      text("S1", "hello stranger", STRANGER),
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "GP", participant: PRIVATE },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "private aside" },
+      },
+      {
+        key: { remoteJid: GROUP, fromMe: false, id: "GS", participant: STRANGER },
+        messageTimestamp: Math.floor(Date.now() / 1000),
+        message: { conversation: "group hello" },
+      },
+    ],
+  });
+  await waitFor(() => server.received.length === 3, 5_000, "the three chats that are not #private");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(server.received.length, 3);
+  const posted = server.received.map((hit) => hit.body.text).sort();
+  assert.deepEqual(posted, ["customer", "group hello", "hello stranger"]);
+  for (const hit of server.received) {
+    assert.equal(hit.authorization, `Bearer ${TOKEN}`);
+    assert.equal(hit.signature, webhookSignature(hit.raw.toString("utf8"), SECRET));
+    assert.equal(hit.body.count, undefined, "one message stays the old body");
+    assert.equal(JSON.stringify(hit.body).includes("family secret"), false);
+    assert.equal(JSON.stringify(hit.body).includes("private aside"), false);
+    assert.equal(JSON.stringify(hit.body).includes("history backlog"), false);
+  }
+
+  const probe = await wazap(dir, ["webhook", "test"]);
+  assert.equal(probe.code, 0, probe.stderr);
+  assert.match(probe.stderr, /test delivered/);
+  assert.equal(server.received.length, 4);
+  assert.equal(server.received[3].body.text, "wazap webhook test");
+  assert.equal(server.received[3].authorization, `Bearer ${TOKEN}`);
+  assert.equal(server.received[3].signature, webhookSignature(server.received[3].raw.toString("utf8"), SECRET));
 });

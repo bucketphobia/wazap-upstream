@@ -44,7 +44,7 @@ export const WEBHOOK_COALESCE_MAX_S = 300;
 const WEBHOOK_TAG_MAX = 40;
 const WEBHOOK_CHATS_MAX = 200;
 export const WEBHOOK_CHATS_FIX =
-  'set WAZAP_WEBHOOK_CHATS to comma-separated chat ids or numbers, `none` for an empty list, or run `wazap config webhook chats off`';
+  "set WAZAP_WEBHOOK_CHATS to comma-separated chat ids or numbers, or leave it empty for no chats. `wazap config webhook chats none` writes the empty value";
 export const WEBHOOK_TAG_FIX = 'set WAZAP_WEBHOOK_TAG to a short label like "autopeloc", or run `wazap config webhook tag off`';
 export const WEBHOOK_COALESCE_FIX = `set WAZAP_WEBHOOK_COALESCE to a whole number of seconds from 1 to ${WEBHOOK_COALESCE_MAX_S}, or off`;
 export const WEBHOOK_RETRY_401_FIX = "set WAZAP_WEBHOOK_RETRY_401 to on or off";
@@ -78,10 +78,10 @@ export interface WebhookAuth {
 }
 
 /**
- * Which chats a message event may name. Absent (`null` on the ready settings)
- * posts every chat, as before. Present posts a chat on the list or, for a
- * direct chat, one whose contact carries `tag`. An empty list and no tag posts
- * nothing. Groups match the list only.
+ * Which chats a message event may name, besides `#private`, which is never
+ * posted. Absent (`null` on the ready settings) posts every other chat.
+ * Present posts a chat on the list or, for a direct chat, one whose contact
+ * carries `tag`. An empty list and no tag posts nothing. Groups match the list only.
  */
 export interface WebhookFilter {
   chats: readonly string[];
@@ -102,7 +102,7 @@ export type WebhookSettings =
       secret: string;
       events: readonly WebhookEvent[];
       auth?: WebhookAuth;
-      /** Null posts every chat. */
+      /** Null posts every chat except contacts tagged `#private`. */
       filter: WebhookFilter | null;
       /** Null posts one event per message. */
       coalesce: WebhookCoalesce | null;

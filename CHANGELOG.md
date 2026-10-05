@@ -9,12 +9,11 @@
   `autopeloc`. Set either and only a matching chat is posted. A direct chat
   matches the tag when `remember` has filed it on that contact, so the set
   changes without a restart, and a pending event for someone just removed is
-  cancelled. A group is posted only when its chat id is listed. A contact
-  tagged `#private` is never posted while a filter is set. An empty filter
-  posts no message events. With neither setting, every chat is posted as
-  before. An account's `webhook_chats` or `webhook_tag` replaces the global
-  filter. `wazap config webhook chats`, `tag` and `filter off` write them,
-  and `wazap config` prints the filter.
+  cancelled. A group is posted only when its chat id is listed. An empty filter
+  posts no message events. With neither setting, every chat is posted except
+  contacts tagged `#private`. An account's `webhook_chats` or `webhook_tag`
+  replaces the global filter. `wazap config webhook chats`, `tag` and
+  `filter off` write them, and `wazap config` prints the filter.
 - **Messages in one chat can share one POST.** `WAZAP_WEBHOOK_COALESCE` is a
   quiet window in seconds, from 1 to 300. Several messages in that chat become
   one signed body. A conversation that keeps going is still delivered by twice
@@ -25,6 +24,17 @@
   signature and the outbox across a restart are unchanged.
 - **A 401 can be retried.** `WAZAP_WEBHOOK_RETRY_401=on` retries a 401 on the
   same schedule as a 5xx. Unset, a 401 still fails the event at once.
+
+### Changed
+
+- **The webhook never posts a contact tagged `#private`.** Their direct chat
+  is left out, including messages the owner sent there, and so is a message
+  they wrote in a group. Listing the chat or also giving them the allow tag
+  does not put them back. The owner's own messages in a group are still
+  posted when that group is. This holds with no chat filter, with an empty
+  one, and with a filter set. Earlier versions posted those chats when no
+  filter was set. `connection` events are unchanged: they carry no message
+  content, and the chat filter and `#private` do not apply to them.
 
 ## 1.1.1
 

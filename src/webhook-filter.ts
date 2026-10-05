@@ -1,13 +1,17 @@
 /**
- * Which chats the webhook may post once an allowlist is configured.
+ * Which chats the webhook may post.
  *
- * No filter posts every chat, as it always has. A filter posts a message when
- * the chat is listed, or when the chat is a direct chat and its contact
- * carries the tag (`remember` writes the tag; it is read here, so adding or
- * removing it takes effect without a restart). A group matches only when its
- * chat id is listed: a member's tag does not pull the group in. A contact
- * tagged `#private` never matches, not even when listed or tagged as well,
- * and neither does a message they wrote in a group that is listed.
+ * A contact tagged `#private` is never posted, whether or not a filter is
+ * set: not their direct chat (including the owner's own messages there), and
+ * not a message they wrote in a group. The owner's own messages in a group
+ * still go when that group is posted. `connection` events are not messages
+ * and are not decided here.
+ *
+ * No filter posts every other chat. A filter posts a message when the chat
+ * is listed, or when the chat is a direct chat and its contact carries the
+ * tag (`remember` writes the tag; it is read here, so adding or removing it
+ * takes effect without a restart). A group matches only when its chat id is
+ * listed: a member's tag does not pull the group in.
  */
 import { chatKindOf, type AccountDb, type StoredMessage } from "./db/index.js";
 import { isPrivateChat, isPrivateSender } from "./private-contacts.js";
@@ -15,9 +19,10 @@ import { addressMatches, type SendTarget } from "./send-guard.js";
 import type { WebhookFilter } from "./webhook.js";
 
 export function webhookAllowsMessage(db: AccountDb, filter: WebhookFilter | null, message: StoredMessage): boolean {
-  if (filter === null) return true;
+  // Before the filter, so a missing allowlist cannot put a #private chat back.
   if (isPrivateChat(db, message.chatJid)) return false;
   if (!message.fromMe && isPrivateSender(db, message.senderJid)) return false;
+  if (filter === null) return true;
   if (filter.chats.length > 0 && chatListed(db, filter.chats, message.chatJid)) return true;
   if (filter.tag !== null && chatKindOf(message.chatJid) === "direct" && contactHasTag(db, message.chatJid, filter.tag)) {
     return true;
