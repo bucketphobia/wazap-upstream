@@ -394,8 +394,6 @@ Call get_status when anything fails, and link_account when it says not_linked.
   contabilitate"). resolved gives the chat_id; ambiguous or not_found: ask the
   user, never guess. remember keeps what the user says about a person (note,
   tags, fields such as relatie), on this machine; find_contact(tag) lists a tag.
-  list_contacts pages the whole address book (saved name, number, last chat);
-  address_book_synced false means it has not arrived yet.
 - #private: a person's words come only when a call names them: their chat_id,
   a message_id of theirs, search's from; a group's chat_id reads whole. Elsewhere
   their entries say private, with no words, and search counts private_omitted.
