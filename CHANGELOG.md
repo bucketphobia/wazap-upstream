@@ -2,7 +2,18 @@
 
 ## 1.1.1
 
+### Added
+
+- **A logo:** a chat bubble with a bolt beside the wordmark, in the README and
+  in the terminal for bare `wazap` and a login without the wizard, when the
+  window is at least 62 columns wide. A narrower window, a pipe and the login
+  wizard keep the wordmark alone.
+
 ### Security
+
+- Patched transitive dependencies in the lockfile: sharp 0.35.5 (librsvg
+  advisory), proxy-addr 2.0.8 (IPv4-mapped IPv6 trust check) and ip-address
+  10.7.3 (link-local, NAT64, subnet and parse-length advisories).
 
 - Require `@modelcontextprotocol/sdk` 1.30.0 or newer on the 1.x line and
   `express-rate-limit` 8.6.2 or newer on the 8.x line, excluding older releases
