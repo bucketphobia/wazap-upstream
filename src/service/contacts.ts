@@ -12,6 +12,7 @@ import { ALL_WA_PATCH_NAMES, type WASocket } from "baileys";
 import type { AccountRecord } from "../accounts.js";
 import { WazapError } from "../errors.js";
 import { findInAccount, type AccountFind, type FindContactQuery } from "../find-contact.js";
+import { listInAccount } from "../list-contacts.js";
 import { isGroupId, isNoiseJid } from "../ids.js";
 import { IMPORT_META } from "../legacy-import/index.js";
 import { log, logError } from "../logger.js";
@@ -20,9 +21,12 @@ import { orNullAfter, PROFILE_LOOKUP_MS } from "./util.js";
 import type {
   ConnectionStatus,
   ContactDetails,
+  ContactList,
   ContactDetailsEdit,
   ContactSyncResult,
   ContactSummary,
+  ListContactsQuery,
+  Synced,
 } from "../wa-types.js";
 import type { AccountIdentity } from "./identity.js";
 import type { AccountStorage } from "./storage.js";
@@ -106,6 +110,7 @@ export interface ContactsHost {
   guarded<T>(work: () => Promise<T>): Promise<T>;
   ensureConnected(): WASocket;
   waitForSync(): Promise<void>;
+  synced<T>(data: T): Synced<T>;
 }
 
 export class AccountContacts {
@@ -239,6 +244,26 @@ export class AccountContacts {
         db = this.storage.db;
       }
       return findInAccount(db, this.accountRecord.id, query, (id) => this.identity.resolveId(id));
+    });
+  }
+
+  /**
+   * The phone's address book, a page at a time (src/list-contacts.ts), from
+   * what the account stores: it answers while the link is down, and never
+   * waits for the sync — `address_book_synced` and `sync` say how far it got.
+   * Whoever this account tagged #private is left out whatever the call passes;
+   * `private` adds the ones the call's other accounts tagged.
+   * An account with no link to read from (never linked, unlinked, refused)
+   * answers the error a read gets.
+   */
+  listContacts(query: ListContactsQuery): Promise<ContactList> {
+    return this.host.guarded(async () => {
+      const status = this.host.status();
+      if (status !== "connected" && status !== "connecting" && status !== "disconnected") this.host.ensureConnected();
+      const db = this.storage.db;
+      const page = listInAccount(db, this.accountRecord.id, query, this.identity.privateScope(query.private ?? { others: [] }), this.namedContacts());
+      const { sync } = this.host.synced(null);
+      return { ...page, sync };
     });
   }
 

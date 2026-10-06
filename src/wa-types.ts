@@ -731,6 +731,40 @@ export interface SearchAnswer extends Synced<MessageView[]> {
   privateOmitted?: number;
 }
 
+/** list_contacts on one account (src/list-contacts.ts). */
+export interface ListContactsQuery {
+  order: "recent" | "address_book";
+  limit: number;
+  /** The previous page's `next`; absent for a first page. */
+  cursor?: string;
+  /** People tagged #private on this account are always left out; this adds the ones the call's other accounts tagged. */
+  private?: PrivateRule;
+}
+
+/** A person in the phone's address book, as list_contacts gives them: metadata, never a message's words. */
+export interface ListedContact {
+  /** The name saved in the phone's address book. */
+  name: string;
+  /** E.164, with "+". */
+  phone: string;
+  chat_id: string;
+  /** The person's contact row, the webhook's contact_id. */
+  contact_id: number;
+  /** The newest message of the direct chat with them; null when they never talked. */
+  last_message: { at: string; direction: "in" | "out" } | null;
+}
+
+export interface ContactList {
+  contacts: ListedContact[];
+  /** Everyone the listing holds, every page together. */
+  total: number;
+  /** Pass as cursor for the next page; null on the last one. */
+  next: string | null;
+  /** Whether any name from the phone's address book has reached wazap yet. */
+  address_book_synced: boolean;
+  sync: SyncState;
+}
+
 export interface ContactSyncResult {
   requested: boolean;
   named_before: number;
@@ -785,6 +819,8 @@ export interface WhatsAppApi {
   // find_contact and the draft context (F2-3); optional, so a stand-in need not have them.
   /** Who a name, nickname or relationship means on this account; asks WhatsApp for an empty address book once per boot first. */
   findContact?(query: FindContactQuery): Promise<AccountFind>;
+  /** The phone's address book, a page at a time (list_contacts); optional, so a stand-in need not have it. */
+  listContacts?(query: ListContactsQuery): Promise<ContactList>;
   /** The recent exchange (unless `recent: false`) and the user's style in a chat, or null when it has no history. */
   draftContext?(chatJid: string, options: { recent: boolean; private?: PrivateRule }): DraftContext | null;
   /**

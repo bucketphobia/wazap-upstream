@@ -17,6 +17,7 @@ import { coverageNote, indexCoverageNote, searchCoverage } from "./coverage.js";
 import { describeTarget, looksUnnamed, renderDraft, type DraftPayload, type DraftView } from "./drafts.js";
 import { ERROR_GUIDE, WazapError, asWazapError } from "./errors.js";
 import { FIND_CONTACT_OUTPUT, runFindContact } from "./find-contact.js";
+import { LIST_CONTACTS_INPUT, runListContacts } from "./list-contacts.js";
 import { freshnessNote, readFreshness } from "./freshness.js";
 import { mediaCaptionOf } from "./media-details.js";
 import { captionTravels, mimeOfSource } from "./outgoing-media.js";
@@ -267,6 +268,7 @@ const HINTS: Record<string, ToolHints> = {
   search: hint(true, false, true, true),
   get_message: hint(true, false, true, true),
   find_contact: hint(true, false, true, true),
+  list_contacts: hint(true, false, true, true),
   get_group_info: hint(true, false, true, true),
   // Read-only by the rule above, though save_to writes another file on each call: not idempotent.
   get_media: hint(true, false, false, true),
@@ -392,6 +394,8 @@ Call get_status when anything fails, and link_account when it says not_linked.
   contabilitate"). resolved gives the chat_id; ambiguous or not_found: ask the
   user, never guess. remember keeps what the user says about a person (note,
   tags, fields such as relatie), on this machine; find_contact(tag) lists a tag.
+  list_contacts pages the whole address book (saved name, number, last chat);
+  address_book_synced false means it has not arrived yet.
 - #private: a person's words come only when a call names them: their chat_id,
   a message_id of theirs, search's from; a group's chat_id reads whole. Elsewhere
   their entries say private, with no words, and search counts private_omitted.
@@ -827,6 +831,16 @@ const TOOLS: readonly ToolDef[] = [
     handler: async (args, ctx) => runFindContact(args, ctx),
   }),
   // ---- end find_contact ----------------------------------------------------
+
+  tool({
+    name: "list_contacts",
+    title: "List the phone's address book",
+    description: `The phone's address book on one account, a page at a time: saved name, phone (E.164), chat_id, contact_id, and when the last direct message was and its direction. No message words; #private people left out. address_book_synced false: not arrived yet.`,
+    schema: LIST_CONTACTS_INPUT,
+    // No outputSchema: an integration calls it and reads structuredContent.error on a refusal (src/list-contacts.ts).
+    write: false,
+    handler: async (args, ctx) => runListContacts(args, ctx),
+  }),
 
   tool({
     name: "get_group_info",

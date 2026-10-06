@@ -69,12 +69,14 @@ import type {
   ConnectionStatus,
   ContactDetails,
   ContactDetailsEdit,
+  ContactList,
   ContactSyncResult,
   ContactSummary,
   GroupAction,
   GroupActionResult,
   GroupInfo,
   JoinGroupResult,
+  ListContactsQuery,
   MediaResult,
   MediaSource,
   MessageType,
@@ -423,6 +425,7 @@ export class WhatsAppService implements WhatsAppApi {
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
         waitForSync: () => this.waitForSync(),
+        synced: (data) => this.synced(data),
       },
       this.identity,
       this.views,
@@ -966,6 +969,10 @@ export class WhatsAppService implements WhatsAppApi {
 
   findContact(query: FindContactQuery): Promise<AccountFind> {
     return this.contacts.findContact(query);
+  }
+
+  listContacts(query: ListContactsQuery): Promise<ContactList> {
+    return this.contacts.listContacts(query);
   }
 
   setContactNote(contactId: string, note: string): Promise<ContactSummary> {
