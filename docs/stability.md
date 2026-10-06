@@ -9,7 +9,7 @@ breaking.
 
 | Area | Stable | Additive-only | Not promised |
 | --- | --- | --- | --- |
-| MCP tools | the 20 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
+| MCP tools | the 21 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
 | Safety | draft-then-confirm, send rules, read-only mode, session isolation | new codes for new refusals | the exact error sentences |
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
@@ -18,13 +18,14 @@ breaking.
 
 ## 1. The MCP surface
 
-wazap 1.0 registers exactly 20 tools, a session without writes sees 13 of them,
-and every tool also takes an optional `account_id`. Guarded by:
-`test/tools.test.mjs`, `test/tool-names.test.mjs`.
+wazap registers exactly 21 tools — the 20 of 1.0 and `list_contacts`, added in
+1.2 — a session without writes sees 14 of them, and every tool also takes an
+optional `account_id`. Guarded by: `test/tools.test.mjs`,
+`test/tool-names.test.mjs`.
 
-The 20, each with what it requires: `learn` (), `get_status` (),
+The 21, each with what it requires: `learn` (), `get_status` (),
 `list_chats` (), `catch_up` (), `wait_for_messages` (), `find_contact` (),
-`link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
+`list_contacts` (), `link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
 `confirm_send` (`draft_id`), `manage_group` (`action`),
 `read_messages` (`chat_id`), `remember` (`chat_id`), `get_message`
 (`message_id`), `get_media` (`message_id`), `send_message` (`chat_id`, `text`),
@@ -34,7 +35,7 @@ The 20, each with what it requires: `learn` (), `get_status` (),
 An empty argument list means the tool requires nothing.
 
 Fourteen declare an output schema and answer in that shape, as an SDK client's
-own validator checks it; the six without one are the five of the integration
+own validator checks it; the seven without one are the six of the integration
 contract and `learn` (`test/output-schema.test.mjs`). A refusal is an error result carrying
 `{ error, message, fix }`, with `account_id` added when the tool declares an
 output schema; `error` is one of the 46 codes, and `learn` documents every one
@@ -52,9 +53,9 @@ An integration is a program that runs `wazap serve --http` with a static token
 as the WhatsApp channel of its own product: one account per customer, drafts
 and confirmations, read receipts, pairing and a health probe.
 
-Five tools are an exact contract for an integration: `send_message`,
-`confirm_send`, `manage_chat` with the `mark_read` action, `link_account` and
-`get_status`.
+Six tools are an exact contract for an integration: `send_message`,
+`confirm_send`, `manage_chat` with the `mark_read` action, `link_account`,
+`get_status` and `list_contacts`.
 
 - They keep their names, keep accepting the arguments an integration passes,
   and never gain a required argument it does not pass. `manage_chat` keeps
@@ -64,7 +65,11 @@ Five tools are an exact contract for an integration: `send_message`,
 - Their answers keep the fields an integration reads: `send_message` answers
   `draft_id` and `account_id`; `confirm_send` answers `message_id`, `chat_id`,
   `text`, `timestamp` and `account_id`; `link_account` answers `code`,
-  `expires_at`, `phone_masked` and `account_id`.
+  `expires_at`, `phone_masked` and `account_id`; `list_contacts` answers
+  `contacts`, `total`, `next`, `address_book_synced`, `sync` and `account_id`,
+  each contact with `name`, `phone` in E.164, `chat_id`, `contact_id` and
+  `last_message` (`null`, or `at` and `direction` `in` or `out`), and takes
+  `order`, `limit` up to 500 and `cursor`.
 - Over HTTP, a well-formed request carrying a session id wazap does not hold
   (expired, evicted or lost to a restart) answers 404, as the MCP
   specification says, and a fresh `initialize` recovers; one with no session
