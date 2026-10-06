@@ -1,9 +1,9 @@
 # The tools
 
-What each of the 20 tools answers, the workflows behind them, and every error
-code. The [README](../README.md#the-20-tools) has the one-line table.
+What each of the 21 tools answers, the workflows behind them, and every error
+code. The [README](../README.md#the-21-tools) has the one-line table.
 
-## The 20 tools
+## The 21 tools
 
 | Tool | Kind | What it does |
 | --- | --- | --- |
@@ -16,6 +16,7 @@ code. The [README](../README.md#the-20-tools) has the one-line table.
 | `search` | read | Messages by meaning and by words at once, over everything the account keeps, so a paraphrase or another language still hits; `match: "words"` keeps only messages holding the words. `chat_id`, `since`, `until` and `from` narrow it, and the answer says how much it searched. Without `chat_id`, someone tagged `#private` is left out and counted in `private_omitted`. Without [semantic recall](recall.md#semantic-recall) it matches words and says so. |
 | `get_message` | read | One message in full, with its quoted message, each reaction with who left it, and who voted for each option of a poll or answered an event. On your own messages, `delivery` says whether it was sent, delivered, read or played, and in a group who read it and when. |
 | `find_contact` | read | Who a name, nickname, relationship ("mama"), group name, number or id means. Resolved: the `chat_id`, number, note, tags and details, plus the recent exchange and how you write there in a session that can send. Otherwise the candidates that tell people apart, to ask you. `tag` lists everyone filed under a tag. See [Finding people](#finding-people). |
+| `list_contacts` | read | The phone's address book on one account, a page at a time (up to 500, `next` as `cursor`): each person's saved name, number in E.164, `chat_id`, `contact_id`, and when the last direct message was and which way it went. `order: "recent"` (default) puts whoever you talked to last first; `address_book` keeps the phone's order. No message words. See [The address book](#the-address-book). |
 | `get_group_info` | read | Participants, admins, announcement mode, who may edit the info or add members, join approval, disappearing messages, community, invite link (when you are admin). |
 | `get_media` | read | A message's media: a voice note or audio as its transcript, a photo attached as an image, any file saved to disk (`save_to` picks the directory). Transcription runs on the local or the API provider; with `save_to` a recording comes as its file, with a transcript only if one was already made, and when no transcript can be made the file comes instead, with `transcript_unavailable` saying why. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, then return it with a cursor for the next call. `addressed_to_me` wakes only for direct messages, @-mentions and replies. |
@@ -230,6 +231,69 @@ not ask while the connection is still receiving its first sync, nor again
 within 7 days of the last ask, the same rule wazap heals a missing address book
 by at connect.
 
+### The address book
+
+`list_contacts` lists the phone's address book on one account (`account_id`,
+or the default one), for a program that lets you pick people out of it — say,
+importing your clients — or an assistant asked who is in it. Each entry:
+
+- `name` — the saved name. wazap keeps three names for a person: this one,
+  the one WhatsApp's contact events give (`notify`) and the one they publish
+  on their own messages (push name). Only the first makes someone part of this
+  list: contact events also name people who only wrote or share a group with
+  you, and those carry a push name and no saved name. The saved name comes
+  from the address book WhatsApp sends after linking, and from the name the
+  history gives a direct chat, which is the saved name or, for someone not
+  saved who has a WhatsApp username, that username: wazap cannot tell those
+  two apart.
+- `phone` — the number in E.164 (`+40721000111`), and `chat_id`, the direct
+  chat's id (`40721000111@s.whatsapp.net`) to pass to the other tools. Keep
+  `chat_id` as the key of what you import.
+- `contact_id` — the number the webhook's message events name them by.
+- `last_message` — `{ at, direction }` for the newest message of your direct
+  chat with them that is not a notice (a security code that changed, the
+  encryption banner), `at` in ISO 8601 with its offset and `direction` `in`
+  or `out`, or `null` when wazap holds no such message (a chat whose history
+  never reached it counts as none). Never a word of it.
+
+Left out: someone with no number (a privacy id alone), groups, the account
+itself, and anyone tagged `#private` on any linked account. Someone you
+remove from the phone's address book stays: WhatsApp does not say so.
+
+`order: "recent"` (the default) lists the people you have a direct chat with
+first, the latest first, then everyone else in the address book's order;
+`order: "address_book"` is that order alone — the order wazap first heard of
+each person, which is the order WhatsApp delivered the address book in, after
+whoever the history or a message named first. Not an alphabetical one.
+`limit` takes up to 500 (100 by default); `total` counts the whole listing and
+`next`, passed as `cursor` with the same `account_id` and `order`, gives the
+following page, until it is `null`. Every page reads the conversations as they
+stood at the first one, so someone who writes to you while the pages come does
+not jump ahead of the cursor and get missed; a message deleted meanwhile can
+move its person later, so a listing may give someone twice (keep the first by
+`chat_id`), and a contact saved meanwhile may wait for the next listing. Who
+someone is is not frozen: when the number behind a privacy id becomes known,
+two rows become one person, who can move ahead of the cursor and take another
+`contact_id`. That happens mostly during the first sync, so a listing begun
+before `sync` is `done` is worth reading again.
+
+`address_book_synced` is `false` until the address book itself has reached
+wazap. Right after linking the history sync comes first, and it names the
+people of your chats; the address book comes through WhatsApp's app state
+sync, holds people you never wrote to, and nothing says when it is complete.
+So the answer is `true` once someone saved with a name has no chat with you:
+a list read while it is `false` holds the people of your chats only, and an
+address book whose every contact has a chat with you, or an empty one, never
+reads as synced. `get_status` counts the saved names in `contacts_named`; a
+list read right after linking is worth reading again once `sync` is `done`
+and that count stops growing. It answers from what wazap stores, so it works
+while the link is down, and an account that is not linked answers the error
+every read gets.
+
+It is a read, so every session that can read gets it, a read-only token and
+an assistant included: whoever holds such a session can page through your
+whole address book, names and numbers.
+
 ### Keeping someone private
 
 Tag a person `#private` (`remember` with `add_tags: ["private"]`) and their
@@ -243,6 +307,7 @@ and what kind, and loses the words:
 
 - `catch_up` counts them and never quotes them; their entries say `private`.
 - `find_contact`'s draft context carries your style for them, no messages.
+- `list_contacts` leaves them out altogether.
 - `search` without `chat_id` leaves out their chat and what they write in
   groups before it counts to `limit`, by meaning and by words, and says how
   many in `private_omitted`. A quote of theirs in someone else's message keeps

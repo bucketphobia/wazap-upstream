@@ -90,11 +90,11 @@ test("a tool without an outputSchema keeps its structured error", async () => {
   }
 });
 
-test("the five tools of the integration contract declare no outputSchema", () => {
+test("the six tools of the integration contract declare no outputSchema", () => {
   // An integration (test/integration-contract.test.mjs) reads structuredContent.error on these
   // tools' failures. A tool with an outputSchema answers errors as text only, so
   // giving any of them one would break its error handling: that needs a major.
-  for (const name of ["send_message", "confirm_send", "manage_chat", "link_account", "get_status"]) {
+  for (const name of ["send_message", "confirm_send", "manage_chat", "link_account", "get_status", "list_contacts"]) {
     const tool = tools.find((entry) => entry.name === name);
     assert.ok(tool, `${name} is registered`);
     assert.equal(tool.outputSchema, undefined, `${name} must not declare an outputSchema`);
@@ -173,9 +173,9 @@ test("a search whose coverage could not be counted still reaches an SDK client, 
   }
 });
 
-test("only the five tools of the integration contract and learn go without an output schema", () => {
+test("only the six tools of the integration contract and learn go without an output schema", () => {
   assert.deepEqual(
     tools.filter((tool) => tool.outputSchema === undefined).map((tool) => tool.name).sort(),
-    ["confirm_send", "get_status", "learn", "link_account", "manage_chat", "send_message"]
+    ["confirm_send", "get_status", "learn", "link_account", "list_contacts", "manage_chat", "send_message"]
   );
 });

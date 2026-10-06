@@ -130,7 +130,7 @@ test("the icon is a PNG the bundle can point at", () => {
 });
 
 /**
- * The README keeps a one-line table of the 20 and the reference lives in
+ * The README keeps a one-line table of the tools and the reference lives in
  * docs/tools.md, so both tables are read here: each is the registry, neither
  * may drift, and the scan for a retired name covers every page in docs/.
  */
@@ -142,7 +142,7 @@ test("the README's tool table is the registry, and no shipped document names a r
     // The table ends where its rows do: the first blank line after the header.
     const table = text.slice(start, text.indexOf("\n\n", start));
     const listed = [...table.matchAll(/^\| `([a-z_]+)` \|/gm)].map((match) => match[1]);
-    assert.deepEqual([...listed].sort(), [...TOOL_NAMES].sort(), `${page}'s table is not the 20`);
+    assert.deepEqual([...listed].sort(), [...TOOL_NAMES].sort(), `${page}'s table is not the registry`);
   }
   const docs = readdirSync(join(root, "docs")).map((name) => `docs/${name}`);
   for (const file of ["README.md", "AGENT.md", "AGENTS.md", ...docs, "manifest.json", "server.json", ".claude-plugin/plugin.json"]) {
@@ -153,7 +153,10 @@ test("the README's tool table is the registry, and no shipped document names a r
       if ((file === "docs/security-audit.md" && name === "download_media") || name === "recall") continue;
       assert.doesNotMatch(text, new RegExp(`\`${name}[\`(.]`), `${file} names ${name}`);
     }
-    assert.doesNotMatch(text, /\b(3[0-9]|40|2[1-9]) (read |write )?tools\b/, `${file} counts tools the old way`);
+    // Any count of twenty or more is the registry's own: the 40 of 0.23 and the 20 of 1.0 are both gone.
+    for (const [, count] of text.matchAll(/\b(\d+) (?:read |write )?tools\b/g)) {
+      assert.ok(Number(count) < 20 || Number(count) === TOOL_NAMES.length, `${file} counts ${count} tools, not the registry's ${TOOL_NAMES.length}`);
+    }
   }
   // The settings file names tools too, and there `recall` alone is the retired tool: the setting is WAZAP_RECALL.
   const settings = readFileSync(join(root, ".env.example"), "utf8");

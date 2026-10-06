@@ -26,6 +26,7 @@ const READ_TOOLS = [
   "search",
   "get_message",
   "find_contact",
+  "list_contacts",
   "get_group_info",
   "get_media",
   "catch_up",
@@ -43,12 +44,12 @@ const WRITE_TOOLS = [
   "manage_group",
 ];
 
-test("the registry is exactly the 20 documented tools, 13 of them in a session without writes", () => {
+test("the registry is exactly the 21 documented tools, 14 of them in a session without writes", () => {
   assert.deepEqual([...TOOL_NAMES].sort(), [...READ_TOOLS, ...WRITE_TOOLS].sort());
-  assert.equal(TOOL_NAMES.length, 20);
-  assert.equal(TOOL_COUNT, 20);
-  assert.equal(READ_TOOLS.length, 13);
-  assert.equal(READ_TOOL_COUNT, 13);
+  assert.equal(TOOL_NAMES.length, 21);
+  assert.equal(TOOL_COUNT, 21);
+  assert.equal(READ_TOOLS.length, 14);
+  assert.equal(READ_TOOL_COUNT, 14);
 });
 
 test("read-only registration exposes no write tool at all", () => {
@@ -487,6 +488,7 @@ test("each tool's annotations are true of its most far-reaching action: get_medi
     search: "1011",
     get_message: "1011",
     find_contact: "1011",
+    list_contacts: "1011",
     get_group_info: "1011",
     get_media: "1001",
     send_message: "0001",
