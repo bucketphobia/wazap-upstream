@@ -4,14 +4,18 @@
  * clients) or an assistant asked who is in it.
  *
  * Who is in it (db.contacts.addressBook): a person a contact event placed in
- * the address book (`listed`) who carries the name saved on the phone
- * (`contacts.name`) and a phone number. A push name — what someone calls
- * themselves on their own messages, kept in `notify` and `push_name` — never
- * makes anyone a contact here: WhatsApp's contact events also name people who
- * only wrote or sit in a shared group, and those come with a push name and no
- * saved name. Left out as well: a lid without a number, groups, the account
- * itself, and anyone tagged #private on this account or another live one
- * (src/private-contacts.ts) — a list nobody asked for by name.
+ * the address book (`listed`) who carries a saved name (`contacts.name`) and a
+ * phone number. A push name — what someone calls themselves on their own
+ * messages, kept in `notify` and `push_name` — never makes anyone a contact
+ * here: WhatsApp's contact events also name people who only wrote or sit in a
+ * shared group, and those come with a push name and no saved name. The saved
+ * name comes from the address book WhatsApp sends after linking, and from the
+ * name the history sync gives a direct chat — the saved name, or a username
+ * where the person has one and is not saved; wazap cannot tell those two
+ * apart. Left out as well: a lid without a number, groups, the account itself,
+ * and anyone tagged #private on this account or another live one
+ * (src/private-contacts.ts) — a list nobody asked for by name. Someone removed
+ * from the phone's address book stays: WhatsApp does not say so.
  *
  * Each person comes with metadata only: the saved name, the number in E.164,
  * the chat id, the contact id the webhook names them by, and when the last
@@ -19,8 +23,9 @@
  *
  * Orders: `recent` puts the people with a direct chat first, the latest first,
  * then everyone else in the address book's order; `address_book` is that
- * order alone — the order the contact events first named each person, which
- * is how the phone delivered its address book, not an alphabetical one.
+ * order alone — the order wazap first heard of each person (`listed`): the
+ * order WhatsApp delivered the address book in, after whoever the history or
+ * a message named first. Not an alphabetical one.
  *
  * Pages: the cursor (`next`) is opaque and self-contained: the account, the
  * order, where the page ended, and the stored message the first page read up
@@ -28,15 +33,21 @@
  * who writes while the pages are fetched does not jump ahead of the cursor
  * and get skipped. A message deleted meanwhile can move its person later, so a
  * listing may repeat someone (dedupe by chat_id); a person the address book
- * adds meanwhile may come only in the next listing.
+ * adds meanwhile may come only in the next listing. Identity is not frozen:
+ * when the number behind a privacy id becomes known, the two rows fold into
+ * one, which can move that person ahead of the cursor or change their
+ * contact_id. That happens mostly while the first sync runs, so a listing begun
+ * before `sync` is done is worth repeating, and chat_id is the key to keep.
+ * A page read while history is still arriving walks back through what arrived
+ * since the first page, chat by chat.
  *
- * Whether the address book arrived (`address_book_synced`): any contact
- * carrying a saved name, the count get_status reports as contacts_named.
- * WhatsApp sends the address book once after linking, through the app state
- * sync, and says nothing when it is done; so a phone whose address book is
- * empty never reads as synced, and a book still arriving reads as synced from
- * its first name on (wazap's own self-heal gives it 15 seconds past the
- * history sync, and `sync` says whether that one is done).
+ * Whether the address book arrived (`address_book_synced`): someone saved
+ * with a name has no chat with the account. The history sync names only the
+ * people of its chats, and comes first; the address book comes through the
+ * app state sync, holds people never written to, and WhatsApp says nothing
+ * when it is done. So a book still arriving reads as synced from its first
+ * such name on, and a phone whose every saved contact has a chat, or whose
+ * address book is empty, never does.
  */
 import { z } from "zod";
 import { ADDRESS_BOOK_MAX_PAGE, type AccountDb, type AddressBookKey, type AddressBookOrder } from "./db/index.js";
@@ -95,17 +106,12 @@ export function decodeCursor(cursor: string, accountId: string, order: AddressBo
   return { accountId, order, asOfSeq: parsed.s, after: { listed: parsed.l as number, id: parsed.i, at: parsed.t as number | null } };
 }
 
-/**
- * One page of one account's address book (see the top of this file). `named`
- * is how many contacts carry a saved name, the service's cached count. The
- * service calls it.
- */
+/** One page of one account's address book (see the top of this file). The service calls it. */
 export function listInAccount(
   db: AccountDb,
   accountId: string,
   query: Pick<ListContactsQuery, "order" | "limit" | "cursor">,
-  people: PrivatePeople | null,
-  named: number
+  people: PrivatePeople | null
 ): Omit<ContactList, "sync"> {
   const state = query.cursor === undefined ? null : decodeCursor(query.cursor, accountId, query.order);
   const asOfSeq = state?.asOfSeq ?? db.digest.storedTop();
@@ -127,7 +133,7 @@ export function listInAccount(
     contacts,
     total: page.total,
     next: page.next === null ? null : encodeCursor({ accountId, order: query.order, asOfSeq, after: page.next }),
-    address_book_synced: named > 0,
+    address_book_synced: page.arrived,
   };
 }
 
@@ -141,7 +147,7 @@ export function listInAccount(
 export const LIST_CONTACTS_INPUT = {
   order: z.enum(["recent", "address_book"]).default("recent").describe("recent: latest direct chat first, then the rest in address book order"),
   limit: z.number().int().min(1).max(ADDRESS_BOOK_MAX_PAGE).default(LIST_CONTACTS_DEFAULT_LIMIT),
-  cursor: z.string().min(1).optional().describe("next from the previous page"),
+  cursor: z.string().min(1).max(512).optional().describe("next from the previous page"),
 };
 
 function lastLine(contact: ListedContact): string {
@@ -149,12 +155,14 @@ function lastLine(contact: ListedContact): string {
   return `last ${contact.last_message.direction} ${contact.last_message.at.slice(0, 16).replace("T", " ")}`;
 }
 
+const NOT_ARRIVED = "The phone's address book has not reached wazap yet (WhatsApp sends it once after linking): call again in a few seconds.";
+
 export function renderContactList(list: ContactList, order: AddressBookOrder): string {
-  if (!list.address_book_synced) {
-    return "The phone's address book has not reached wazap yet: WhatsApp sends it once after linking. Call again in a few seconds; get_status says whether the sync is done.";
+  if (list.total === 0) {
+    return list.address_book_synced ? "Nobody in the address book has a number and a saved name (people tagged #private are left out)." : NOT_ARRIVED;
   }
-  if (list.total === 0) return "Nobody in the address book has a number and a saved name (people tagged #private are left out).";
   const lines = [`# Address book — ${order} (${list.contacts.length} of ${list.total})`];
+  if (!list.address_book_synced) lines.push(`Only the people of your chats so far. ${NOT_ARRIVED}`);
   for (const c of list.contacts) lines.push(`- ${c.name} — ${c.phone} · ${lastLine(c)}`);
   if (list.next !== null) lines.push(`More: pass cursor "${list.next}".`);
   return lines.join("\n");

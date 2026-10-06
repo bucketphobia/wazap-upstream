@@ -261,7 +261,7 @@ export class AccountContacts {
       const status = this.host.status();
       if (status !== "connected" && status !== "connecting" && status !== "disconnected") this.host.ensureConnected();
       const db = this.storage.db;
-      const page = listInAccount(db, this.accountRecord.id, query, this.identity.privateScope(query.private ?? { others: [] }), this.namedContacts());
+      const page = listInAccount(db, this.accountRecord.id, query, this.identity.privateScope(query.private ?? { others: [] }));
       const { sync } = this.host.synced(null);
       return { ...page, sync };
     });

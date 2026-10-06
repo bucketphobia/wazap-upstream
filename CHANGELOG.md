@@ -6,24 +6,25 @@
 
 - **`list_contacts`: the phone's address book, a page at a time.** For a
   program that lets its user pick people out of the address book — importing
-  clients, say — or an assistant asked who is in it. Each person comes with the
-  name saved on the phone, the number in E.164, `chat_id`, the `contact_id` the
+  clients, say — or an assistant asked who is in it. Each person comes with
+  their saved name, the number in E.164, `chat_id`, the `contact_id` the
   webhook names them by, and `last_message`: when the newest message of the
-  direct chat was and its `direction` (`in` or `out`), or `null` when you never
-  talked. Never a word of any message. `order: "recent"` (the default) puts
-  whoever you talked to last first and everyone else after, in the address
-  book's order; `order: "address_book"` keeps that order alone. Up to 500 a
-  page, with `total` and an opaque `next` to pass as `cursor`; the pages read
-  the conversations as the first one saw them, so someone writing to you
-  meanwhile is not skipped. Only people saved with a name and a number are
-  listed: not someone known by their push name alone, a privacy id without a
-  number, a group, the account itself, or anyone tagged `#private` on any
-  linked account. `address_book_synced` is `false` until the first saved name
-  has arrived, so an app can show that the address book is still syncing
-  right after linking. It reads what wazap stores, so it answers while the
-  link is down. It joins the integration contract (`docs/stability.md`) and,
-  like the other tools there, declares no output schema, so a refusal keeps its
-  `structuredContent.error`.
+  direct chat that is not a notice was and its `direction` (`in` or `out`), or
+  `null` when you never talked. Never a word of any message. `order: "recent"`
+  (the default) puts whoever you talked to last first and everyone else after,
+  in the address book's order; `order: "address_book"` keeps that order alone.
+  Up to 500 a page, with `total` and an opaque `next` to pass as `cursor`; the
+  pages read the conversations as the first one saw them, so someone writing
+  to you meanwhile is not skipped. Only people with a saved name and a number
+  are listed: not someone known by their push name alone, a privacy id without
+  a number, a group, the account itself, or anyone tagged `#private` on any
+  linked account. `address_book_synced` stays `false` until the address book
+  itself has arrived — someone saved with a name and no chat with you — so an
+  app can show that it is still syncing right after linking, when only the
+  history's names of the people of your chats are in. It reads what wazap
+  stores, so it answers while the link is down. It joins the integration
+  contract (`docs/stability.md`) and, like the other tools there, declares no
+  output schema, so a refusal keeps its `structuredContent.error`.
 
 ## 1.1.1
 

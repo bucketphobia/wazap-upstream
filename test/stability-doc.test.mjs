@@ -34,7 +34,7 @@ const doc = read(DOC);
 const contractTest = read("test/integration-contract.test.mjs");
 
 /** Number words the document writes out, so a prose count is still a number to check. */
-const WORDS = { five: 5, six: 6, seven: 7, eight: 8, thirteen: 13, fourteen: 14, fifteen: 15, twenty: 20 };
+const WORDS = { five: 5, six: 6, seven: 7, eight: 8, thirteen: 13, fourteen: 14, twenty: 20 };
 const asNumber = (word) => (word.toLowerCase() in WORDS ? WORDS[word.toLowerCase()] : Number(word));
 
 /** Every `…` span of the document that is one bare identifier. */

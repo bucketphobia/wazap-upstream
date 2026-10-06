@@ -176,7 +176,7 @@ test("a cursor from another order, another account or nowhere is refused as INVA
   await assert.rejects(svc.listContacts({ order: "recent", limit: 1, cursor: forged }), (err) => err.code === "INVALID_ID" && /account work/.test(err.message));
 });
 
-test("an address book that has not arrived says so, and push names alone do not count as its arrival", async (t) => {
+test("an address book that has not arrived says so: push names, and the names the history gives the people of its chats, do not count as its arrival", async (t) => {
   const { svc, sock } = service();
   t.after(() => svc.stop());
   say(svc, ANA, { text: "salut" });
@@ -189,10 +189,41 @@ test("an address book that has not arrived says so, and push names alone do not 
   assert.equal(answer.structuredContent.address_book_synced, false);
   assert.match(answer.content[0].text, /has not reached wazap yet/);
 
-  addressBook(sock, [[ANA, "Ana Pop"]]);
+  // The history sync, which comes first, names the people of its chats the way a contact event does.
+  svc.db.identity.upsertContact({ jid: ANA, name: "Ana Pop", listed: true });
+  const history = await svc.listContacts({ order: "recent", limit: 10 });
+  assert.equal(history.address_book_synced, false, "names that all have a chat may be the history's alone");
+  assert.deepEqual(history.contacts.map((c) => c.chat_id), [ANA], "the people of the chats are listed meanwhile");
+  assert.match((await call("list_contacts", {})).content[0].text, /Only the people of your chats so far/);
+
+  // The address book itself holds people never written to.
+  addressBook(sock, [
+    [ANA, "Ana Pop"],
+    [BOGDAN, "Bogdan"],
+  ]);
   const arrived = await svc.listContacts({ order: "recent", limit: 10 });
   assert.equal(arrived.address_book_synced, true);
+  assert.deepEqual(arrived.contacts.map((c) => c.chat_id), [ANA, BOGDAN]);
   assert.equal(arrived.contacts[0].last_message.direction, "in");
+});
+
+test("a notice is not talking: the last message is the newest one that is not a system notice", async (t) => {
+  const { svc, sock } = service();
+  t.after(() => svc.stop());
+  addressBook(sock, [
+    [ANA, "Ana"],
+    [BOGDAN, "Bogdan"],
+    [CARMEN, "Carmen"],
+  ]);
+  say(svc, BOGDAN, { ago: 90, fromMe: true });
+  // Ana reinstalled WhatsApp: the only thing in her chat is the security-code notice, just now.
+  svc.db.messages.upsert({ chatJid: ANA, keyId: "SYS1", fromMe: false, ts: Date.now(), type: "system", text: "[security code changed]" });
+  svc.db.messages.upsert({ chatJid: BOGDAN, keyId: "SYS2", fromMe: false, ts: Date.now(), type: "system", text: "[security code changed]" });
+  const recent = await svc.listContacts({ order: "recent", limit: 10 });
+  assert.deepEqual(recent.contacts.map((c) => c.chat_id), [BOGDAN, ANA, CARMEN]);
+  assert.equal(recent.contacts[0].last_message.direction, "out", "Bogdan's last is the user's message, not the notice after it");
+  assert.ok(Date.parse(recent.contacts[0].last_message.at) < Date.now() - 80 * MINUTE);
+  assert.equal(recent.contacts[1].last_message, null, "a chat of notices alone is no conversation");
 });
 
 test("the tool answers metadata and no message words, with defaults, and the account it read", async (t) => {

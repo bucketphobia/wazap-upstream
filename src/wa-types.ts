@@ -760,7 +760,7 @@ export interface ContactList {
   total: number;
   /** Pass as cursor for the next page; null on the last one. */
   next: string | null;
-  /** Whether any name from the phone's address book has reached wazap yet. */
+  /** Whether the phone's address book has reached wazap: someone saved has no chat with the account (src/list-contacts.ts). */
   address_book_synced: boolean;
   sync: SyncState;
 }

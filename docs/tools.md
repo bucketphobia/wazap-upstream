@@ -237,44 +237,62 @@ by at connect.
 or the default one), for a program that lets you pick people out of it — say,
 importing your clients — or an assistant asked who is in it. Each entry:
 
-- `name` — the name saved on the phone. wazap keeps three names for a person:
-  this one (from the address book WhatsApp sends after linking), the one
-  WhatsApp's contact events give (`notify`) and the one they publish on their
-  own messages (push name). Only the first makes someone part of this list:
-  contact events also name people who only wrote or share a group with you,
-  and those carry a push name and no saved name.
+- `name` — the saved name. wazap keeps three names for a person: this one,
+  the one WhatsApp's contact events give (`notify`) and the one they publish
+  on their own messages (push name). Only the first makes someone part of this
+  list: contact events also name people who only wrote or share a group with
+  you, and those carry a push name and no saved name. The saved name comes
+  from the address book WhatsApp sends after linking, and from the name the
+  history gives a direct chat, which is the saved name or, for someone not
+  saved who has a WhatsApp username, that username: wazap cannot tell those
+  two apart.
 - `phone` — the number in E.164 (`+40721000111`), and `chat_id`, the direct
-  chat's id (`40721000111@s.whatsapp.net`) to pass to the other tools.
+  chat's id (`40721000111@s.whatsapp.net`) to pass to the other tools. Keep
+  `chat_id` as the key of what you import.
 - `contact_id` — the number the webhook's message events name them by.
 - `last_message` — `{ at, direction }` for the newest message of your direct
-  chat with them, `at` in ISO 8601 with its offset and `direction` `in` or
-  `out`, or `null` when wazap holds no direct message with them (a chat whose
-  history never reached it counts as none). Never a word of it.
+  chat with them that is not a notice (a security code that changed, the
+  encryption banner), `at` in ISO 8601 with its offset and `direction` `in`
+  or `out`, or `null` when wazap holds no such message (a chat whose history
+  never reached it counts as none). Never a word of it.
 
 Left out: someone with no number (a privacy id alone), groups, the account
-itself, and anyone tagged `#private` on any linked account.
+itself, and anyone tagged `#private` on any linked account. Someone you
+remove from the phone's address book stays: WhatsApp does not say so.
 
 `order: "recent"` (the default) lists the people you have a direct chat with
 first, the latest first, then everyone else in the address book's order;
-`order: "address_book"` is that order alone — the order WhatsApp delivered the
-address book in, not an alphabetical one. `limit` takes up to 500 (100 by
-default); `total` counts the whole listing and `next`, passed as `cursor`
-with the same `account_id` and `order`, gives the following page, until it is
-`null`. Every page reads the conversations as they stood at the first one, so
-someone who writes to you while the pages come does not jump ahead of the
-cursor and get missed; a message deleted meanwhile can move its person later,
-so a listing may give someone twice (keep the first by `chat_id`), and a
-contact saved meanwhile may wait for the next listing.
+`order: "address_book"` is that order alone — the order wazap first heard of
+each person, which is the order WhatsApp delivered the address book in, after
+whoever the history or a message named first. Not an alphabetical one.
+`limit` takes up to 500 (100 by default); `total` counts the whole listing and
+`next`, passed as `cursor` with the same `account_id` and `order`, gives the
+following page, until it is `null`. Every page reads the conversations as they
+stood at the first one, so someone who writes to you while the pages come does
+not jump ahead of the cursor and get missed; a message deleted meanwhile can
+move its person later, so a listing may give someone twice (keep the first by
+`chat_id`), and a contact saved meanwhile may wait for the next listing. Who
+someone is is not frozen: when the number behind a privacy id becomes known,
+two rows become one person, who can move ahead of the cursor and take another
+`contact_id`. That happens mostly during the first sync, so a listing begun
+before `sync` is `done` is worth reading again.
 
-`address_book_synced` is `false` until the first saved name has reached wazap.
-WhatsApp sends the address book once after linking, through its app state
-sync, and never says when it is done: a phone whose address book is empty
-never reads as synced, and one still arriving reads as synced from its first
-name on. `sync` says whether the history sync is done, and `get_status`
-counts the saved names in `contacts_named`; a list read right after linking
-is worth reading again once both settle. It answers from what wazap stores,
-so it works while the link is down, and an account that is not linked answers
-the error every read gets.
+`address_book_synced` is `false` until the address book itself has reached
+wazap. Right after linking the history sync comes first, and it names the
+people of your chats; the address book comes through WhatsApp's app state
+sync, holds people you never wrote to, and nothing says when it is complete.
+So the answer is `true` once someone saved with a name has no chat with you:
+a list read while it is `false` holds the people of your chats only, and an
+address book whose every contact has a chat with you, or an empty one, never
+reads as synced. `get_status` counts the saved names in `contacts_named`; a
+list read right after linking is worth reading again once `sync` is `done`
+and that count stops growing. It answers from what wazap stores, so it works
+while the link is down, and an account that is not linked answers the error
+every read gets.
+
+It is a read, so every session that can read gets it, a read-only token and
+an assistant included: whoever holds such a session can page through your
+whole address book, names and numbers.
 
 ### Keeping someone private
 

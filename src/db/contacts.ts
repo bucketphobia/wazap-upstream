@@ -495,6 +495,12 @@ export interface AddressBookPage {
   total: number;
   /** The key to resume after; null on the last page. */
   next: AddressBookKey | null;
+  /**
+   * Whether the address book itself has arrived: someone saved with a name
+   * has no chat with the account. The history sync names only the people of
+   * its chats, so names that all have a chat may be the history's alone.
+   */
+  arrived: boolean;
 }
 
 /** The most an address book page holds. */
@@ -502,22 +508,24 @@ export const ADDRESS_BOOK_MAX_PAGE = 500;
 
 /**
  * The address book as list_contacts reads it: a person a contact event placed
- * in it (listed), who carries the name saved on the phone (name, which only
- * the address book and a chat's display name in the history fill; a push name
- * goes to notify and push_name) and a phone number; never a lid alone, a group
- * or the account itself. A row still merging into another is that other one.
+ * in it (listed), who carries a saved name and a phone number; never a lid
+ * alone, a group or the account itself. A row still merging into another is
+ * that other one. `name` is filled by the address book WhatsApp sends after
+ * linking and by the name the history gives a direct chat (the saved name, or
+ * a username); a push name goes to notify and push_name instead.
  */
 const ADDRESS_BOOK_SQL = `SELECT id, phone_jid, name, listed FROM contacts INDEXED BY contacts_listed
   WHERE listed IS NOT NULL AND merged_into IS NULL AND phone_jid IS NOT NULL AND name IS NOT NULL`;
 
 /**
- * Every direct chat with a message a reader may see, filed under the person it
- * is with (a contact still merging answers for the one it merges into), with
- * where its newest message was stored.
+ * Every direct chat, filed under the person it is with (a contact still
+ * merging answers for the one it merges into), with its newest message a
+ * reader may see — its time, direction, kind and when it was stored — when it
+ * has one.
  */
-const DIRECT_LAST_SQL = `SELECT c.id, coalesce(k.merged_into, k.id) AS owner, c.last_message_id, c.last_ts, c.last_from_me, c.cleared_through_ts, m.stored_seq
+const DIRECT_CHATS_SQL = `SELECT c.id, coalesce(k.merged_into, k.id) AS owner, c.last_message_id, c.last_ts, c.last_from_me, c.cleared_through_ts, m.stored_seq, m.type
   FROM chats c CROSS JOIN contacts k ON k.id = c.contact_id LEFT JOIN messages m ON m.id = c.last_message_id
-  WHERE c.kind = 'direct' AND c.merged_into IS NULL AND c.last_message_id IS NOT NULL`;
+  WHERE c.kind = 'direct' AND c.merged_into IS NULL`;
 
 /** Negative when a comes before b in the order asked. Recent: talked first, newest first, then the address book's order. */
 export function compareAddressBook(order: AddressBookOrder, a: AddressBookKey, b: AddressBookKey): number {
@@ -703,18 +711,23 @@ export class Contacts {
     const owner = this.c.get<{ value: string }>("SELECT value FROM meta WHERE key = 'owner'")?.value ?? null;
     const exclude = input.exclude ?? null;
 
+    const withChat = new Set<number>();
     const lastOf = new Map<number, { at: number; fromMe: boolean }>();
     for (const chat of this.c.all<{
       id: number;
       owner: number;
-      last_message_id: number;
-      last_ts: number;
-      last_from_me: number;
+      last_message_id: number | null;
+      last_ts: number | null;
+      last_from_me: number | null;
       cleared_through_ts: number | null;
       stored_seq: number | null;
-    }>(DIRECT_LAST_SQL)) {
+      type: string | null;
+    }>(DIRECT_CHATS_SQL)) {
+      withChat.add(chat.owner);
+      if (chat.last_message_id === null || chat.last_ts === null) continue;
+      // A notice (a security code that changed, the encryption banner) is not talking; nor is what came after the listing began.
       const last =
-        chat.stored_seq === null || chat.stored_seq <= input.asOfSeq
+        (chat.stored_seq === null || chat.stored_seq <= input.asOfSeq) && chat.type !== "system"
           ? { at: chat.last_ts, fromMe: chat.last_from_me === 1 }
           : this.lastAsOf(chat.id, chat.cleared_through_ts, input.asOfSeq);
       const known = lastOf.get(chat.owner);
@@ -722,8 +735,11 @@ export class Contacts {
     }
 
     const all: AddressBookEntry[] = [];
+    let arrived = false;
     for (const row of this.c.all<{ id: number; phone_jid: string; name: string; listed: number }>(ADDRESS_BOOK_SQL)) {
       if (!isRealName(row.name) || row.phone_jid === owner || !/^\d+@s\.whatsapp\.net$/.test(row.phone_jid) || /^0+@/.test(row.phone_jid)) continue;
+      // The history names only people the account has a chat with; a saved name without one came from the address book.
+      if (!withChat.has(row.id)) arrived = true;
       if (exclude !== null && (exclude.contactIds.has(row.id) || exclude.jids.has(row.phone_jid))) continue;
       all.push({ contactId: row.id, jid: row.phone_jid, name: row.name.trim(), listed: row.listed, last: lastOf.get(row.id) ?? null });
     }
@@ -733,19 +749,25 @@ export class Contacts {
     const start = after === null ? 0 : all.findIndex((entry) => compareAddressBook(order, keyOf(entry), after) > 0);
     const entries = start === -1 ? [] : all.slice(start, start + limit);
     const more = start !== -1 && start + limit < all.length;
-    return { entries, total: all.length, next: more ? keyOf(entries[entries.length - 1]!) : null };
+    return { entries, total: all.length, next: more ? keyOf(entries[entries.length - 1]!) : null, arrived };
   }
 
-  /** A chat's newest visible message stored at or before `asOfSeq`, its folding chats included: what its last was when a listing began. */
+  /**
+   * A chat's newest visible message that is not a notice and was stored at or
+   * before `asOfSeq`, its folding chats included: what its last was when a
+   * listing began. A folding chat shares the barrier of the chat it folds into
+   * (merge.ts shareBarrier), so the one barrier holds for the whole family.
+   */
   private lastAsOf(chatId: number, clearedThrough: number | null, asOfSeq: number): { at: number; fromMe: boolean } | null {
     let best: { id: number; ts: number; from_me: number } | undefined;
     const family = [chatId, ...this.c.all<{ id: number }>("SELECT id FROM chats WHERE merged_into = ?", chatId).map((row) => row.id)];
     for (const id of family) {
       const row = this.c.get<{ id: number; ts: number; from_me: number }>(
         `SELECT id, ts, from_me FROM messages INDEXED BY messages_chat
-         WHERE chat_id = ? AND deleted_at IS NULL AND ts > ? AND coalesce(stored_seq, 0) <= ?
+         WHERE chat_id = ? AND id >= ? AND deleted_at IS NULL AND ts > ? AND type <> 'system' AND coalesce(stored_seq, 0) <= ?
          ORDER BY id DESC LIMIT 1`,
         id,
+        clearedThrough === null ? 0 : idLowerBound(clearedThrough),
         clearedThrough ?? 0,
         asOfSeq
       );
