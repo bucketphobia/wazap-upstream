@@ -24,8 +24,10 @@
  * group is theirs too. A broad read takes the whole set once per call and per
  * account (privatePeople), and with several accounts a person tagged on any of
  * them is tagged on all: the accounts pass each other the jids (taggedJids,
- * the tools' privateRule). The webhook is the builder's channel, not the
- * assistant's, and is not touched.
+ * the tools' privateRule). The webhook never posts them either, with or
+ * without an allowlist: not their direct chat, and not a message they wrote
+ * in a group (src/webhook-filter.ts). A connection event is not a message
+ * and is not filtered.
  *
  * Tags are stored normalized (lowercase, without "#"), so the tag a user files
  * as "#private" or "Private" is `private`. Groups carry no tags.

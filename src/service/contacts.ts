@@ -110,6 +110,8 @@ export interface ContactsHost {
   guarded<T>(work: () => Promise<T>): Promise<T>;
   ensureConnected(): WASocket;
   waitForSync(): Promise<void>;
+  /** Tags changed. The webhook re-reads them, so a pending event for someone just removed can be cancelled. */
+  notesChanged(): void;
   synced<T>(data: T): Synced<T>;
 }
 
@@ -358,6 +360,7 @@ export class AccountContacts {
         throw new WazapError("TEXT_TOO_LONG", `A contact holds at most ${MAX_CONTACT_FIELDS} details.`);
       }
       db.identity.updateFields(jid, { addTags, removeTags, set, removeFields: [...removeFields] });
+      this.host.notesChanged();
       return this.views.contactSummary(jid);
     });
   }

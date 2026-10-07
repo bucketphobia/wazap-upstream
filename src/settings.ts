@@ -28,9 +28,14 @@ import {
   parseWebhookEvent,
   parseWebhookEvents,
   readWebhookSettings,
+  describeWebhookFilter,
   parseWebhookAuth,
+  parseWebhookChats,
+  requireCoalesceSeconds,
+  requireWebhookTag,
   requireWebhookUrl,
   type WebhookEvent,
+  type WebhookFilter,
   type WebhookOverride,
 } from "./webhook.js";
 
@@ -84,6 +89,25 @@ export function setEnvSetting(envFile: string, key: string, value: string): void
   // covers a leftover temp file.
   const tmp = `${envFile}.${process.pid}.tmp`;
   writeFileSync(tmp, text, { mode: 0o600 });
+  chmodSync(tmp, 0o600);
+  renameSync(tmp, envFile);
+}
+
+/** Remove every assignment of `KEY` from the env file. A missing file is already clear. */
+export function unsetEnvSetting(envFile: string, key: string): void {
+  let text: string;
+  try {
+    text = readFileSync(envFile, "utf8");
+  } catch {
+    return;
+  }
+  const assignment = new RegExp(`^\\s*(export\\s+)?${key}\\s*=`);
+  const lines = text.split("\n").filter((line) => !assignment.test(line));
+  let next = lines.join("\n");
+  if (next !== "" && !next.endsWith("\n")) next += "\n";
+  mkdirSync(dirname(envFile), { recursive: true, mode: 0o700 });
+  const tmp = `${envFile}.${process.pid}.tmp`;
+  writeFileSync(tmp, next, { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, envFile);
 }
@@ -160,7 +184,10 @@ const COMMANDS: Record<string, { values: readonly string[]; apply: (config: Conf
   };
 
 const USAGE_FIX =
-  "Run `wazap config writes on|off`, `wazap config transcribe local|openai|off`, `wazap config recall local|off`, `wazap config webhook on|off|auth|no-auth`, `wazap config draft-context on|off`, or `wazap config send allow|deny <list>|open`";
+  "Run `wazap config writes on|off`, `wazap config transcribe local|openai|off`, `wazap config recall local|off`, `wazap config webhook on|off|auth|no-auth|chats|tag|coalesce|retry-401|filter off`, `wazap config draft-context on|off`, or `wazap config send allow|deny <list>|open`";
+
+const WEBHOOK_OPTION_FIX =
+  "Run `wazap config webhook chats <list>|none|off`, `wazap config webhook tag <name>|off`, `wazap config webhook coalesce <seconds>|off`, `wazap config webhook retry-401 on|off`, or `wazap config webhook filter off`";
 
 const SEND_USAGE_FIX =
   'Run `wazap config send` to see the rules, `wazap config send allow <list>` or `wazap config send deny <list>` with numbers and chat ids comma-separated (`none` empties the list), or `wazap config send open` to lift every restriction';
@@ -177,7 +204,7 @@ export async function runConfig(config: Config): Promise<void> {
     say("");
     say(
       dim(
-        "Change writes with `wazap config writes on|off`, transcription with `wazap config transcribe`, recall with `wazap config recall`, webhook with `wazap config webhook on|off|auth|no-auth`, the draft context with `wazap config draft-context on|off`, send rules with `wazap config send`. Probe it with `wazap webhook test`."
+        "Change writes with `wazap config writes on|off`, transcription with `wazap config transcribe`, recall with `wazap config recall`, webhook with `wazap config webhook on|off|auth|no-auth` (and `chats`, `tag`, `coalesce`, `retry-401`), the draft context with `wazap config draft-context on|off`, send rules with `wazap config send`. Probe it with `wazap webhook test`."
       )
     );
     const selected = resolveAccount(config.dataDir, config.accountId);
@@ -188,6 +215,12 @@ export async function runConfig(config: Config): Promise<void> {
   }
 
   const [setting, value, extra] = config.args;
+  // chats, tag, coalesce and retry-401 take a value that is not a secret.
+  // `on` with an extra argument is still the secret, and still refused.
+  if (setting === "webhook" && value !== undefined && value !== "on" && value !== "off" && value !== "auth" && value !== "no-auth") {
+    await applyWebhookOption(config, value, extra);
+    return;
+  }
   if (extra !== undefined && (setting === "transcribe" || setting === "webhook" || setting === "recall")) {
     throw new WazapError(
       "INVALID_ID",
@@ -343,14 +376,26 @@ async function applyRecall(config: Config, value: string): Promise<void> {
 
 function accountWebhook(config: Config): { override: WebhookOverride; source: string } {
   const selected = resolveAccount(config.dataDir, config.accountId);
+  const account = selected.account;
   const override: WebhookOverride = {
-    url: selected.account.webhook_url,
-    secret: selected.account.webhook_secret,
-    events: selected.account.webhook_events,
-    auth: selected.account.webhook_auth,
+    url: account.webhook_url,
+    secret: account.webhook_secret,
+    events: account.webhook_events,
+    auth: account.webhook_auth,
   };
+  if (account.webhook_chats !== undefined || account.webhook_tag !== undefined) {
+    override.filter = { chats: account.webhook_chats ?? [], tag: account.webhook_tag ?? null };
+  }
+  if (account.webhook_coalesce !== undefined) override.coalesce = account.webhook_coalesce;
+  if (account.webhook_retry_401 !== undefined) override.retryUnauthorized = account.webhook_retry_401;
   const fromAccount =
-    override.url !== undefined || override.secret !== undefined || override.events !== undefined || override.auth !== undefined;
+    override.url !== undefined ||
+    override.secret !== undefined ||
+    override.events !== undefined ||
+    override.auth !== undefined ||
+    override.filter !== undefined ||
+    override.coalesce !== undefined ||
+    override.retryUnauthorized !== undefined;
   const source = fromAccount ? "accounts.json" : config.sources.webhook;
   return { override, source };
 }
@@ -367,6 +412,13 @@ function webhookRows(config: Config): string[] {
         `secret: ${maskKey(settings.secret)}`,
         `events: ${settings.events.join(", ")}`,
         ...(settings.auth === undefined ? [] : [`auth: ${settings.auth.name} ${maskKey(settings.auth.value)}`]),
+        filterLine(settings.filter),
+        ...(settings.coalesce !== null
+          ? [`coalesce: ${settings.coalesce.windowMs / 1000}s quiet, by ${settings.coalesce.capMs / 1000}s`]
+          : override.coalesce === 0
+            ? ["coalesce: off"]
+            : []),
+        ...(settings.retryUnauthorized ? ["retry 401: on"] : override.retryUnauthorized === false ? ["retry 401: off"] : []),
       ];
     case "invalid":
       return [`webhook: ${settings.detail}${settings.fix === "" ? "" : ` — ${settings.fix}`}`];
@@ -494,6 +546,150 @@ async function setWebhookAuth(config: Config): Promise<void> {
     setEnvSetting(p.envFile, "WAZAP_WEBHOOK_AUTH", typed);
     say(ok(`webhook auth: ${auth.name} goes with every POST, beside the signature.`));
     say(dim(`Stored in ${shortPath(p.envFile)}.`));
+  }
+  warnIfServerRunning(config);
+}
+
+function filterLine(filter: WebhookFilter | null): string {
+  const described = describeWebhookFilter(filter);
+  if (described === null) return "filter: off, #private excluded";
+  if (described === "empty") return "filter: empty (nothing is posted)";
+  return `filter: ${described}`;
+}
+
+/**
+ * The allowlist, the burst window and the 401 retry. None of these is a
+ * secret, so they are arguments; the URL's secret and the auth header stay
+ * prompts. With --account the value is that account's and replaces the global
+ * filter as a whole once either chats or the tag is set.
+ */
+async function applyWebhookOption(config: Config, verb: string, extra: string | undefined): Promise<void> {
+  if (config.accountId !== undefined) resolveAccount(config.dataDir, config.accountId);
+  switch (verb) {
+    case "chats":
+      setWebhookChats(config, extra);
+      return;
+    case "tag":
+      setWebhookTag(config, extra);
+      return;
+    case "coalesce":
+      setWebhookCoalesce(config, extra);
+      return;
+    case "retry-401":
+      setWebhookRetry401(config, extra);
+      return;
+    case "filter":
+      if (extra !== "off") break;
+      clearWebhookFilter(config);
+      return;
+    default:
+      break;
+  }
+  throw new WazapError("INVALID_ID", `Cannot set webhook "${[verb, extra].filter((part) => part !== undefined).join(" ")}".`, WEBHOOK_OPTION_FIX);
+}
+
+function setWebhookChats(config: Config, raw: string | undefined): void {
+  if (raw === undefined) throw new WazapError("INVALID_ID", "Name the chats, or `none` or `off`.", WEBHOOK_OPTION_FIX);
+  const registry = config.accountId === undefined ? null : AccountRegistry.load(config.dataDir);
+  if (raw === "off") {
+    if (registry !== null) registry.setWebhookChats(config.accountId!, null);
+    else unsetEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_CHATS");
+    say(
+      ok(
+        config.accountId === undefined
+          ? "webhook chats removed. With no tag, every chat is posted again, except contacts tagged #private."
+          : `webhook chats removed for ${config.accountId}.`
+      )
+    );
+  } else if (raw === "none") {
+    if (registry !== null) registry.setWebhookChats(config.accountId!, []);
+    else setEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_CHATS", "");
+    say(ok("webhook chats: none."));
+  } else {
+    const chats = parseWebhookChats(raw);
+    if (chats.length === 0) throw new WazapError("INVALID_ID", "Name the chats, or `none` or `off`.", WEBHOOK_OPTION_FIX);
+    if (registry !== null) registry.setWebhookChats(config.accountId!, chats);
+    else setEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_CHATS", chats.join(","));
+    say(ok(`webhook chats: ${chats.length} ${chats.length === 1 ? "chat" : "chats"}.`));
+  }
+  say(dim(`Stored in ${shortPath(registry === null ? paths(config.dataDir).envFile : paths(config.dataDir).accountsFile)}.`));
+  say(dim("Groups are posted only when their chat id is listed. A contact tagged #private is never posted."));
+  warnIfServerRunning(config);
+}
+
+function setWebhookTag(config: Config, raw: string | undefined): void {
+  if (raw === undefined) throw new WazapError("INVALID_ID", "Name the tag, or `off`.", WEBHOOK_OPTION_FIX);
+  const registry = config.accountId === undefined ? null : AccountRegistry.load(config.dataDir);
+  if (raw === "off") {
+    if (registry !== null) registry.setWebhookTag(config.accountId!, null);
+    else unsetEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_TAG");
+    say(ok(config.accountId === undefined ? "webhook tag: off." : `webhook tag removed for ${config.accountId}.`));
+  } else {
+    const tag = requireWebhookTag(raw);
+    if (registry !== null) registry.setWebhookTag(config.accountId!, tag);
+    else setEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_TAG", tag);
+    say(ok(`webhook tag: ${tag}. Direct chats filed under it with remember are posted; groups are not.`));
+  }
+  say(dim(`Stored in ${shortPath(registry === null ? paths(config.dataDir).envFile : paths(config.dataDir).accountsFile)}.`));
+  say(dim("Adding or removing the tag on a contact takes effect without a restart. A contact tagged #private is never posted."));
+  warnIfServerRunning(config);
+}
+
+function setWebhookCoalesce(config: Config, raw: string | undefined): void {
+  if (raw === undefined) throw new WazapError("INVALID_ID", "Give the seconds, or `off`.", WEBHOOK_OPTION_FIX);
+  const accountId = config.accountId;
+  const file = accountId === undefined ? paths(config.dataDir).envFile : paths(config.dataDir).accountsFile;
+  if (raw === "off" || raw === "0") {
+    if (accountId !== undefined) AccountRegistry.load(config.dataDir).setWebhookCoalesce(accountId, 0);
+    else unsetEnvSetting(file, "WAZAP_WEBHOOK_COALESCE");
+    say(ok(accountId === undefined ? "webhook coalesce: off — one POST per message." : `webhook coalesce off for ${accountId}.`));
+  } else {
+    const seconds = requireCoalesceSeconds(raw);
+    const cap = Math.min(seconds * 2, 300);
+    if (accountId !== undefined) AccountRegistry.load(config.dataDir).setWebhookCoalesce(accountId, seconds);
+    else setEnvSetting(file, "WAZAP_WEBHOOK_COALESCE", String(seconds));
+    say(ok(`webhook coalesce: ${seconds}s quiet, delivered by ${cap}s${accountId === undefined ? "" : ` for ${accountId}`}.`));
+  }
+  say(dim(`Stored in ${shortPath(file)}.`));
+  warnIfServerRunning(config);
+}
+
+function setWebhookRetry401(config: Config, raw: string | undefined): void {
+  if (raw !== "on" && raw !== "off") throw new WazapError("INVALID_ID", "Say on or off.", WEBHOOK_OPTION_FIX);
+  const on = raw === "on";
+  if (config.accountId !== undefined) {
+    AccountRegistry.load(config.dataDir).setWebhookRetry401(config.accountId, on);
+    say(ok(on ? `webhook retry 401: on for ${config.accountId}.` : `webhook retry 401: off for ${config.accountId}.`));
+    say(dim(`Stored in ${shortPath(paths(config.dataDir).accountsFile)}.`));
+  } else if (on) {
+    setEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_RETRY_401", "on");
+    say(ok("webhook retry 401: on — a 401 is retried like a 5xx, for up to a day."));
+    say(dim(`Stored in ${shortPath(paths(config.dataDir).envFile)}.`));
+  } else {
+    unsetEnvSetting(paths(config.dataDir).envFile, "WAZAP_WEBHOOK_RETRY_401");
+    say(ok("webhook retry 401: off — a 401 fails the event at once."));
+    say(dim(`Stored in ${shortPath(paths(config.dataDir).envFile)}.`));
+  }
+  warnIfServerRunning(config);
+}
+
+function clearWebhookFilter(config: Config): void {
+  if (config.accountId !== undefined) {
+    const registry = AccountRegistry.load(config.dataDir);
+    registry.setWebhookChats(config.accountId, null);
+    registry.setWebhookTag(config.accountId, null);
+    say(
+      ok(
+        `webhook filter removed for ${config.accountId}. The global filter applies, if one is set. Contacts tagged #private are still left out.`
+      )
+    );
+    say(dim(`Stored in ${shortPath(paths(config.dataDir).accountsFile)}.`));
+  } else {
+    const file = paths(config.dataDir).envFile;
+    unsetEnvSetting(file, "WAZAP_WEBHOOK_CHATS");
+    unsetEnvSetting(file, "WAZAP_WEBHOOK_TAG");
+    say(ok("webhook filter: off. Every chat is posted, except contacts tagged #private."));
+    say(dim(`Stored in ${shortPath(file)}.`));
   }
   warnIfServerRunning(config);
 }

@@ -140,8 +140,9 @@ off by default and both can run entirely on this machine.
   chose the `openai` provider instead of the local one; and your own webhook
   URL, if you configured one ([docs/data.md](docs/data.md)).
 - **Some people can be kept out of it.** Tag someone `#private` and their words
-  stay out of everything the assistant did not ask about them by name; tag them
-  `#no-catchup` and their chat is skipped entirely.
+  stay out of everything the assistant did not ask about them by name, and the
+  outbound webhook never posts them. Tag them `#no-catchup` and their chat is
+  skipped entirely.
 - **What it does not do.** There is no bulk send, no scheduler and no campaign
   tool. It never marks anything read on WhatsApp on its own. Text it sends goes
   out without a link preview, and nothing — not wazap, not Baileys — fetches

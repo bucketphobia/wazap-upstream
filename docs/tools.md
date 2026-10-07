@@ -324,8 +324,9 @@ and what kind, and loses the words:
 The tag goes with the person: filed on one account, it holds in `search`,
 `wait_for_messages`, `list_chats`, the stories and `find_contact`'s draft
 context of every other account, by number or lid, and in every catch-up. The
-[outbound webhook](api-and-webhooks.md#outbound-webhook) is not affected; it is the channel for
-what you build, not the assistant's.
+[outbound webhook](api-and-webhooks.md#which-chats-are-posted) never posts their
+direct chat or a message they wrote in a group, with or without a chat filter.
+A `connection` event still goes out: it carries no message content.
 
 
 ## Errors

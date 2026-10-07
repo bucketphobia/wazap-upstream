@@ -308,6 +308,7 @@ export class WhatsAppService implements WhatsAppApi {
       sink: () => this.webhook,
       payload: (event, message) => this.webhooks.webhookPayload(event, message),
       awaitingTranscript: (message) => this.voice.webhookAwaitsTranscript(message),
+      allows: (_event, message) => this.webhooks.allowsMessage(message),
     });
     const policy = accountPolicy(account, config);
     this.effectiveReadOnly = policy.readOnly;
@@ -425,6 +426,7 @@ export class WhatsAppService implements WhatsAppApi {
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
         waitForSync: () => this.waitForSync(),
+        notesChanged: () => this.outbox.kick(),
         synced: (data) => this.synced(data),
       },
       this.identity,

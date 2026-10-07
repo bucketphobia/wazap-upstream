@@ -216,6 +216,15 @@ export interface WebhookInfo {
   last_error: string | null;
   /** Only while the webhook is on and valid: the account's outbox, as its database records it. */
   delivery?: WebhookDelivery;
+  /**
+   * Set when a chat allowlist is configured. `empty` posts no message events.
+   * Otherwise a short phrase: `tag autopeloc`, `2 chats`, or both.
+   */
+  allowlist?: string;
+  /** The quiet window, in seconds, when bursts in one chat share a POST. */
+  coalesce_seconds?: number;
+  /** A 401 is retried instead of failing the event at once. */
+  retry_unauthorized?: true;
 }
 
 /**

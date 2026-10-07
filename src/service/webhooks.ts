@@ -9,6 +9,7 @@
 import type { WAMessage } from "baileys";
 import type { AccountRecord } from "../accounts.js";
 import type { EventRecord, StoredMessage } from "../db/index.js";
+import { webhookAllowsMessage } from "../webhook-filter.js";
 import { logError } from "../logger.js";
 import { isUserMessage, messageIdFor } from "../messages.js";
 import {
@@ -131,6 +132,10 @@ export class AccountWebhooks {
       }
       const message = db.messages.get(sid);
       if (message === null || db.events.hasMessageEvent(message.id, event)) continue;
+      // A filter is read here and again at post time. Skipping the enqueue keeps
+      // a chat that was never allowed out of the outbox; the second check is
+      // what cancels one that was allowed and then removed.
+      if (!webhookAllowsMessage(db, settings.filter, message)) continue;
       db.events.enqueue({
         kind: event,
         lane: chatLane(message.chatId),
@@ -171,6 +176,21 @@ export class AccountWebhooks {
    */
   webhookTranscriptSettled(_sid: string | null): void {
     this.host.outbox().kick();
+  }
+
+  /**
+   * False when this message must not be posted: a contact tagged `#private`,
+   * or a chat the allowlist does not name. True when the settings are not
+   * ready or the database cannot be read. The outbox cancels what is waiting
+   * when the webhook is off or invalid, and it does not post while the
+   * database is null.
+   */
+  allowsMessage(message: StoredMessage): boolean {
+    const settings = this.host.webhook().settings();
+    if (settings.kind !== "ready") return true;
+    const db = this.storage.readyDb();
+    if (db === null) return true;
+    return webhookAllowsMessage(db, settings.filter, message);
   }
 
   /**

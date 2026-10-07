@@ -60,7 +60,17 @@ const binary = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "inde
 const ME = "40700000001@s.whatsapp.net";
 const PEER = "40700000002@s.whatsapp.net";
 const SECRET = "webhook-test-secret";
-const WEBHOOK_KEYS = ["WAZAP_WEBHOOK", "WAZAP_WEBHOOK_URL", "WAZAP_WEBHOOK_SECRET", "WAZAP_WEBHOOK_EVENTS", "WAZAP_WEBHOOK_AUTH"];
+const WEBHOOK_KEYS = [
+  "WAZAP_WEBHOOK",
+  "WAZAP_WEBHOOK_URL",
+  "WAZAP_WEBHOOK_SECRET",
+  "WAZAP_WEBHOOK_EVENTS",
+  "WAZAP_WEBHOOK_AUTH",
+  "WAZAP_WEBHOOK_CHATS",
+  "WAZAP_WEBHOOK_TAG",
+  "WAZAP_WEBHOOK_COALESCE",
+  "WAZAP_WEBHOOK_RETRY_401",
+];
 
 function dataDir() {
   return mkdtempSync(join(tmpdir(), "wazap-webhook-"), { mode: 0o700 });
@@ -256,6 +266,9 @@ test("an account webhook_url and webhook_secret win over the environment", () =>
     url: "https://hooks.example/work",
     secret: "work-secret",
     events: ["message_received"],
+    filter: null,
+    coalesce: null,
+    retryUnauthorized: false,
   });
 });
 
@@ -268,6 +281,9 @@ test("an account webhook_events wins over the environment, in canonical order", 
     url: "https://hooks.example/global",
     secret: SECRET,
     events: ["message_received", "connection"],
+    filter: null,
+    coalesce: null,
+    retryUnauthorized: false,
   });
 });
 
@@ -287,6 +303,9 @@ test("an account can override only the URL and still use the global secret", () 
     url: "http://127.0.0.1:9/work",
     secret: SECRET,
     events: ["message_received"],
+    filter: null,
+    coalesce: null,
+    retryUnauthorized: false,
   });
 });
 
@@ -407,6 +426,9 @@ test("on with a URL and a secret is ready, and a trailing slash is stripped", ()
     url: "https://hooks.example/wazap",
     secret: SECRET,
     events: ["message_received"],
+    filter: null,
+    coalesce: null,
+    retryUnauthorized: false,
   });
 });
 
@@ -1716,6 +1738,19 @@ test("a 4xx refusal is not worth retrying, names the status and a hint, and neve
   assert.match(probe.fix, /wazap webhook test/);
 });
 
+test("a 401 is retried only when WAZAP_WEBHOOK_RETRY_401 is on", async () => {
+  const post = answering(401);
+  const env = readyEnv("http://127.0.0.1:9/hook");
+  const off = new WebhookSink(env, { post, retryDelays: [0, 0] });
+  assert.equal((await off.attempt(samplePayload(), off.settings())).retry, false);
+
+  const on = new WebhookSink({ ...env, WAZAP_WEBHOOK_RETRY_401: "on" }, { post, retryDelays: [0, 0] });
+  const attempt = await on.attempt(samplePayload(), on.settings());
+  assert.equal(attempt.retry, true);
+  assert.match(attempt.error, /^HTTP 401 from 127\.0\.0\.1:9$/);
+  assert.equal(on.settings().retryUnauthorized, true);
+});
+
 test("408, 425, 429 and 5xx are worth retrying", async () => {
   for (const status of [408, 425, 429, 500, 503]) {
     const post = answering(status);
@@ -2243,4 +2278,79 @@ test("a voice note's event whose wait a restart cut short goes out with the word
     await server.close();
     restoreEnv();
   }
+});
+
+test("config webhook chats, tag, coalesce and retry-401 are stored and config prints them", async () => {
+  const dir = dataDir();
+  await wazap(dir, ["config", "webhook", "on"], {
+    input: `${SECRET}\n`,
+    env: { WAZAP_WEBHOOK_URL: "http://127.0.0.1:9/hook" },
+  });
+  const chats = await wazap(dir, ["config", "webhook", "chats", "+40 722 000 002,120363000000000001@g.us"]);
+  assert.equal(chats.code, 0, chats.stderr);
+  assert.match(chats.stderr, /webhook chats: 2 chats/);
+  const tag = await wazap(dir, ["config", "webhook", "tag", "#Autopeloc"]);
+  assert.equal(tag.code, 0, tag.stderr);
+  assert.match(tag.stderr, /webhook tag: autopeloc/);
+  const window = await wazap(dir, ["config", "webhook", "coalesce", "90"]);
+  assert.equal(window.code, 0, window.stderr);
+  assert.match(window.stderr, /90s quiet, delivered by 180s/);
+  const retry = await wazap(dir, ["config", "webhook", "retry-401", "on"]);
+  assert.equal(retry.code, 0, retry.stderr);
+  const shown = await wazap(dir, ["config"]);
+  assert.match(shown.stderr, /filter: tag autopeloc, 2 chats/);
+  assert.match(shown.stderr, /coalesce: 90s quiet, by 180s/);
+  assert.match(shown.stderr, /retry 401: on/);
+  const env = parse(readFileSync(join(dir, ".env"), "utf8"));
+  assert.equal(env.WAZAP_WEBHOOK_CHATS, "40722000002,120363000000000001@g.us");
+  assert.equal(env.WAZAP_WEBHOOK_TAG, "autopeloc");
+  assert.equal(env.WAZAP_WEBHOOK_COALESCE, "90");
+  assert.equal(env.WAZAP_WEBHOOK_RETRY_401, "on");
+
+  const cleared = await wazap(dir, ["config", "webhook", "filter", "off"]);
+  assert.equal(cleared.code, 0, cleared.stderr);
+  const after = parse(readFileSync(join(dir, ".env"), "utf8"));
+  assert.equal(after.WAZAP_WEBHOOK_CHATS, undefined);
+  assert.equal(after.WAZAP_WEBHOOK_TAG, undefined);
+  assert.match((await wazap(dir, ["config"])).stderr, /filter: off/);
+});
+
+test("config webhook chats none with no tag is an empty filter, and a bad chat is refused", async () => {
+  const dir = dataDir();
+  await wazap(dir, ["config", "webhook", "on"], {
+    input: `${SECRET}\n`,
+    env: { WAZAP_WEBHOOK_URL: "http://127.0.0.1:9/hook" },
+  });
+  const none = await wazap(dir, ["config", "webhook", "chats", "none"]);
+  assert.equal(none.code, 0, none.stderr);
+  assert.equal(parse(readFileSync(join(dir, ".env"), "utf8")).WAZAP_WEBHOOK_CHATS, "");
+  assert.match((await wazap(dir, ["config"])).stderr, /filter: empty/);
+  const bad = await wazap(dir, ["config", "webhook", "chats", "hello"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.stderr, /not a chat id or a phone number/);
+  const tooLong = await wazap(dir, ["config", "webhook", "coalesce", "301"]);
+  assert.equal(tooLong.code, 1);
+  assert.match(tooLong.stderr, /1 to 300/);
+});
+
+test("config webhook --account stores the filter on that account, replacing the global one", async () => {
+  const dir = dataDir();
+  await wazap(dir, ["account", "add", "work"]);
+  await wazap(dir, ["config", "webhook", "on"], {
+    input: `${SECRET}\n`,
+    env: { WAZAP_WEBHOOK_URL: "http://127.0.0.1:9/hook" },
+  });
+  await wazap(dir, ["config", "webhook", "tag", "global-tag"]);
+  const local = await wazap(dir, ["config", "webhook", "tag", "autopeloc", "--account", "work"]);
+  assert.equal(local.code, 0, local.stderr);
+  const work = JSON.parse(readFileSync(join(dir, "accounts.json"), "utf8")).accounts.find((account) => account.id === "work");
+  assert.equal(work.webhook_tag, "autopeloc");
+  assert.equal(work.webhook_chats, undefined);
+  const shown = await wazap(dir, ["config", "--account", "work"]);
+  assert.match(shown.stderr, /filter: tag autopeloc/);
+  assert.doesNotMatch(shown.stderr, /global-tag/);
+  const off = await wazap(dir, ["config", "webhook", "off", "--account", "work"]);
+  assert.equal(off.code, 0, off.stderr);
+  const cleared = JSON.parse(readFileSync(join(dir, "accounts.json"), "utf8")).accounts.find((account) => account.id === "work");
+  assert.equal(cleared.webhook_tag, undefined);
 });

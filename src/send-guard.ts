@@ -87,6 +87,11 @@ export function normalizeSendRule(entry: string): string {
   );
 }
 
+/** Whether a stored chat id or phone number is the same address as `entry`. */
+export function addressMatches(entry: string, target: SendTarget): boolean {
+  return ruleMatches(entry, target);
+}
+
 function ruleMatches(entry: string, target: SendTarget): boolean {
   const rule = matchForms(entry);
   const candidates = target.number === undefined ? [target.chat_id] : [target.chat_id, target.number];

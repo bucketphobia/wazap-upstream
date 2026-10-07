@@ -214,7 +214,7 @@ const COMMAND_USAGE: Partial<Record<Command, string>> = {
   embed: "Run `wazap embed download`",
   contacts: "Run `wazap contacts resync`",
   config:
-    "Run `wazap config`, `wazap config writes on|off`, `wazap config transcribe local|openai|off`, `wazap config recall local|off`, `wazap config webhook on|off|auth|no-auth`, `wazap config draft-context on|off`, or `wazap config send allow|deny <list>|open`",
+    "Run `wazap config`, `wazap config writes on|off`, `wazap config transcribe local|openai|off`, `wazap config recall local|off`, `wazap config webhook on|off|auth|no-auth|chats|tag|coalesce|retry-401|filter off`, `wazap config draft-context on|off`, or `wazap config send allow|deny <list>|open`",
   webhook: "Run `wazap webhook test`",
   account: ACCOUNT_USAGE,
   backup: BACKUP_USAGE,

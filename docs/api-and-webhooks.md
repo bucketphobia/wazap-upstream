@@ -80,7 +80,10 @@ hours after the event; then it has failed. A new event, or a POST that gets
 through, retries at once every waiting event last tried 30 s ago or more, so a
 receiver that comes back hears the backlog within moments. Any other `4xx`, such as the `401` of a
 receiver whose API key changed, is a refusal: the event is posted once and
-fails, and the error names the status with a hint. Either way the failure sets
+fails, and the error names the status with a hint. `WAZAP_WEBHOOK_RETRY_401=on`
+is the exception, for a receiver that answers 401 for a moment and then accepts
+the same body: a 401 is then retried on the same schedule, for up to a day.
+Leave it unset when a 401 means the token is wrong. Either way the failure sets
 `webhook.last_error`, which the next delivery clears. An event is posted at
 least once: a POST a crash interrupted is sent again, so dedupe on
 `message_id`. Turning the webhook off, or dropping an event from
@@ -88,6 +91,114 @@ least once: a POST a crash interrupted is sent again, so dedupe on
 With `WAZAP_PERSIST_HISTORY=0` the stored messages are removed at every stop
 and start, so a message event still waiting then is cancelled rather than
 posted after the restart; connection events still go out.
+
+### Which chats are posted
+
+With neither `WAZAP_WEBHOOK_CHATS` nor `WAZAP_WEBHOOK_TAG` set, every chat is
+posted except a contact tagged `#private`. Set either and a message event is
+posted only when the chat matches. `#private` is still left out.
+
+- `WAZAP_WEBHOOK_CHATS` is a comma-separated list of chat ids
+  (`15550100@s.whatsapp.net`, `120363000000000001@g.us`) and phone numbers
+  (`+15550100`). A number matches that direct chat however WhatsApp spells the
+  id, including once the number behind a `@lid` is known.
+- `WAZAP_WEBHOOK_TAG` is a contact tag. Direct chats whose contact carries it
+  are posted. The tag is the one `remember` stores, so `#autopeloc` and
+  `autopeloc` are the same, and adding or removing it takes effect without a
+  restart. A pending event for someone just removed is cancelled and not posted.
+- A group is posted only when its chat id is in the list. A member's tag does
+  not include the group.
+- A contact tagged `#private` is never posted, with a filter or without one.
+  That is their direct chat, including messages the owner sent there, and a
+  message they wrote in a group. Listing the chat or giving them the allow
+  tag does not put them back. The owner's own messages in a group are still
+  posted when that group is posted. Earlier versions posted these chats when
+  no filter was set.
+- An empty filter posts no message events. Set `WAZAP_WEBHOOK_CHATS` to an
+  empty value and no tag, or `wazap config webhook chats none` with the tag
+  off.
+- `connection` events are not filtered by the chat list, the tag, or
+  `#private`. They carry the link status and `health`, not a message. They
+  follow `WAZAP_WEBHOOK_EVENTS` only. An empty filter, and a webhook whose
+  only chats are `#private`, still posts a `connection` event when that event
+  is enabled. The default event list is `message_received` only, so the
+  default plus an empty filter posts nothing.
+
+```bash
+npx wazap-mcp config webhook chats 15550100@s.whatsapp.net,+15550101
+npx wazap-mcp config webhook tag autopeloc
+npx wazap-mcp config webhook chats none          # the tag, if set, is the whole filter
+npx wazap-mcp config webhook filter off          # every chat again, except #private
+npx wazap-mcp config webhook tag autopeloc --account work
+```
+
+`wazap config` prints the filter. An account's `webhook_chats` or `webhook_tag`
+in `accounts.json` replaces the global filter as a whole: setting the tag on
+the account does not keep the global chat list. `config webhook off --account
+work` clears them with the account's other webhook fields. The chat list and
+the tag name are read when the server starts, like the URL. Who carries the
+tag is read from the account database at delivery time.
+
+### Several messages, one POST
+
+`WAZAP_WEBHOOK_COALESCE` is a number of seconds, from 1 to 300. Unset, each
+message is its own POST. Set, a chat's messages wait until the chat has been
+quiet for that long, and are then posted together. A conversation that never
+pauses is still posted by twice the window, and never later than 5 minutes
+after the first message of the burst. `90` waits 90 seconds of quiet and posts
+by 180 seconds. Other chats are not held up, and the messages of one chat stay
+in order.
+
+The body of a single message is unchanged. A burst adds fields, and the fields
+that were already there name the latest message:
+
+- `count`, how many messages
+- `message_ids`, oldest first
+- `texts`, each message's preview, oldest first, each cut the way `text` is
+- `first_ts` and `first_timestamp`, the first message's time
+
+Dedupe on every id in `message_ids` when it is present, and on `message_id`
+otherwise. A retry sends the same burst again. A message that arrives after
+that POST has been attempted waits for its own window. The rows survive a
+restart, so a burst still open when the process stops is posted by the next
+one, once the window or the cap has passed.
+
+```bash
+npx wazap-mcp config webhook coalesce 90
+npx wazap-mcp config webhook coalesce off
+```
+
+An account's `webhook_coalesce` in `accounts.json` wins. `0` turns the wait
+off for that account even when the global window is on.
+
+```json
+{
+  "event": "message_received",
+  "from": "15550100",
+  "contact_id": 42,
+  "phone": "+15550100",
+  "chat_id": "15550100@s.whatsapp.net",
+  "ts": "2026-09-08T17:01:10+03:00",
+  "timestamp": "2026-09-08T14:01:10.000Z",
+  "text": "the latest line",
+  "truncated": false,
+  "kind": "text",
+  "from_me": false,
+  "is_self_chat": false,
+  "message_id": "false_15550100@s.whatsapp.net_3EB0…c",
+  "account_id": "default",
+  "account_name": "default",
+  "count": 3,
+  "message_ids": [
+    "false_15550100@s.whatsapp.net_3EB0…a",
+    "false_15550100@s.whatsapp.net_3EB0…b",
+    "false_15550100@s.whatsapp.net_3EB0…c"
+  ],
+  "texts": ["first line", "second line", "the latest line"],
+  "first_ts": "2026-09-08T17:00:00+03:00",
+  "first_timestamp": "2026-09-08T14:00:00.000Z"
+}
+```
 
 A message event is built when it is posted, from the message as it is then: an
 edit or a transcript that arrived in the meantime goes with it, and a message
@@ -117,9 +228,11 @@ run, a count every 100 failures, and one line when delivery comes back, not a
 line per event.
 
 An account may set `webhook_url`,
-`webhook_secret`, `webhook_events` and `webhook_auth` in `accounts.json`; those
-win over the global URL, secret, event list and auth header, and
-`config webhook off --account work` clears all four.
+`webhook_secret`, `webhook_events`, `webhook_auth`, `webhook_chats`,
+`webhook_tag`, `webhook_coalesce` and `webhook_retry_401` in `accounts.json`.
+The URL, secret, event list, auth header, coalescing window and 401 retry each
+win over the global value. `webhook_chats` or `webhook_tag` replaces the global
+filter as a whole. `config webhook off --account work` clears all of them.
 
 `webhook test --event <name>` posts nothing and exits non-zero when that
 event is not enabled, and says what to enable it with. While the webhook is
@@ -157,7 +270,10 @@ so a receiver that can check it still should.
 
 A `401` from the service, which is what a revoked token gives, fails the event at
 once and `wazap status` names it; `config webhook auth` with the new token puts
-it right.
+it right. A receiver that answers 401 and then accepts the same request can
+instead set `WAZAP_WEBHOOK_RETRY_401=on` (`wazap config webhook retry-401 on`),
+and that 401 is retried like a 5xx. A wrong token then keeps being tried for
+up to a day, so leave it off unless you have seen the 401 come and go.
 
 #### Or a bridge on your own machine
 

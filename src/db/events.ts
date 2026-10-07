@@ -22,6 +22,9 @@
 import type { Connection } from "./connection.js";
 import { StorageError } from "./errors.js";
 
+/** Thrown inside a write so a partial batch claim rolls back and answers false. */
+class ClaimMiss extends Error {}
+
 export type EventState = "pending" | "sending" | "delivered" | "failed" | "cancelled";
 
 export interface EventInput {
@@ -157,6 +160,13 @@ export class Events {
     return row === undefined ? null : eventFromRow(row);
   }
 
+  /** Every open event of one lane, oldest first. The dispatcher reads a chat's burst from here. */
+  openInLane(lane: string): EventRecord[] {
+    return this.c
+      .all<EventRow>(`SELECT * FROM events INDEXED BY events_lane WHERE lane = ? AND ${OPEN} ORDER BY seq`, lane)
+      .map(eventFromRow);
+  }
+
   /** The oldest open event of every lane, oldest first: the only events that may be posted next. */
   laneHeads(): EventRecord[] {
     return this.c
@@ -179,16 +189,35 @@ export class Events {
    * claimed at or before `takeOverBefore`; null takes pending rows only.
    */
   claim(seq: number, at: number, takeOverBefore: number | null = null): boolean {
-    return this.c.write(
-      () =>
-        this.c.run(
+    return this.claimMany([seq], at, takeOverBefore);
+  }
+
+  /**
+   * Claims every seq or none of them. A coalesced POST is one body for several
+   * rows; claiming some and not the rest would split that body on the retry.
+   * A `sending` row is taken over only when it was claimed at or before
+   * `takeOverBefore`; null takes pending rows only.
+   */
+  claimMany(seqs: number[], at: number, takeOverBefore: number | null = null): boolean {
+    if (seqs.length === 0) return false;
+    const claimedAt = instant(at, "at");
+    try {
+      return this.c.write(() => {
+        const changed = this.c.run(
           `UPDATE events SET state = 'sending', attempts = attempts + 1, next_attempt_at = NULL, updated_at = ?
-           WHERE seq = ? AND (state = 'pending' OR (state = 'sending' AND updated_at <= ?))`,
-          at,
-          seq,
+           WHERE seq IN (SELECT value FROM json_each(?))
+             AND (state = 'pending' OR (state = 'sending' AND updated_at <= ?))`,
+          claimedAt,
+          JSON.stringify(seqs),
           takeOverBefore ?? -1
-        ) > 0
-    );
+        );
+        if (changed !== seqs.length) throw new ClaimMiss();
+        return true;
+      });
+    } catch (err) {
+      if (err instanceof ClaimMiss) return false;
+      throw err;
+    }
   }
 
   /** `attempt`: the attempts count the POST's claim left, when this records its answer; otherwise any open event. */
