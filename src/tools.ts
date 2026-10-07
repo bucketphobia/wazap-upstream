@@ -17,6 +17,7 @@ import { coverageNote, indexCoverageNote, searchCoverage } from "./coverage.js";
 import { describeTarget, looksUnnamed, renderDraft, type DraftPayload, type DraftView } from "./drafts.js";
 import { ERROR_GUIDE, WazapError, asWazapError } from "./errors.js";
 import { FIND_CONTACT_OUTPUT, runFindContact } from "./find-contact.js";
+import { LIST_CONTACTS_INPUT, runListContacts } from "./list-contacts.js";
 import { freshnessNote, readFreshness } from "./freshness.js";
 import { mediaCaptionOf } from "./media-details.js";
 import { captionTravels, mimeOfSource } from "./outgoing-media.js";
@@ -267,6 +268,7 @@ const HINTS: Record<string, ToolHints> = {
   search: hint(true, false, true, true),
   get_message: hint(true, false, true, true),
   find_contact: hint(true, false, true, true),
+  list_contacts: hint(true, false, true, true),
   get_group_info: hint(true, false, true, true),
   // Read-only by the rule above, though save_to writes another file on each call: not idempotent.
   get_media: hint(true, false, false, true),
@@ -827,6 +829,16 @@ const TOOLS: readonly ToolDef[] = [
     handler: async (args, ctx) => runFindContact(args, ctx),
   }),
   // ---- end find_contact ----------------------------------------------------
+
+  tool({
+    name: "list_contacts",
+    title: "List the phone's address book",
+    description: `The phone's address book on one account, a page at a time: saved name, phone (E.164), chat_id, contact_id, and when the last direct message was and its direction. No message words; #private people left out. address_book_synced false: not arrived yet.`,
+    schema: LIST_CONTACTS_INPUT,
+    // No outputSchema: an integration calls it and reads structuredContent.error on a refusal (src/list-contacts.ts).
+    write: false,
+    handler: async (args, ctx) => runListContacts(args, ctx),
+  }),
 
   tool({
     name: "get_group_info",

@@ -10,7 +10,7 @@
  *
  * - the webhook: the three events, their fields, the 2000-character cut and
  *   the signature;
- * - the MCP handshake and SSE framing, the five tools and the result fields it
+ * - the MCP handshake and SSE framing, the six tools and the result fields it
  *   parses, the error codes it sorts into "definitely not sent" and
  *   "ambiguous", the session-loss answers it recovers from, and the two CLI
  *   calls.
@@ -86,9 +86,12 @@ const INTEGRATION_CALLS = {
   manage_chat: ["chat_id", "action", "account_id"],
   link_account: ["phone", "account_id"],
   get_status: ["account_id"],
+  list_contacts: ["order", "limit", "cursor", "account_id"],
 };
 /** An instant the integration parses: ISO 8601 with seconds optional and an offset or Z. */
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+/** A phone number as list_contacts gives it: E.164. */
+const E164 = /^\+\d{8,15}$/;
 /** A direct chat, which the integration derives a customer's phone from. */
 const DIRECT_CHAT = /^(\d{8,15})@s\.whatsapp\.net$/;
 /** The events the integration routes on; wazap posts the last two only when asked. */
@@ -436,7 +439,7 @@ describe("Integration MCP transport: `wazap serve --http` with WAZAP_READ_TOKEN 
     nonEmpty(client.session, "mcp-session-id");
   });
 
-  test("the write token's session has the five tools the integration calls, and none requires an argument the integration does not pass", async () => {
+  test("the write token's session has the six tools the integration calls, and none requires an argument the integration does not pass", async () => {
     const client = integrationClient(url, WRITE_TOKEN);
     await client.initialize();
     const response = await client.post({ jsonrpc: "2.0", id: client.nextId(), method: "tools/list" });
@@ -476,6 +479,7 @@ describe("Integration MCP transport: `wazap serve --http` with WAZAP_READ_TOKEN 
       refusal(await client.tool("manage_chat", { chat_id: CLIENT, action: "mark_read", account_id: TENANT })),
       "NOT_LINKED"
     );
+    assert.equal(refusal(await client.tool("list_contacts", { account_id: TENANT })), "NOT_LINKED", "an import before linking is told to link");
     // The integration's health probe counts any tool error as wazap answering.
     assert.equal(refusal(await client.tool("get_status", { account_id: "ghost-tenant" })), "ACCOUNT_NOT_FOUND");
   });
@@ -825,6 +829,54 @@ describe("Integration tool calls on a linked tenant", () => {
     const refused = await markRead();
     assert.equal(refusal(refused), "RATE_LIMITED");
     assert.match(refused.structuredContent.message, /^Read mark rate limit/);
+  });
+
+  test("list_contacts pages the address book with the fields an import reads: saved name, E.164 phone, chat_id, contact_id, last message", async (t) => {
+    const f = await live(t);
+    const client = integrationClient(f.url, WRITE_TOKEN);
+    await client.initialize();
+    const empty = answer(await client.tool("list_contacts", { account_id: TENANT }), "list_contacts");
+    assert.equal(empty.address_book_synced, false, "before the address book arrives, the integration shows it is syncing");
+    assert.deepEqual(empty.contacts, []);
+    assert.equal(empty.next, null);
+
+    // The phone's address book, as WhatsApp delivers it after linking; the client already wrote (IN1).
+    const QUIET = "40733000222@s.whatsapp.net";
+    f.sock.ev.emit("contacts.upsert", [
+      { id: QUIET, name: "Bogdan Pop" },
+      { id: CLIENT, name: "Maria Ionescu" },
+    ]);
+    const book = answer(await client.tool("list_contacts", { order: "recent", limit: 1, account_id: TENANT }), "list_contacts");
+    assert.equal(book.address_book_synced, true);
+    assert.equal(book.account_id, TENANT);
+    assert.equal(book.total, 2);
+    assert.ok(["in_progress", "done"].includes(book.sync), `sync ${book.sync}`);
+    nonEmpty(book.next, "next");
+    const [entry] = book.contacts;
+    assert.deepEqual(Object.keys(entry).sort(), ["chat_id", "contact_id", "last_message", "name", "phone"]);
+    assert.equal(entry.name, "Maria Ionescu", "the name saved on the phone");
+    assert.match(entry.phone, E164);
+    assert.equal(entry.phone, `+${CLIENT.match(DIRECT_CHAT)[1]}`);
+    assert.equal(entry.chat_id, CLIENT);
+    assert.ok(Number.isSafeInteger(entry.contact_id), `contact_id ${entry.contact_id}`);
+    assert.equal(entry.last_message.direction, "in");
+    assert.match(entry.last_message.at, INSTANT, "the integration's instant parser must accept last_message.at");
+
+    const rest = answer(await client.tool("list_contacts", { order: "recent", limit: 1, cursor: book.next, account_id: TENANT }), "list_contacts");
+    assert.equal(rest.next, null, "the last page");
+    assert.equal(rest.contacts[0].chat_id, QUIET);
+    assert.equal(rest.contacts[0].last_message, null, "never talked");
+    assert.match(rest.contacts[0].phone, E164);
+  });
+
+  test("list_contacts refuses a cursor of another order as INVALID_ID, in structuredContent like every refusal the integration parses", async (t) => {
+    const f = await live(t);
+    f.sock.ev.emit("contacts.upsert", [{ id: CLIENT, name: "Maria" }, { id: "40733000222@s.whatsapp.net", name: "Bogdan" }]);
+    const client = integrationClient(f.url, WRITE_TOKEN);
+    await client.initialize();
+    const first = answer(await client.tool("list_contacts", { limit: 1, account_id: TENANT }), "list_contacts");
+    nonEmpty(first.next, "next");
+    assert.equal(refusal(await client.tool("list_contacts", { order: "address_book", cursor: first.next, account_id: TENANT })), "INVALID_ID");
   });
 
   test("get_status follows the socket through connected, disconnected and logged_out, all in the integration's eight", async (t) => {

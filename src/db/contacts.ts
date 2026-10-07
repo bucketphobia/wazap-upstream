@@ -449,6 +449,93 @@ function matchScore(match: Match, source: MatchSource): number {
   );
 }
 
+/** How list_contacts orders the address book: by the last conversation first, or in the address book's own order. */
+export type AddressBookOrder = "recent" | "address_book";
+
+/** Where an address book entry sits in either order; a page resumes after the one it names. */
+export interface AddressBookKey {
+  /** The address book's place (contacts.listed). */
+  listed: number;
+  /** The contact row. */
+  id: number;
+  /** The last direct message's time, as the listing reads it; null when they never talked. */
+  at: number | null;
+}
+
+export interface AddressBookInput {
+  order: AddressBookOrder;
+  /** Entries on the page, 1 to 500. */
+  limit: number;
+  /**
+   * A message stored after this stored_seq does not count as the last one:
+   * a listing's first page fixes it at digest.storedTop(), so a later page
+   * sees the conversations the first one saw and nobody moves past the cursor.
+   */
+  asOfSeq: number;
+  /** Resume after this entry, the previous page's last; absent for a first page. */
+  after?: AddressBookKey | null;
+  /** People left out (the #private ones): contact rows, and numbers or lids. */
+  exclude?: { contactIds: ReadonlySet<number>; jids: ReadonlySet<string> } | null;
+}
+
+export interface AddressBookEntry {
+  contactId: number;
+  /** The phone jid, `<digits>@s.whatsapp.net`: the direct chat's id. */
+  jid: string;
+  /** The name saved in the phone's address book (contacts.name). */
+  name: string;
+  listed: number;
+  /** The newest message of the direct chat, as of asOfSeq; null when they never talked. */
+  last: { at: number; fromMe: boolean } | null;
+}
+
+export interface AddressBookPage {
+  entries: AddressBookEntry[];
+  /** Entries the whole listing holds, in either order. */
+  total: number;
+  /** The key to resume after; null on the last page. */
+  next: AddressBookKey | null;
+  /**
+   * Whether the address book itself has arrived: someone saved with a name
+   * has no chat with the account. The history sync names only the people of
+   * its chats, so names that all have a chat may be the history's alone.
+   */
+  arrived: boolean;
+}
+
+/** The most an address book page holds. */
+export const ADDRESS_BOOK_MAX_PAGE = 500;
+
+/**
+ * The address book as list_contacts reads it: a person a contact event placed
+ * in it (listed), who carries a saved name and a phone number; never a lid
+ * alone, a group or the account itself. A row still merging into another is
+ * that other one. `name` is filled by the address book WhatsApp sends after
+ * linking and by the name the history gives a direct chat (the saved name, or
+ * a username); a push name goes to notify and push_name instead.
+ */
+const ADDRESS_BOOK_SQL = `SELECT id, phone_jid, name, listed FROM contacts INDEXED BY contacts_listed
+  WHERE listed IS NOT NULL AND merged_into IS NULL AND phone_jid IS NOT NULL AND name IS NOT NULL`;
+
+/**
+ * Every direct chat, filed under the person it is with (a contact still
+ * merging answers for the one it merges into), with its newest message a
+ * reader may see — its time, direction, kind and when it was stored — when it
+ * has one.
+ */
+const DIRECT_CHATS_SQL = `SELECT c.id, coalesce(k.merged_into, k.id) AS owner, c.last_message_id, c.last_ts, c.last_from_me, c.cleared_through_ts, m.stored_seq, m.type
+  FROM chats c CROSS JOIN contacts k ON k.id = c.contact_id LEFT JOIN messages m ON m.id = c.last_message_id
+  WHERE c.kind = 'direct' AND c.merged_into IS NULL`;
+
+/** Negative when a comes before b in the order asked. Recent: talked first, newest first, then the address book's order. */
+export function compareAddressBook(order: AddressBookOrder, a: AddressBookKey, b: AddressBookKey): number {
+  if (order === "recent") {
+    if ((a.at === null) !== (b.at === null)) return a.at === null ? 1 : -1;
+    if (a.at !== null && b.at !== null && a.at !== b.at) return a.at > b.at ? -1 : 1;
+  }
+  return a.listed - b.listed || a.id - b.id;
+}
+
 const PEOPLE_SQL = `SELECT k.id, k.phone_jid, k.lid, k.name, k.notify, k.push_name, k.verified_name, k.is_business, n.note, n.tags, n.fields
   FROM contacts k LEFT JOIN contact_notes n ON n.contact_id = k.id
   WHERE k.merged_into IS NULL AND (k.phone_jid IS NOT NULL OR k.lid IS NOT NULL)
@@ -607,6 +694,86 @@ export class Contacts {
       closest: [],
       query: { words: [], relationship: null, qualifier: [] },
     };
+  }
+
+  /**
+   * One page of the address book (ADDRESS_BOOK_SQL), in the order asked, with
+   * each person's last direct message as of `asOfSeq`. Bounded by the address
+   * book and the direct chats, not by messages: two reads off contacts_listed
+   * and the chats, and an index walk back (messages_chat) only for a chat whose
+   * newest message was stored after the listing began.
+   */
+  addressBook(input: AddressBookInput): AddressBookPage {
+    const order = input.order;
+    if (order !== "recent" && order !== "address_book") throw new StorageError("INVALID_INPUT", `order is recent or address_book, not ${String(order)}.`);
+    const limit = Math.floor(input.limit);
+    if (!(limit >= 1 && limit <= ADDRESS_BOOK_MAX_PAGE)) throw new StorageError("INVALID_INPUT", `limit is 1 to ${ADDRESS_BOOK_MAX_PAGE}.`);
+    const owner = this.c.get<{ value: string }>("SELECT value FROM meta WHERE key = 'owner'")?.value ?? null;
+    const exclude = input.exclude ?? null;
+
+    const withChat = new Set<number>();
+    const lastOf = new Map<number, { at: number; fromMe: boolean }>();
+    for (const chat of this.c.all<{
+      id: number;
+      owner: number;
+      last_message_id: number | null;
+      last_ts: number | null;
+      last_from_me: number | null;
+      cleared_through_ts: number | null;
+      stored_seq: number | null;
+      type: string | null;
+    }>(DIRECT_CHATS_SQL)) {
+      withChat.add(chat.owner);
+      if (chat.last_message_id === null || chat.last_ts === null) continue;
+      // A notice (a security code that changed, the encryption banner) is not talking; nor is what came after the listing began.
+      const last =
+        (chat.stored_seq === null || chat.stored_seq <= input.asOfSeq) && chat.type !== "system"
+          ? { at: chat.last_ts, fromMe: chat.last_from_me === 1 }
+          : this.lastAsOf(chat.id, chat.cleared_through_ts, input.asOfSeq);
+      const known = lastOf.get(chat.owner);
+      if (last !== null && (known === undefined || last.at > known.at)) lastOf.set(chat.owner, last);
+    }
+
+    const all: AddressBookEntry[] = [];
+    let arrived = false;
+    for (const row of this.c.all<{ id: number; phone_jid: string; name: string; listed: number }>(ADDRESS_BOOK_SQL)) {
+      if (!isRealName(row.name) || row.phone_jid === owner || !/^\d+@s\.whatsapp\.net$/.test(row.phone_jid) || /^0+@/.test(row.phone_jid)) continue;
+      // The history names only people the account has a chat with; a saved name without one came from the address book.
+      if (!withChat.has(row.id)) arrived = true;
+      if (exclude !== null && (exclude.contactIds.has(row.id) || exclude.jids.has(row.phone_jid))) continue;
+      all.push({ contactId: row.id, jid: row.phone_jid, name: row.name.trim(), listed: row.listed, last: lastOf.get(row.id) ?? null });
+    }
+    const keyOf = (entry: AddressBookEntry): AddressBookKey => ({ listed: entry.listed, id: entry.contactId, at: entry.last?.at ?? null });
+    all.sort((a, b) => compareAddressBook(order, keyOf(a), keyOf(b)));
+    const after = input.after ?? null;
+    const start = after === null ? 0 : all.findIndex((entry) => compareAddressBook(order, keyOf(entry), after) > 0);
+    const entries = start === -1 ? [] : all.slice(start, start + limit);
+    const more = start !== -1 && start + limit < all.length;
+    return { entries, total: all.length, next: more ? keyOf(entries[entries.length - 1]!) : null, arrived };
+  }
+
+  /**
+   * A chat's newest visible message that is not a notice and was stored at or
+   * before `asOfSeq`, its folding chats included: what its last was when a
+   * listing began. A folding chat shares the barrier of the chat it folds into
+   * (merge.ts shareBarrier), so the one barrier holds for the whole family.
+   */
+  private lastAsOf(chatId: number, clearedThrough: number | null, asOfSeq: number): { at: number; fromMe: boolean } | null {
+    let best: { id: number; ts: number; from_me: number } | undefined;
+    const family = [chatId, ...this.c.all<{ id: number }>("SELECT id FROM chats WHERE merged_into = ?", chatId).map((row) => row.id)];
+    for (const id of family) {
+      const row = this.c.get<{ id: number; ts: number; from_me: number }>(
+        `SELECT id, ts, from_me FROM messages INDEXED BY messages_chat
+         WHERE chat_id = ? AND id >= ? AND deleted_at IS NULL AND ts > ? AND type <> 'system' AND coalesce(stored_seq, 0) <= ?
+         ORDER BY id DESC LIMIT 1`,
+        id,
+        clearedThrough === null ? 0 : idLowerBound(clearedThrough),
+        clearedThrough ?? 0,
+        asOfSeq
+      );
+      if (row !== undefined && (best === undefined || row.id > best.id)) best = row;
+    }
+    return best === undefined ? null : { at: best.ts, fromMe: best.from_me === 1 };
   }
 
   /** Everyone matching may read, the account itself left out, folded names reused while nothing about them changed. */

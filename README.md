@@ -1,16 +1,18 @@
 ```
-██╗    ██╗ █████╗ ███████╗ █████╗ ██████╗
-██║    ██║██╔══██╗╚══███╔╝██╔══██╗██╔══██╗
-██║ █╗ ██║███████║  ███╔╝ ███████║██████╔╝
-██║███╗██║██╔══██║ ███╔╝  ██╔══██║██╔═══╝
-╚███╔███╔╝██║  ██║███████╗██║  ██║██║
- ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝
+╭───────────────╮
+│        ▄██▀   │   ██╗    ██╗ █████╗ ███████╗ █████╗ ██████╗
+│      ▄██▀     │   ██║    ██║██╔══██╗╚══███╔╝██╔══██╗██╔══██╗
+│    ▄███████▀  │   ██║ █╗ ██║███████║  ███╔╝ ███████║██████╔╝
+│       ▄██▀    │   ██║███╗██║██╔══██║ ███╔╝  ██╔══██║██╔═══╝
+│     ▄█▀       │   ╚███╔███╔╝██║  ██║███████╗██║  ██║██║
+╰─╮╭────────────╯    ╚══╝╚══╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝
+  ╰╯                WhatsApp for your AI agent.
 ```
 
 [![M8ven Score](https://m8ven.ai/badge/mcp/razvangirgiz/wazap)](https://m8ven.ai/mcp/razvangirgiz/wazap)
 
 **WhatsApp for your AI assistant.** wazap is an MCP server that puts your own
-WhatsApp account — chats, messages, media, contacts, groups — behind 20 tools
+WhatsApp account — chats, messages, media, contacts, groups — behind 21 tools
 any MCP client can call, so Claude, ChatGPT, Gemini, Cursor or Codex can read
 your inbox and draft your replies.
 
@@ -78,7 +80,7 @@ too old: wazap needs 22.16 or newer on the 22 line, or 24.
 Every step `setup` takes, every client it can write, the background service and
 the upgrade command are in **[docs/install.md](docs/install.md)**.
 
-## The 20 tools
+## The 21 tools
 
 Each one in a line. What every argument means, the workflows behind them and
 every error code are in **[docs/tools.md](docs/tools.md)**; the assistant
@@ -95,6 +97,7 @@ itself gets all of it by calling `learn` first.
 | `search` | read | Messages by meaning and by words at once, narrowed by chat, sender or date. |
 | `get_message` | read | One message in full: its quote, each reaction with who left it, poll votes, delivery and read receipts. |
 | `find_contact` | read | Who "mama", a nickname, a group name or a number means, before anything is drafted. |
+| `list_contacts` | read | The phone's address book a page at a time: saved name, number, and when you last talked. |
 | `get_group_info` | read | Participants, admins, who may post or edit, join requests, invite link. |
 | `get_media` | read | A message's media: a voice note as its transcript, a photo as an image, any file saved to disk. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, then return it with a cursor for the next call. |
@@ -166,7 +169,7 @@ Findings, threat model and the limits of each of these are in
   evaluation of how an assistant uses them (`eval/`: 58 cases, each run three
   times, with the sends that must never happen counted apart) has been run on
   Claude. ChatGPT, Gemini,
-  Cursor and Codex connect and get the same 20 tools, but nobody has measured
+  Cursor and Codex connect and get the same 21 tools, but nobody has measured
   them yet, so what the section above promises is the server's doing, not the
   model's. The manual protocol for ChatGPT is `eval/chatgpt-protocol.md`.
 - **Media keys expire.** WhatsApp drops old attachments from its servers, so
@@ -199,7 +202,7 @@ move, and which are not — is in [docs/stability.md](docs/stability.md).
 | | |
 | --- | --- |
 | [docs/install.md](docs/install.md) | Every step of `setup`, each client `connect` writes, the background service, `expose`, upgrading, and the five skills |
-| [docs/tools.md](docs/tools.md) | The 20 tools in full: catching up, finding people, sending once, keeping someone private, and every error code |
+| [docs/tools.md](docs/tools.md) | The 21 tools in full: catching up, finding people, sending once, keeping someone private, and every error code |
 | [docs/voice.md](docs/voice.md) | Voice messages as text: whisper.cpp here, or an OpenAI-compatible API |
 | [docs/recall.md](docs/recall.md) | Semantic recall: `search` by meaning, with a local embedding model |
 | [docs/data.md](docs/data.md) | The data directory, the account database, `wazap backup`, the copy an upgrade takes, deleted and disappearing messages, and upgrading from 0.21 |

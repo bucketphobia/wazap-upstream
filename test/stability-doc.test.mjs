@@ -6,7 +6,7 @@
  * asserts the document against itself.
  *
  * It also reads `test/integration-contract.test.mjs` for the three lists that
- * file pins on an integration's behalf — the five tools, the eight connection
+ * file pins on an integration's behalf — the six tools, the eight connection
  * statuses and the definitely-unsent codes — so the document cannot name a
  * different set than the test that holds the integration contract.
  *
@@ -92,7 +92,7 @@ function registered() {
 }
 
 const tools = registered();
-/** Every argument name and every enum value the 20 tools accept. */
+/** Every argument name and every enum value the tools accept. */
 const vocabulary = new Set(TOOL_NAMES);
 for (const meta of tools.values()) {
   for (const [arg, shape] of Object.entries(meta.inputSchema ?? {})) {
@@ -107,14 +107,14 @@ for (const meta of tools.values()) {
 for (const file of ["test/webhook.test.mjs", "test/webhook-outbox.test.mjs", "test/webhook-filter.test.mjs", "test/integration-contract.test.mjs"]) {
   for (const [, field] of read(file).matchAll(/\b(?:body|webhook)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
 }
-/** The answer fields the integration contract test reads off the five tools, which declare no output schema. */
-for (const [, field] of contractTest.matchAll(/\b(?:draft|confirmed|code|applied|status)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
+/** The answer fields the integration contract test reads off the six tools, which declare no output schema. */
+for (const [, field] of contractTest.matchAll(/\b(?:draft|confirmed|code|applied|status|book|entry)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
 for (const event of WEBHOOK_EVENTS) vocabulary.add(event);
 
 // ------------------------------------------------------------- 1. the tools
 
 test("the tool list the document prints is the registry, argument for argument", () => {
-  const listing = paragraph("The 20, each with what it requires:");
+  const listing = paragraph("The 21, each with what it requires:");
   const rows = [...listing.matchAll(/`([a-z_]+)`\s*\(([^)]*)\)/g)].map(([, name, args]) => [name, identifiers(args)]);
   assert.deepEqual(
     rows.map(([name]) => name).sort(),
@@ -164,17 +164,17 @@ test("the counts the document states are the registry's own", () => {
   );
 });
 
-test("the integration five are the five the contract test pins, with mark_read still an action", () => {
-  const five = contractTools();
-  assert.equal(five.length, 5, `the contract test now pins ${five.length} tools`);
+test("the integration six are the six the contract test pins, with mark_read still an action", () => {
+  const six = contractTools();
+  assert.equal(six.length, 6, `the contract test now pins ${six.length} tools`);
   const actions = tools.get("manage_chat").inputSchema.action._def.values;
-  const cited = identifiers(paragraph("Five tools are an exact contract for an integration:"));
+  const cited = identifiers(paragraph("Six tools are an exact contract for an integration:"));
   assert.deepEqual(
     cited.filter((name) => !actions.includes(name)).sort(),
-    [...five].sort(),
+    [...six].sort(),
     "the document names different tools than the contract test pins on an integration's behalf"
   );
-  for (const name of five) assert.ok(TOOL_NAMES.includes(name), `${name} is no longer a tool`);
+  for (const name of six) assert.ok(TOOL_NAMES.includes(name), `${name} is no longer a tool`);
   assert.ok(
     cited.includes("mark_read") && actions.includes("mark_read"),
     "the document and manage_chat must agree on mark_read"
