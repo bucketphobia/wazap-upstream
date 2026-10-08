@@ -11,7 +11,7 @@
  * `--cases` takes "all", a subset of eval/subsets.json, "critical", or ids and
  * ranges ("P18,N6-N12"). Full transcripts (the CLI's stream, the server's
  * trace and effects, the end state) go to <out>/<timestamp>/<case>/<rep>/,
- * outside the repository; only the summary is meant to be committed.
+ * outside the repository; a summary saved under eval/results/ stays local (gitignored).
  *
  * Isolation of every Claude process: only the evaluation server as MCP
  * (--strict-mcp-config), no built-in tools (--tools ""), only wazap tools

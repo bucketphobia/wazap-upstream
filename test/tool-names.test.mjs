@@ -28,7 +28,7 @@ const SHIPPED = [
   ...readdirSync(join(root, "skills")).map((dir) => `skills/${dir}/SKILL.md`),
   "README.md",
   "AGENT.md",
-  "AGENTS.md",
+  "CLAUDE.md",
   "manifest.json",
   "server.json",
   ".env.example",

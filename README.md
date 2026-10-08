@@ -228,7 +228,7 @@ npm run dev -- status          # run from source with tsx
 binary against a throwaway data directory and checks that an unlinked install
 still answers `initialize`, `tools/list` and `get_status`.
 
-[AGENTS.md](AGENTS.md) is the contributor's map: the layout, the rules that must
+[CLAUDE.md](CLAUDE.md) is the contributor's map: the layout, the rules that must
 never break, the release procedure and the knobs only tests use. Issues and
 pull requests go to
 [github.com/razvangirgiz/wazap](https://github.com/razvangirgiz/wazap).
