@@ -26,6 +26,7 @@
   same schedule as a 5xx. Unset, a 401 still fails the event at once.
 
 - Add explicit API audio permission for read-only accounts while preserving WhatsApp write denials; opt-in defaults to on-request transcription.
+- Support selectable Bearer or Bifrost virtual-key transcription authentication and document exact compatible gateway base/model routes.
 
 ### Changed
 

@@ -102,6 +102,13 @@ function apiPermission(raw: string | undefined): boolean {
   throw new WazapError("INVALID_ID", "WAZAP_TRANSCRIBE_ALLOW_API must be on or off.", "Set it to 1 only after approving audio uploads and provider charges");
 }
 
+function authHeader(raw: string | undefined): "Authorization" | "x-bf-vk" {
+  const value = stripPasted(raw ?? "Authorization").toLowerCase();
+  if (value === "authorization") return "Authorization";
+  if (value === "x-bf-vk") return "x-bf-vk";
+  throw new WazapError("INVALID_ID", "Unsupported transcription credential header.", "Set WAZAP_TRANSCRIBE_AUTH_HEADER to Authorization or x-bf-vk");
+}
+
 export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string): TranscribeSettings {
   const provider = parseProvider(env.WAZAP_TRANSCRIBE);
   const url = orNull(env.WAZAP_TRANSCRIBE_URL) ?? DEFAULT_URL;
@@ -114,6 +121,7 @@ export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string):
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),
     allowApi,
+    apiAuthHeader: authHeader(env.WAZAP_TRANSCRIBE_AUTH_HEADER),
     baseUrl: requireSafeUrl(url.replace(/\/+$/, "")),
     apiModel: orNull(env.WAZAP_TRANSCRIBE_MODEL) ?? DEFAULT_API_MODEL,
     modelsDir: join(dataDir, "models"),

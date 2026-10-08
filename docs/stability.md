@@ -14,7 +14,7 @@ breaking.
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
 | Storage | forward-only migrations, released migrations frozen, the pre-migration copy | new schema versions | the SQLite schema as a format for other tools |
-| Settings | the 26 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
+| Settings | the 29 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
 
 ## 1. The MCP surface
 
@@ -216,12 +216,13 @@ code or the tests supports a third-party reader.
 
 ## 6. Settings
 
-Stable: the 26 `WAZAP_*` listed in `.env.example` and in the settings table of
+Stable: the 29 `WAZAP_*` listed in `.env.example` and in the settings table of
 `docs/settings.md` — `WAZAP_DATA_DIR`, `WAZAP_READ_ONLY`, `WAZAP_PERSIST_HISTORY`,
 `WAZAP_HOST`, `WAZAP_PORT`, `WAZAP_READ_TOKEN`, `WAZAP_WRITE_TOKEN`,
 `WAZAP_PUBLIC_URL`, `WAZAP_OAUTH_PASSWORD`, `WAZAP_TRUST_PROXY`,
 `WAZAP_TRANSCRIBE`, `WAZAP_TRANSCRIBE_API_KEY`, `WAZAP_TRANSCRIBE_ALLOW_API`,
-`WAZAP_TRANSCRIBE_AUTO`, `WAZAP_RECALL`,
+`WAZAP_TRANSCRIBE_AUTO`, `WAZAP_TRANSCRIBE_URL`, `WAZAP_TRANSCRIBE_MODEL`,
+`WAZAP_TRANSCRIBE_AUTH_HEADER`, `WAZAP_RECALL`,
 `WAZAP_WEBHOOK`, `WAZAP_WEBHOOK_URL`, `WAZAP_WEBHOOK_SECRET`,
 `WAZAP_WEBHOOK_EVENTS`, `WAZAP_WEBHOOK_AUTH`, `WAZAP_WEBHOOK_CHATS`,
 `WAZAP_WEBHOOK_TAG`, `WAZAP_WEBHOOK_COALESCE`, `WAZAP_WEBHOOK_RETRY_401`,

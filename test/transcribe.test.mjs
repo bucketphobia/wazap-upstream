@@ -63,6 +63,7 @@ test("readTranscribeSettings defaults to transcription off", () => {
     whisperBin: null,
     apiKey: null,
     allowApi: false,
+    apiAuthHeader: "Authorization",
     baseUrl: "https://api.openai.com/v1",
     apiModel: "gpt-4o-mini-transcribe",
     modelsDir: join(dir, "models"),
@@ -78,6 +79,32 @@ test("API permission is explicit, defaults off, and does not enable the provider
   assert.equal(enabled.auto, false);
   assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" }, dir).auto, true);
   assert.throws(() => readTranscribeSettings({ WAZAP_TRANSCRIBE_ALLOW_API: "maybe" }, dir), { code: "INVALID_ID" });
+});
+
+test("transcription auth header allows only Authorization or x-bf-vk", () => {
+  const dir = scratch("auth-header");
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTH_HEADER: "x-bf-vk" }, dir).apiAuthHeader, "x-bf-vk");
+  assert.throws(() => readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTH_HEADER: "Cookie" }, dir), { code: "INVALID_ID" });
+});
+
+test("Bifrost transcription uses the selected virtual-key header and exact model route", async () => {
+  const file = audioFile();
+  const seen = [];
+  await withServer(async (req, res) => {
+    seen.push({ url: req.url, authorization: req.headers.authorization, key: req.headers["x-bf-vk"], body: await readBody(req) });
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ text: "synthetic" }));
+  }, (url) => openaiProvider.transcribe(readTranscribeSettings({
+    WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_API_KEY: KEY,
+    WAZAP_TRANSCRIBE_AUTH_HEADER: "x-bf-vk", WAZAP_TRANSCRIBE_URL: url + "/openai",
+    WAZAP_TRANSCRIBE_MODEL: "openai/owner-selected-transcribe",
+  }, scratch("bifrost")), file, { language: "ar" }));
+  assert.equal(seen[0].url, "/openai/audio/transcriptions");
+  assert.equal(seen[0].authorization, undefined);
+  assert.equal(seen[0].key, KEY);
+  assert.match(seen[0].body, /openai\/owner-selected-transcribe/);
+  assert.match(seen[0].body, /name="language"/);
+  assert.match(seen[0].body, /\r\nar\r\n/);
 });
 
 test("readTranscribeSettings accepts both provider names", () => {

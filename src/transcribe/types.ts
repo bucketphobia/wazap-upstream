@@ -50,6 +50,8 @@ export interface TranscribeSettings {
   apiKey: string | null;
   /** Explicit permission to upload audio while WhatsApp writes remain disabled. */
   allowApi: boolean;
+  /** Send only one credential header, avoiding Bifrost dual-credential ambiguity. */
+  apiAuthHeader: "Authorization" | "x-bf-vk";
   /** openai only, already validated https-or-loopback, no trailing slash. */
   baseUrl: string;
   /** openai only. */

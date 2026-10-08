@@ -115,6 +115,22 @@ provider charges. There is no total dollar budget in wazap. Configure provider
 limits before enabling automatic uploads. Enabling the provider does not
 retroactively transcribe the whole archive.
 
+### Compatible gateways
+
+Configure the exact base endpoint and model route with
+`WAZAP_TRANSCRIBE_URL` and `WAZAP_TRANSCRIBE_MODEL`. The client appends
+`/audio/transcriptions` and sends multipart audio, model and optional language.
+OpenAI and LiteLLM-compatible routes use Bearer `Authorization` by default.
+Bifrost uses base `/openai`; use the exact configured provider/model name.
+Set `WAZAP_TRANSCRIBE_AUTH_HEADER=x-bf-vk` only when the gateway requires its
+raw virtual-key header. Exactly one credential header is sent.
+
+The base URL still requires HTTPS or loopback HTTP and rejects credentials,
+queries, fragments and redirects. This feature does not allow LAN plain HTTP
+or establish gateway routes, credentials or model access. Tests exercise
+synthetic compatible endpoints; actual gateway/provider availability must be
+verified separately before sending approved content.
+
 ## Without being asked
 
 With automatic transcription enabled, incoming voice notes of up to ten minutes are

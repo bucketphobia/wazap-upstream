@@ -63,7 +63,7 @@ async function post(settings: TranscribeSettings, key: string, file: string, lan
   if (language !== "auto") form.append("language", language);
   return fetch(`${settings.baseUrl}/audio/transcriptions`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${key}` },
+    headers: settings.apiAuthHeader === "x-bf-vk" ? { "x-bf-vk": key } : { Authorization: `Bearer ${key}` },
     body: form,
     redirect: "error",
     signal: signal === undefined ? AbortSignal.timeout(TIMEOUT_MS) : AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), signal]),
