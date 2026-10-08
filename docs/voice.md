@@ -98,9 +98,26 @@ The key is treated as a secret rather than as a setting:
 - Successful JSON responses are capped at 1 MiB, including chunked responses.
   Error response bodies are discarded without being read.
 
+### API transcription with WhatsApp read-only
+
+Read-only accounts refuse API audio uploads by default. After approving the
+provider, upload scope and charges, set `WAZAP_TRANSCRIBE_ALLOW_API=1` alongside
+`WAZAP_TRANSCRIBE=openai`. WhatsApp send and mutation tools stay disabled.
+The permission flag does not enable a provider or grant WhatsApp writes.
+This opt-in defaults to on-request transcription; explicitly set
+`WAZAP_TRANSCRIBE_AUTO=1` to process eligible incoming voice notes in the
+background. Local transcription and existing write-enabled API defaults are
+unchanged when the permission flag is unset.
+
+Transcripts are cached and concurrent requests are deduplicated. Background
+work keeps its durable queue and retries; timeouts or crashes can cause repeat
+provider charges. There is no total dollar budget in wazap. Configure provider
+limits before enabling automatic uploads. Enabling the provider does not
+retroactively transcribe the whole archive.
+
 ## Without being asked
 
-With a provider configured, incoming voice notes of up to ten minutes are
+With automatic transcription enabled, incoming voice notes of up to ten minutes are
 transcribed in the background as they arrive, never holding up a message. The
 transcript is stored with the message, so a voice note is transcribed once, and
 its words are searchable, recalled and carried by the webhook event.

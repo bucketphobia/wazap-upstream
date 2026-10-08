@@ -63,10 +63,12 @@ export function transcriptionStatusLine(status: TranscriptionStatus, now = Date.
 export function checkTranscribeQueue(config: Pick<Config, "dataDir" | "readOnly" | "rateLimitPerMinute">): Check[] {
   let transcribing = false;
   let uploads = false;
+  let allowApi = false;
   try {
     const settings = readTranscribeSettings(process.env, config.dataDir);
     transcribing = settings.provider !== null && settings.auto;
     uploads = settings.provider === "openai";
+    allowApi = settings.allowApi;
   } catch {
     // The transcribe check already reports settings that do not parse.
   }
@@ -81,8 +83,7 @@ export function checkTranscribeQueue(config: Pick<Config, "dataDir" | "readOnly"
   for (const account of accounts) {
     const stats = readStats(join(accountPaths(config.dataDir, account.id).root, DB_FILE));
     if (stats === null) continue;
-    // Read-only never uploads audio, so an API provider leaves this account's queue waiting for good.
-    const refused = transcribing && uploads && accountPolicy(account, config).readOnly;
+    const refused = transcribing && uploads && accountPolicy(account, config).readOnly && !allowApi;
     const runs = transcribing && !refused;
     const quiet = stats.queued === 0 && stats.failed === 0;
     if (quiet && !runs) continue;
@@ -100,8 +101,8 @@ export function checkTranscribeQueue(config: Pick<Config, "dataDir" | "readOnly"
     const stalled = stats.queued > 0 && !runs;
     const why = refused ? "the account is read-only, so audio is not uploaded and it waits" : "automatic transcription is off, so it waits";
     const fix = refused
-      ? "run `wazap config writes on` and restart, or `wazap config transcribe local`"
-      : "run `wazap config transcribe local` or `wazap config transcribe openai`, then restart";
+      ? "approve audio uploads, set WAZAP_TRANSCRIBE_ALLOW_API=1 and restart, or `wazap config transcribe local`"
+      : "keep manual transcription, or review the upload scope, set WAZAP_TRANSCRIBE_AUTO=1 with a configured provider and restart";
     checks.push({
       name,
       state: stalled ? "warn" : "info",

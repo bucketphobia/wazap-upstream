@@ -32,6 +32,7 @@ const TRANSCRIBE_ENV = [
   "WAZAP_TRANSCRIBE_AUTO",
   "WAZAP_TRANSCRIBE_MODEL",
   "WAZAP_TRANSCRIBE_URL",
+  "WAZAP_TRANSCRIBE_ALLOW_API",
   "WAZAP_WHISPER_BIN",
   "WAZAP_WHISPER_MODEL",
   "OPENAI_API_KEY",
@@ -629,7 +630,19 @@ test("wazap status warns that a read-only account's queue never runs with an API
   assert.equal(checks.length, 1);
   assert.equal(checks[0].state, "warn");
   assert.match(checks[0].detail, /read-only/);
-  assert.match(checks[0].fix, /wazap config writes on/);
+  assert.match(checks[0].fix, /WAZAP_TRANSCRIBE_ALLOW_API=1/);
+});
+
+test("status recognizes separately approved API processing on a read-only account", async () => {
+  const queued = serviceWith(CONFIGURED);
+  queued.svc.status = "disconnected";
+  deliver(queued.sock, [voiceNote("OPT_STATUS")]);
+  await queued.svc.stop();
+  const checks = withEnv({ ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" },
+    () => checkTranscribeQueue({ dataDir: queued.svc.config.dataDir, readOnly: true, rateLimitPerMinute: 20 }));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].state, "info");
+  assert.doesNotMatch(checks[0].detail, /read-only|never runs|waits/);
 });
 
 test("a note waiting for its account runs as soon as the connection opens, not at the next poll", async () => {

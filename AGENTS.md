@@ -193,8 +193,6 @@ settings; do not remove one while a test sets it.
   bridge tests, and `test/integration-contract.test.mjs`, rely on it.
 - `WAZAP_LIVE_TIMEOUT_MS` — how long a live probe (`status --live`, setup's
   check, `contacts resync`) waits for WhatsApp; 15 s by default.
-- `WAZAP_TRANSCRIBE_AUTO=0` — keeps `get_media`'s transcripts, stops background
-  transcription of incoming notes.
 - `WAZAP_TRANSCRIBE_URL`, `WAZAP_TRANSCRIBE_MODEL` — another OpenAI-compatible
   endpoint and its model; the tests point the URL at a local stub.
   `wazap config transcribe openai` still asks for the URL at a terminal.

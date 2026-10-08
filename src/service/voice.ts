@@ -131,12 +131,12 @@ export class AccountVoice {
   ) {
     this.transcribe = readTranscribeConfig(config.dataDir);
     const settings = this.transcribe;
-    // Read-only refuses uploading audio to an API, so notes it would refuse are not queued.
+    // Audio processing permission is independent from WhatsApp writes, and defaults off.
     this.autoTranscribe =
       !(settings instanceof WazapError) &&
       settings.provider !== null &&
       settings.auto &&
-      !(this.effectiveReadOnly && settings.provider === "openai");
+      !(this.effectiveReadOnly && settings.provider === "openai" && !settings.allowApi);
     this.transcribeClass = settings instanceof WazapError || settings.provider === null ? null : PROVIDERS[settings.provider].kind;
     this.transcribeSource = {
       name: account.id,
@@ -172,14 +172,13 @@ export class AccountVoice {
       }
 
       const settings = this.transcribeSettings();
-      // Read-only has always meant no side effect anyone outside can see. The
-      // local provider keeps that promise; uploading the user's audio to a
-      // third party and spending their money does not.
-      if (this.effectiveReadOnly && settings.provider === "openai") {
+      // WhatsApp writes and paid audio processing are separate permissions.
+      // Read-only still refuses API uploads unless the owner explicitly opts in.
+      if (this.effectiveReadOnly && settings.provider === "openai" && !settings.allowApi) {
         throw new WazapError(
           "READ_ONLY",
           "wazap runs read-only, so it will not upload audio to the transcription API.",
-          "Run `wazap config writes on` and restart the server, or run `wazap config transcribe local`"
+          "Approve audio uploads and charges, set WAZAP_TRANSCRIBE_ALLOW_API=1 and restart, or run `wazap config transcribe local`"
         );
       }
       const readiness = await this.host.transcribeReadiness(settings);

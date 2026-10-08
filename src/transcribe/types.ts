@@ -48,6 +48,8 @@ export interface TranscribeSettings {
   /** local only: WAZAP_WHISPER_BIN override. */
   whisperBin: string | null;
   apiKey: string | null;
+  /** Explicit permission to upload audio while WhatsApp writes remain disabled. */
+  allowApi: boolean;
   /** openai only, already validated https-or-loopback, no trailing slash. */
   baseUrl: string;
   /** openai only. */

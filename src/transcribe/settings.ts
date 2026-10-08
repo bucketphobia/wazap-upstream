@@ -95,16 +95,25 @@ function orNull(raw: string | undefined): string | null {
   return value === "" ? null : value;
 }
 
+function apiPermission(raw: string | undefined): boolean {
+  const value = stripPasted(raw ?? "").toLowerCase();
+  if (OFF.has(value)) return false;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  throw new WazapError("INVALID_ID", "WAZAP_TRANSCRIBE_ALLOW_API must be on or off.", "Set it to 1 only after approving audio uploads and provider charges");
+}
+
 export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string): TranscribeSettings {
   const provider = parseProvider(env.WAZAP_TRANSCRIBE);
   const url = orNull(env.WAZAP_TRANSCRIBE_URL) ?? DEFAULT_URL;
+  const allowApi = apiPermission(env.WAZAP_TRANSCRIBE_ALLOW_API);
   return {
     provider,
     language: "auto",
-    auto: provider !== null && asBool(env.WAZAP_TRANSCRIBE_AUTO, true),
+    auto: provider !== null && asBool(env.WAZAP_TRANSCRIBE_AUTO, !(provider === "openai" && allowApi)),
     model: parseModel(env.WAZAP_WHISPER_MODEL),
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),
+    allowApi,
     baseUrl: requireSafeUrl(url.replace(/\/+$/, "")),
     apiModel: orNull(env.WAZAP_TRANSCRIBE_MODEL) ?? DEFAULT_API_MODEL,
     modelsDir: join(dataDir, "models"),

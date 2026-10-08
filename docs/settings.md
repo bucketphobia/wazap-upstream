@@ -13,6 +13,8 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_READ_TOKEN` / `WAZAP_WRITE_TOKEN` | unset | Static bearer tokens for your own code; see [Building on wazap](api-and-webhooks.md#building-on-wazap-http-api-for-products). |
 | `WAZAP_TRANSCRIBE` | `off` | `local`, `openai` or `off`. `wazap config transcribe` sets it. |
 | `WAZAP_TRANSCRIBE_API_KEY` | unset | The key for `openai`; `OPENAI_API_KEY` is the fallback. Never a flag. |
+| `WAZAP_TRANSCRIBE_ALLOW_API` | `0` | Explicitly permit paid API audio uploads with WhatsApp read-only still enabled. Does not enable WhatsApp writes. |
+| `WAZAP_TRANSCRIBE_AUTO` | provider-dependent | Existing providers default to automatic; API permission opt-in defaults to on-request. Set `0` for on-request, `1` for eligible background voice notes. |
 | `WAZAP_RECALL` | `off` | `local` turns on [semantic recall](recall.md#semantic-recall). `wazap config recall` sets it. |
 | `WAZAP_WEBHOOK` | `off` | `on` posts the enabled events to the webhook URL. `wazap config webhook` sets it with the next two. |
 | `WAZAP_WEBHOOK_URL` / `WAZAP_WEBHOOK_SECRET` | unset | HTTPS endpoint (`http://` only on loopback) and the shared secret for `X-Wazap-Signature`. The secret is never a flag. An account's `webhook_url` and `webhook_secret` win. |

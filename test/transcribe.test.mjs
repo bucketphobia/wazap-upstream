@@ -62,10 +62,22 @@ test("readTranscribeSettings defaults to transcription off", () => {
     model: "turbo",
     whisperBin: null,
     apiKey: null,
+    allowApi: false,
     baseUrl: "https://api.openai.com/v1",
     apiModel: "gpt-4o-mini-transcribe",
     modelsDir: join(dir, "models"),
   });
+});
+
+test("API permission is explicit, defaults off, and does not enable the provider", () => {
+  const dir = scratch("api-permission");
+  assert.equal(readTranscribeSettings({}, dir).allowApi, false);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE_ALLOW_API: "1" }, dir).provider, null);
+  const enabled = readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1" }, dir);
+  assert.equal(enabled.allowApi, true);
+  assert.equal(enabled.auto, false);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" }, dir).auto, true);
+  assert.throws(() => readTranscribeSettings({ WAZAP_TRANSCRIBE_ALLOW_API: "maybe" }, dir), { code: "INVALID_ID" });
 });
 
 test("readTranscribeSettings accepts both provider names", () => {
