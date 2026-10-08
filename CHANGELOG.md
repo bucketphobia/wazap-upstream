@@ -25,6 +25,8 @@
 - **A 401 can be retried.** `WAZAP_WEBHOOK_RETRY_401=on` retries a 401 on the
   same schedule as a 5xx. Unset, a 401 still fails the event at once.
 
+- Add explicitly enabled authenticated OpenAI-compatible API embeddings with secure transport, validated vectors, durable indexing and optional query/document input-type transport.
+
 ### Changed
 
 - **The webhook never posts a contact tagged `#private`.** Their direct chat

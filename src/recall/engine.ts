@@ -22,6 +22,7 @@ import { discardResponse, readBoundedJson } from "../http-response.js";
 import { which } from "../transcribe/index.js";
 import { embedModelPath, type EmbedModelSpec } from "./models.js";
 import type { RecallSettings } from "./types.js";
+import { EmbedApi } from "./api.js";
 
 const HEALTH_PATH = "/health";
 const EMBED_PATH = "/embedding";
@@ -57,6 +58,7 @@ export interface EmbedReadiness {
 }
 
 export async function embedReady(settings: RecallSettings, spec: EmbedModelSpec): Promise<EmbedReadiness> {
+  if (settings.api !== undefined) return { ok: true, detail: "authenticated embedding API configured" };
   if (settings.embedUrl !== null) return { ok: true, detail: `external embedding server at ${new URL(settings.embedUrl).host}` };
   if (findLlama(settings) === null) {
     return { ok: false, detail: "llama-server not found", fix: llamaInstallFix() };
@@ -406,7 +408,8 @@ const INPUT_REFUSALS = new Set([400, 413, 422]);
 export class EmbedEngine {
   private constructor(
     private readonly target: EmbeddingTarget,
-    private readonly spec: EmbedModelSpec
+    private readonly spec: EmbedModelSpec,
+    private readonly api?: EmbedApi
   ) {}
 
   static async start(
@@ -414,6 +417,7 @@ export class EmbedEngine {
     spec: EmbedModelSpec,
     onLog: (line: string) => void = () => {}
   ): Promise<EmbedEngine> {
+    if (settings.api !== undefined) return new EmbedEngine(new UrlBackend(settings.api.url), spec, new EmbedApi(settings.api));
     if (settings.embedUrl !== null) {
       const base = settings.embedUrl.replace(/\/+$/, "");
       return new EmbedEngine(new UrlBackend(base), spec);
@@ -445,6 +449,7 @@ export class EmbedEngine {
    */
   async embed(texts: string[], kind: "query" | "document"): Promise<number[][]> {
     if (texts.length === 0) return [];
+    if (this.api !== undefined) return this.api.embed(texts, kind);
     await this.target.waitReady();
     const input = texts.map((text) => `${this.spec.prompts[kind]}${text}`);
     let response: Response;
@@ -501,6 +506,7 @@ export class EmbedEngine {
   }
 
   async stop(): Promise<void> {
+    this.api?.stop();
     await this.target.stop();
   }
 }

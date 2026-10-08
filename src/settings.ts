@@ -353,7 +353,8 @@ function transcribeRows(config: Config): string[] {
 function recallRows(config: Config): string[] {
   try {
     const settings = readRecallSettings(process.env, config.dataDir);
-    return [`recall: ${settings.enabled ? `local (${settings.model})` : "off"} (${config.sources.recall})`];
+    const mode = settings.api ? "openai (uploads retained message text and queries)" : settings.enabled ? `local (${settings.model})` : "off";
+    return [`recall: ${mode} (${config.sources.recall})`];
   } catch (err) {
     const failure = asWazapError(err);
     return [`recall: ${failure.message}${failure.fix === undefined ? "" : ` — ${failure.fix}`}`];

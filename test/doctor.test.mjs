@@ -73,6 +73,16 @@ test("a healthy data dir passes every check it can", async () => {
   assert.match(stderr, /✓ writes: on \(default\)/);
 });
 
+test("API recall diagnostics need no local binaries and never expose API credentials", async () => {
+  const { stderr } = await status(dataDir(), [], {
+    WAZAP_RECALL: "openai", WAZAP_EMBED_API_URL: "https://example.invalid/openai",
+    WAZAP_EMBED_API_KEY: "synthetic-diagnostic-secret", WAZAP_EMBED_API_MODEL: "provider/exact-model",
+    WAZAP_EMBED_API_DIMS: "3", WAZAP_EMBED_API_MIN_SIMILARITY: "0.6",
+  });
+  assert.match(stderr, /recall:.*openai/);
+  assert.doesNotMatch(stderr, /llama-server|synthetic-diagnostic-secret|embed model:/);
+});
+
 test("a data dir with the wrong mode fails with the chmod that fixes it", async () => {
   const dir = dataDir();
   chmodSync(dir, 0o755);

@@ -544,6 +544,9 @@ async function checkRecall(config: Config): Promise<Check[]> {
     return [{ name: "recall", state: "fail", detail: failure.message, fix: failure.fix }];
   }
   if (!settings.enabled) return [{ name: "recall", state: "info", detail: "off", fix: RECALL_OFF_FIX }];
+  if (settings.api) {
+    return [{ name: "recall", state: "ok", detail: "openai (uploads retained message text and queries; credentials configured, endpoint untested)" }];
+  }
   const spec = EMBED_MODELS[settings.model];
   const size = fileSize(embedModelPath(settings.modelsDir, spec));
   const readiness = await embedReady(settings, spec);

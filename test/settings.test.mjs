@@ -27,6 +27,17 @@ function dataDir() {
   return mkdtempSync(join(tmpdir(), "wazap-settings-"));
 }
 
+test("config labels API recall and its processing scope without printing credentials", async () => {
+  const { stderr } = await wazap(dataDir(), ["config"], {
+    WAZAP_RECALL: "openai", WAZAP_EMBED_API_URL: "https://example.invalid/openai",
+    WAZAP_EMBED_API_KEY: "synthetic-config-secret", WAZAP_EMBED_API_MODEL: "provider/exact-model",
+    WAZAP_EMBED_API_DIMS: "3", WAZAP_EMBED_API_MIN_SIMILARITY: "0.6",
+  });
+  assert.match(stderr, /recall: openai/);
+  assert.match(stderr, /uploads retained message text and queries/);
+  assert.doesNotMatch(stderr, /synthetic-config-secret|recall: local/);
+});
+
 test("setEnvSetting replaces its own line and keeps every other one", () => {
   const dir = dataDir();
   const envFile = join(dir, ".env");

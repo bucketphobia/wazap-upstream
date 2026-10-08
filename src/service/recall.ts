@@ -90,7 +90,7 @@ export class AccountRecall {
         ? null
         : new EmbedFeed({
             db: () => this.host.readyDb(),
-            model: recall.model,
+            model: recall.indexModel ?? recall.model,
             words: (message) => this.recallWords(message),
             embed: (texts) => this.recallEmbed(texts, "document"),
           });
@@ -126,7 +126,7 @@ export class AccountRecall {
       // TODO(F1-b3): the hybrid scan runs on the main thread, ~160-190 ms at 100,000 vectors; it moves to a worker.
       const result = db.vectors.hybrid({
         query,
-        model: settings.model,
+        model: settings.indexModel ?? settings.model,
         vector: vector ?? null,
         limit: people === null || author !== undefined ? window : 2 * window,
         minSimilarity: settings.minSimilarity,
@@ -181,7 +181,7 @@ export class AccountRecall {
 
   /** What the index embeds for a message: the words a person chose, capped to the model's window. */
   private recallWords(message: StoredMessage): string | null {
-    const maxChars = this.recallEnv instanceof WazapError ? RECALL_TEXT_CAP : EMBED_MODELS[this.recallEnv.model].maxChars;
+    const maxChars = this.recallEnv instanceof WazapError || this.recallEnv.api !== undefined ? RECALL_TEXT_CAP : EMBED_MODELS[this.recallEnv.model].maxChars;
     const raw = this.views.rawOf(message);
     let words: string | null;
     if (raw === null) {
@@ -263,7 +263,7 @@ export class AccountRecall {
       return { state: "off", indexed: 0, pending: 0 };
     }
     const db = this.host.readyDb();
-    const indexed = this.indexedCount(db, this.recallEnv.model);
+    const indexed = this.indexedCount(db, this.recallEnv.indexModel ?? this.recallEnv.model);
     const pending = this.embedFeed.pending;
     if (this.embedFeed.failing !== null) {
       return {

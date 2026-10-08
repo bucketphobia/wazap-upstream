@@ -13,7 +13,14 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_READ_TOKEN` / `WAZAP_WRITE_TOKEN` | unset | Static bearer tokens for your own code; see [Building on wazap](api-and-webhooks.md#building-on-wazap-http-api-for-products). |
 | `WAZAP_TRANSCRIBE` | `off` | `local`, `openai` or `off`. `wazap config transcribe` sets it. |
 | `WAZAP_TRANSCRIBE_API_KEY` | unset | The key for `openai`; `OPENAI_API_KEY` is the fallback. Never a flag. |
-| `WAZAP_RECALL` | `off` | `local` turns on [semantic recall](recall.md#semantic-recall). `wazap config recall` sets it. |
+| `WAZAP_RECALL` | `off` | `local` turns on local [semantic recall](recall.md#semantic-recall); `openai` explicitly uploads retained text/queries to the configured API. CLI configuration covers local/off; API uses these environment settings. |
+| `WAZAP_EMBED_API_URL` | unset | Required API base, HTTPS or loopback HTTP only; `/embeddings` is appended. |
+| `WAZAP_EMBED_API_KEY` | unset | Required private embedding API credential; no implicit fallback or command-line flag. |
+| `WAZAP_EMBED_API_MODEL` | unset | Required exact API model route; no guessed model default. |
+| `WAZAP_EMBED_API_DIMS` | unset | Required actual vector length, integer 1–4096; validates replies, does not request model dimension shortening. |
+| `WAZAP_EMBED_API_MIN_SIMILARITY` | unset | Required API-model-specific cosine floor 0–1; calibrate it with approved synthetic examples before use. |
+| `WAZAP_EMBED_AUTH_HEADER` | `Authorization` | Bearer `Authorization` or raw `x-bf-vk`; exactly one credential header. |
+| `WAZAP_EMBED_API_INPUT_TYPE` | `none` | Optional retrieval input types: `direct` sends top-level `input_type`; `extra_params` sends the gateway passthrough envelope/header. Indexing uses document, searching uses query. Changing mode reindexes. |
 | `WAZAP_WEBHOOK` | `off` | `on` posts the enabled events to the webhook URL. `wazap config webhook` sets it with the next two. |
 | `WAZAP_WEBHOOK_URL` / `WAZAP_WEBHOOK_SECRET` | unset | HTTPS endpoint (`http://` only on loopback) and the shared secret for `X-Wazap-Signature`. The secret is never a flag. An account's `webhook_url` and `webhook_secret` win. |
 | `WAZAP_WEBHOOK_EVENTS` | unset (`message_received`) | Which events to post, comma-separated, or `all`. An account's `webhook_events` wins. |
