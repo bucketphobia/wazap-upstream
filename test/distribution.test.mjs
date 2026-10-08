@@ -145,7 +145,7 @@ test("the README's tool table is the registry, and no shipped document names a r
     assert.deepEqual([...listed].sort(), [...TOOL_NAMES].sort(), `${page}'s table is not the registry`);
   }
   const docs = readdirSync(join(root, "docs")).map((name) => `docs/${name}`);
-  for (const file of ["README.md", "AGENT.md", "AGENTS.md", ...docs, "manifest.json", "server.json", ".claude-plugin/plugin.json"]) {
+  for (const file of ["README.md", "AGENT.md", "CLAUDE.md", ...docs, "manifest.json", "server.json", ".claude-plugin/plugin.json"]) {
     const text = readFileSync(join(root, file), "utf8");
     for (const name of RETIRED_TOOLS) {
       // The audit keeps what a finding was about when it was found, next to its 1.0 name;

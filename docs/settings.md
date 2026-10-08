@@ -34,4 +34,4 @@ is the supported way, and the variable goes away in 2.0.
 
 Anything else `WAZAP_*` that the code still reads is a development knob, not a
 setting: it is listed under **Development knobs** in
-[AGENTS.md](../AGENTS.md#development-knobs), and a user should not need it.
+[CLAUDE.md](../CLAUDE.md#development-knobs), and a user should not need it.
