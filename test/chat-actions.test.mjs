@@ -756,3 +756,18 @@ test("mark_read clears the chat's unread count here, since WhatsApp sends no ech
   assert.equal(read.length, 1, "the read receipt still goes to WhatsApp");
   assert.equal(svc.db.identity.chat(ANA).unread, 0);
 });
+
+test("profile photos are asked of WhatsApp once and reused, a missing one is null", async () => {
+  const { svc, sock } = writableService();
+  const asked = [];
+  sock.profilePictureUrl = async (jid) => {
+    asked.push(jid);
+    if (jid === DAN) throw new Error("item-not-found");
+    return `https://pps.whatsapp.net/${jid}.jpg`;
+  };
+  const first = await svc.profilePictures([ANA, DAN, ANA]);
+  assert.deepEqual(first, { [ANA]: `https://pps.whatsapp.net/${ANA}.jpg`, [DAN]: null });
+  const again = await svc.profilePictures([ANA, DAN]);
+  assert.deepEqual(again, first);
+  assert.deepEqual(asked.sort(), [ANA, DAN].sort(), "each photo asked once");
+});

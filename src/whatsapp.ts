@@ -969,6 +969,10 @@ export class WhatsAppService implements WhatsAppApi {
     return this.contacts.getContact(contactId);
   }
 
+  profilePictures(chatIds: readonly string[]): Promise<Record<string, string | null>> {
+    return this.contacts.profilePictures(chatIds);
+  }
+
   findContact(query: FindContactQuery): Promise<AccountFind> {
     return this.contacts.findContact(query);
   }

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`list_chats` can return each chat's profile photo.** With
+  `include_pictures: true` every chat gets `picture_url`, or `null` when there
+  is none or WhatsApp does not answer in time. Lookups go a few at a time and a
+  link is reused for six hours; a contact tagged `#private` gets none. Off by
+  default, so agents that do not ask see no change.
+
 ## 1.3.2
 
 ### Fixed

@@ -540,3 +540,32 @@ test("each tool's annotations are true of its most far-reaching action: get_medi
     manage_group: "0101",
   });
 });
+
+test("list_chats adds profile photos only when asked, and none for a #private person", async () => {
+  const server = fakeServer();
+  const asked = [];
+  const wa = {
+    getStatus: () => ({ status: "connected" }),
+    listChats: async () => ({
+      data: [
+        { chat_id: "40700000002@s.whatsapp.net", name: "Ana", type: "individual", unread_count: 0, last_message: { text: "hi", timestamp: "2026-10-09T10:00:00+03:00", from_me: false } },
+        { chat_id: "40700000003@s.whatsapp.net", name: "Dan", type: "individual", unread_count: 0, last_message: { text: "", timestamp: "2026-10-09T10:00:00+03:00", from_me: false, private: true } },
+      ],
+      sync: "done",
+    }),
+    profilePictures: async (ids) => {
+      asked.push(...ids);
+      return Object.fromEntries(ids.map((id) => [id, `https://pps.whatsapp.net/${id}.jpg`]));
+    },
+  };
+  registerTools(server, asToolSource(wa), { allowWrite: false });
+
+  const plain = await server.tools.get("list_chats").handler({ filter: "all", limit: 20 });
+  assert.equal("picture_url" in plain.structuredContent.chats[0], false);
+  assert.deepEqual(asked, []);
+
+  const result = await server.tools.get("list_chats").handler({ filter: "all", limit: 20, include_pictures: true });
+  assert.equal(result.structuredContent.chats[0].picture_url, "https://pps.whatsapp.net/40700000002@s.whatsapp.net.jpg");
+  assert.equal(result.structuredContent.chats[1].picture_url, null);
+  assert.deepEqual(asked, ["40700000002@s.whatsapp.net"]);
+});
