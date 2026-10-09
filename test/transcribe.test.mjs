@@ -168,25 +168,24 @@ test("trailing slashes are stripped from WAZAP_TRANSCRIBE_URL", () => {
   );
 });
 
-test("requireSafeUrl allows https and loopback http, and nothing else", () => {
-  assert.equal(requireSafeUrl("https://api.openai.com/v1"), "https://api.openai.com/v1");
-  assert.equal(requireSafeUrl("http://127.0.0.1:1234/v1"), "http://127.0.0.1:1234/v1");
-  assert.equal(requireSafeUrl("http://localhost/v1"), "http://localhost/v1");
-  assert.equal(requireSafeUrl("http://[::1]:9000/v1"), "http://[::1]:9000/v1");
-  assert.throws(() => requireSafeUrl("http://example.com/v1"), { code: "INVALID_ID" });
-  assert.throws(() => requireSafeUrl("not a url"), { code: "INVALID_ID" });
+test("HTTP transcription endpoints accept Docker hostnames and explicit remote bases", () => {
+  for (const url of ["https://api.openai.com/v1", "http://bifrost:8080/openai/v1", "http://example.com/v1", "http://127.0.0.1:1234/v1", "http://localhost/v1", "http://[::1]:9000/v1"]) {
+    assert.equal(requireSafeUrl(url), url);
+  }
+  const settings = readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_URL: "http://bifrost:8080/openai/v1///" }, scratch("http-settings"));
+  assert.equal(settings.baseUrl, "http://bifrost:8080/openai/v1");
+  assert.equal(settings.allowApi, false, "HTTP support does not grant audio-upload permission");
 });
 
-test("readTranscribeSettings refuses a plain-http remote URL at the boundary", () => {
-  const dir = scratch("settings");
-  assert.throws(
-    () => readTranscribeSettings({ WAZAP_TRANSCRIBE_URL: "http://example.com/v1" }, dir),
-    (err) => {
+test("requireSafeUrl rejects unsupported schemes and credential-bearing bases", () => {
+  for (const url of ["not a url", "ftp://example.com/v1", "file:///tmp/audio", "data:text/plain,audio", "ws://example.com/v1", "wss://example.com/v1", "http://user:synthetic-secret@bifrost:8080/openai", "https://user:synthetic-secret@example.com/v1", "http://bifrost:8080/openai?api_key=synthetic-secret", "https://example.com/v1#synthetic-secret"]) {
+    assert.throws(() => requireSafeUrl(url), (err) => {
       assert.equal(err.code, "INVALID_ID");
-      assert.match(err.message, /non-https/);
+      assert.equal(err.message.includes("synthetic-secret"), false);
+      assert.equal(err.fix.includes("synthetic-secret"), false);
       return true;
-    }
-  );
+    });
+  }
 });
 
 test("maskKey shows the tail and never the key", () => {
@@ -564,4 +563,35 @@ test("the model table is pinned by file, size and digest", () => {
     modelUrl(modelSpec("turbo")),
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
   );
+});
+
+test("API transcriber refuses redirects without leaking audio or either credential header", async () => {
+  const file = audioFile();
+  let leaked = 0;
+  await withServer((req, res) => { leaked++; req.resume(); res.end("unexpected target"); }, async (target) => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      for (const apiAuthHeader of ["Authorization", "x-bf-vk"]) {
+        for (const sameOrigin of [false, true]) {
+          let uploads = 0;
+          await withServer((req, res) => {
+            req.resume();
+            if (req.url === "/leak") { leaked++; res.end("unexpected same-origin target"); return; }
+            uploads++;
+            assert.equal(req.headers[apiAuthHeader.toLowerCase()], apiAuthHeader === "Authorization" ? `Bearer ${KEY}` : KEY);
+            res.writeHead(status, { location: sameOrigin ? "/leak" : target + "/leak" });
+            res.end();
+          }, async (url) => {
+            await assert.rejects(openaiProvider.transcribe({ ...openaiSettings(url), apiAuthHeader }, file, {}), (err) => {
+              assert.equal(err.code, "TRANSCRIBE_FAILED");
+              assert.equal(err.message.includes(KEY), false);
+              assert.equal(err.fix?.includes(KEY) ?? false, false);
+              return true;
+            });
+          });
+          assert.ok(uploads > 0, "the configured synthetic endpoint received the attempt");
+          assert.equal(leaked, 0, "no redirect target received a request, audio or credential");
+        }
+      }
+    }
+  });
 });

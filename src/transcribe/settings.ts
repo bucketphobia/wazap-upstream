@@ -10,7 +10,6 @@ import type { ModelAlias, ProviderName, TranscribeSettings } from "./types.js";
 const DEFAULT_URL = "https://api.openai.com/v1";
 const DEFAULT_API_MODEL = "gpt-4o-mini-transcribe";
 const MODEL_ALIASES: readonly ModelAlias[] = ["turbo", "large-v3", "medium"];
-const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 const OFF = new Set(["", "off", "0", "no", "none", "false"]);
 
 /** Trims whitespace, then one matching pair of surrounding quotes, then again. */
@@ -35,15 +34,16 @@ export function redact(text: string, key: string | null | undefined): string {
 }
 
 /**
- * Audio leaves the machine over this URL and the key rides with it, so plain
- * http is refused unless it points back at this machine.
+ * Audio and the key go to the explicitly configured HTTP or HTTPS endpoint.
+ * HTTP sends both in plaintext; HTTPS is the default. Redirects are refused
+ * by the provider, and credentials belong in the separate key setting.
  */
 export function requireSafeUrl(url: string): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new WazapError("INVALID_ID", "Invalid transcription URL.", "Set WAZAP_TRANSCRIBE_URL to an https:// URL");
+    throw new WazapError("INVALID_ID", "Invalid transcription URL.", "Set WAZAP_TRANSCRIBE_URL to an http:// or https:// URL");
   }
   if (parsed.username || parsed.password || parsed.search || parsed.hash) {
     throw new WazapError(
@@ -52,13 +52,11 @@ export function requireSafeUrl(url: string): string {
       "Use a base endpoint URL and set WAZAP_TRANSCRIBE_API_KEY separately"
     );
   }
-  if (parsed.protocol === "https:") return url;
-  const host = parsed.hostname.replace(/^\[/, "").replace(/\]$/, "");
-  if (parsed.protocol === "http:" && LOOPBACK.has(host)) return url;
+  if (parsed.protocol === "https:" || parsed.protocol === "http:") return url;
   throw new WazapError(
     "INVALID_ID",
-    "Refusing a non-https transcription URL.",
-    "Use an https:// URL, or http:// on 127.0.0.1 for a local server"
+    "Transcription URLs must use HTTP or HTTPS.",
+    "Set WAZAP_TRANSCRIBE_URL to the final http:// or https:// endpoint"
   );
 }
 

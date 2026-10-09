@@ -30,6 +30,8 @@
 
 ### Changed
 
+- Allow explicitly configured HTTP transcription endpoints, including Docker service hostnames, while retaining HTTPS by default, API audio permission and redirect/credential safeguards. HTTP sends audio and the API key unencrypted.
+
 - **The webhook never posts a contact tagged `#private`.** Their direct chat
   is left out, including messages the owner sent there, and so is a message
   they wrote in a group. Listing the chat or also giving them the allow tag

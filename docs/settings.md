@@ -15,7 +15,7 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_TRANSCRIBE_API_KEY` | unset | The key for `openai`; `OPENAI_API_KEY` is the fallback. Never a flag. |
 | `WAZAP_TRANSCRIBE_ALLOW_API` | `0` | Explicitly permit paid API audio uploads with WhatsApp read-only still enabled. Does not enable WhatsApp writes. |
 | `WAZAP_TRANSCRIBE_AUTO` | provider-dependent | Existing providers default to automatic; API permission opt-in defaults to on-request. Set `0` for on-request, `1` for eligible background voice notes. |
-| `WAZAP_TRANSCRIBE_URL` | `https://api.openai.com/v1` | API base URL, HTTPS or loopback HTTP only; Bifrost's compatible base ends in `/openai`. |
+| `WAZAP_TRANSCRIBE_URL` | `https://api.openai.com/v1` | HTTP or HTTPS API base URL; HTTP sends the API key and audio unencrypted. Use HTTP only on a network you trust; Bifrost's compatible base ends in `/openai`. |
 | `WAZAP_TRANSCRIBE_MODEL` | `gpt-4o-mini-transcribe` | Exact transcription model route. Use the exact model supported by the gateway. |
 | `WAZAP_TRANSCRIBE_AUTH_HEADER` | `Authorization` | `Authorization` sends Bearer auth; `x-bf-vk` sends only the raw Bifrost virtual key. |
 | `WAZAP_RECALL` | `off` | `local` turns on [semantic recall](recall.md#semantic-recall). `wazap config recall` sets it. |

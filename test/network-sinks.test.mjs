@@ -198,7 +198,9 @@ for (const declared of [4 * 1024 * 1024, undefined, 1]) {
 
 for (const validate of [requireSafeUrl, requireWebhookUrl]) {
   test(`${validate.name} never quotes invalid URL input`, () => {
-    for (const url of [`not-a-url-${PRIVATE}`, `http://remote.example/${PRIVATE}`, `ftp://remote.example/${PRIVATE}`]) {
+    const invalidUrls = [`not-a-url-${PRIVATE}`, `ftp://remote.example/${PRIVATE}`];
+    if (validate === requireWebhookUrl) invalidUrls.push(`http://remote.example/${PRIVATE}`);
+    for (const url of invalidUrls) {
       assert.throws(
         () => validate(url),
         (err) => {

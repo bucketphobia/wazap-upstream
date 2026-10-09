@@ -90,9 +90,11 @@ The key is treated as a secret rather than as a setting:
   `api key: set (…abcd)`.
 - Provider error bodies, transport exception details and malformed-JSON excerpts
   are not printed. Errors retain HTTP status, timeouts and actionable fixes.
-- A plain-`http` base URL is refused unless it points back at this
-  machine. Userinfo credentials, queries and fragments are not allowed in this
-  base URL; set the API key separately.
+- HTTP and HTTPS base URLs are supported; HTTPS remains the default. HTTP
+  sends the API key and audio unencrypted, including between containers on a
+  Docker network. Use it only for an endpoint and network you trust.
+- Userinfo credentials, queries and fragments are not allowed in the base
+  URL; set the API key separately.
 - Redirects are refused, including same-origin redirects: configure the final
   base endpoint directly. This keeps audio and credentials on the intended route.
 - Successful JSON responses are capped at 1 MiB, including chunked responses.
@@ -125,11 +127,14 @@ Bifrost uses base `/openai`; use the exact configured provider/model name.
 Set `WAZAP_TRANSCRIBE_AUTH_HEADER=x-bf-vk` only when the gateway requires its
 raw virtual-key header. Exactly one credential header is sent.
 
-The base URL still requires HTTPS or loopback HTTP and rejects credentials,
-queries, fragments and redirects. This feature does not allow LAN plain HTTP
-or establish gateway routes, credentials or model access. Tests exercise
-synthetic compatible endpoints; actual gateway/provider availability must be
-verified separately before sending approved content.
+The explicitly configured base URL may use HTTP, including Docker service
+hostnames such as `http://bifrost:8080/openai/v1`, or HTTPS. HTTP carries the
+API key and audio in plaintext; it does not make a Docker network encrypted.
+Credentials in the URL, queries, fragments and every redirect remain refused.
+Choosing HTTP does not grant API audio-upload permission or establish gateway
+routes, credentials or model access. Tests exercise synthetic compatible
+endpoints; actual gateway/provider availability must be verified separately
+before sending approved content.
 
 ## Without being asked
 
