@@ -128,6 +128,26 @@ export class Transcripts {
   }
 
   /**
+   * Voice notes with no transcript that were never queued (nor given up on),
+   * newest first, at most `limit`: what a backfill may queue. Stories are left
+   * out; whether each one belongs on the queue is the service's to decide.
+   */
+  untranscribedVoice(limit: number): string[] {
+    return this.c
+      .all<{ sid: string }>(
+        `SELECT (CASE WHEN m.from_me = 1 THEN 'true' ELSE 'false' END) || '_' || coalesce(ck.jid, c.jid) || '_' || m.key_id AS sid
+         FROM messages m
+           JOIN chats c ON c.id = m.chat_id LEFT JOIN chats ck ON ck.id = c.merged_into
+         WHERE m.type = 'voice' AND m.transcript IS NULL AND m.deleted_at IS NULL
+           AND coalesce(ck.jid, c.jid) <> 'status@broadcast'
+           AND NOT EXISTS (SELECT 1 FROM transcribe_queue q WHERE q.message_id = m.id)
+         ORDER BY m.id DESC LIMIT ?`,
+        Math.max(0, Math.floor(limit))
+      )
+      .map((row) => row.sid);
+  }
+
+  /**
    * Marks a run as started and counts it. The count this run makes, or null
    * when the row is gone, given up on, or already running.
    */
