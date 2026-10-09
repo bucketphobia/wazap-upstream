@@ -947,7 +947,8 @@ test("a hit under the floor is listed only when its words match the query", asyn
   try {
     deliver(sock, [
       text("GOOD", "cata medic"),
-      text("NOISE", "cata pelerina rucsac munte cort saci"),
+      // Both words, far apart in a long list: listed for its words, though its meaning is under the floor.
+      text("NOISE", "cata pelerina rucsac munte cort saci medic"),
       text("FAR", "doctor pelerina rucsac munte cort saci lanterna"),
     ]);
     await svc.recallIdle();

@@ -1,8 +1,10 @@
 # Semantic recall
 
 With recall on, `search` matches what was meant and the words at once: a
-paraphrase or another language still hits through its meaning, a short or
-foreign-language question through its words, and the two rankings are fused.
+paraphrase still hits through its meaning, a short question through its words,
+and the two rankings are fused. A question in another language than the chat
+seldom finds it: the default model aligns languages weakly, so ask in the
+chat's language. A match counts on its similarity alone; age only orders.
 It reaches every message the account keeps. For an exact string — an id, a
 phone number, a URL — pass `match: "words"`. When meaning search cannot run —
 recall off, the embedding server failing or refusing the query, or the sidecar

@@ -680,7 +680,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "search",
     title: "Search WhatsApp messages",
-    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase or another language still hits. match: "words" for exact words (a number, a URL). since, until and from narrow it; coverage and freshness say how much history was searched.`,
+    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, a URL). since, until and from narrow it; coverage and freshness say how much history was searched.`,
     schema: {
       query: z.string().min(1),
       match: z.enum(["hybrid", "words"]).default("hybrid").describe('"words": only messages holding the words'),
