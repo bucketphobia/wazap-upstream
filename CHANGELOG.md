@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Allow explicitly configured HTTP embedding gateways while retaining endpoint-sensitive index identities, explicit API opt-in, credential-safe diagnostics and redirect refusal. HTTP carries API keys and message/query text unencrypted.
+
 ### Added
 
 - **The webhook can post only some chats.** `WAZAP_WEBHOOK_CHATS` lists chat

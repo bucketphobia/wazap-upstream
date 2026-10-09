@@ -14,7 +14,7 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_TRANSCRIBE` | `off` | `local`, `openai` or `off`. `wazap config transcribe` sets it. |
 | `WAZAP_TRANSCRIBE_API_KEY` | unset | The key for `openai`; `OPENAI_API_KEY` is the fallback. Never a flag. |
 | `WAZAP_RECALL` | `off` | `local` turns on local [semantic recall](recall.md#semantic-recall); `openai` explicitly uploads retained text/queries to the configured API. CLI configuration covers local/off; API uses these environment settings. |
-| `WAZAP_EMBED_API_URL` | unset | Required API base, HTTPS or loopback HTTP only; `/embeddings` is appended. |
+| `WAZAP_EMBED_API_URL` | unset | Required HTTP or HTTPS API base; `/embeddings` is appended. HTTP sends API credentials and message/query text unencrypted; use only on a trusted network. |
 | `WAZAP_EMBED_API_KEY` | unset | Required private embedding API credential; no implicit fallback or command-line flag. |
 | `WAZAP_EMBED_API_MODEL` | unset | Required exact API model route; no guessed model default. |
 | `WAZAP_EMBED_API_DIMS` | unset | Required actual vector length, integer 1–4096; validates replies, does not request model dimension shortening. |

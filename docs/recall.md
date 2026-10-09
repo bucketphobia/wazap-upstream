@@ -42,7 +42,10 @@ identify the space, so key rotation alone does not reindex. Old-space vectors
 remain only until each message is re-embedded or removed; a switch incurs another backfill.
 Meaning search degrades to keyword search when the API is unavailable.
 
-API embeddings require HTTPS or loopback HTTP, reject redirects, time out after
+API embeddings accept explicitly configured HTTP or HTTPS endpoints, including
+Docker service names such as `http://bifrost:8080/openai/v1`. HTTP carries API
+credentials and message/query text unencrypted; use it only on a trusted network.
+They reject redirects, time out after
 60 seconds and cap replies at 4 MiB. Malformed, duplicate, missing, nonfinite,
 zero-norm or wrong-sized vectors are rejected. Errors omit provider bodies,
 credentials, raw transport details and text. Bifrost's compatible base is
@@ -120,3 +123,26 @@ errors.
 
 `wazap config recall local|off` sets `WAZAP_RECALL`, the one setting recall has.
 The model is embeddinggemma-300m, and every kept message is indexed.
+
+
+### Changing a gateway URL without uploading history again
+
+The normalized API URL is part of the durable vector-space identity, together
+with the model, dimensions and input-format mode. Changing only HTTPS/public
+hostname to an HTTP/Docker alias still creates a new identity and normally
+refills retained history. HTTP support does not automatically equate gateways
+or grant upload permission.
+
+If both URLs are verified aliases of the same backend and the model, dimensions
+and formatting mode are unchanged, reuse requires an explicit offline migration
+with the server stopped and a restorable database backup. Relabel the existing
+vector space and reconcile its feed metadata explicitly, preserving vector
+bytes, content hashes and existing pending queue/refill state. Refuse a
+conflicting target space or incompatible settings. Skipped rows have no durable
+completion ledger; absent feed metadata cannot prove that history was completed.
+Keep the server stopped until migration and reconciliation checks pass. Do not
+restart with recall off as a migration step: that clears feed metadata and work.
+Relabeling existing vectors avoids uploading those rows again, but remaining
+eligible history can still refill after restart. Never remove URL/model identity
+checks globally, discard pending work, or mark unfinished history completed to
+avoid a bill.

@@ -96,7 +96,7 @@ test("API recall is explicit, validates private settings and isolates index iden
   ]) assert.notEqual(config.indexModel, settings(override).indexModel);
   for (const name of ["URL", "KEY", "MODEL", "DIMS", "MIN_SIMILARITY"])
     assert.throws(() => settings({ [`WAZAP_EMBED_API_${name}`]: "" }));
-  for (const url of ["http://192.168.1.2/v1", "http://127.0.0.1.evil/v1", "https://user:secret@example.invalid", "https://example.invalid/?key=secret"])
+  for (const url of ["ftp://example.invalid/v1", "file:///tmp/private", "ws://example.invalid/v1", "data:text/plain,private", "http://user:secret@bifrost:8080/openai/v1", "https://user:secret@example.invalid", "https://example.invalid/?key=secret", "http://bifrost:8080/openai/v1#secret"])
     assert.throws(() => settings({ WAZAP_EMBED_API_URL: url }), (err) => !err.message.includes(url));
   for (const dims of ["0", "4097", "1.5", "NaN"]) assert.throws(() => settings({ WAZAP_EMBED_API_DIMS: dims }));
   for (const floor of ["-1", "1.1", "NaN"]) assert.throws(() => settings({ WAZAP_EMBED_API_MIN_SIMILARITY: floor }));
@@ -268,4 +268,51 @@ test("API index and query use the same identity, and query outages give keyword 
   assert.equal(result.structuredContent.recall_unavailable.code, "RECALL_FAILED");
   assert.doesNotMatch(result.structuredContent.recall_unavailable.message, /synthetic-private-key|retained private message/);
   assert.equal(result.structuredContent.messages.length, 1);
+});
+
+
+test("configured HTTP embedding gateways accept Docker hostnames without collapsing index identity", () => {
+  for (const url of ["https://example.invalid/v1", "http://bifrost:8080/openai/v1", "http://192.168.1.2/v1", "http://127.0.0.1.evil/v1", "http://localhost:8080/v1", "http://[::1]:8080/v1"]) {
+    assert.equal(settings({ WAZAP_EMBED_API_URL: url }).api.url, url);
+  }
+  const oldSpace = settings({ WAZAP_EMBED_API_URL: "https://bifrost.example/openai/v1" });
+  const newSpace = settings({ WAZAP_EMBED_API_URL: "http://bifrost:8080/openai/v1///" });
+  assert.equal(newSpace.api.url, "http://bifrost:8080/openai/v1");
+  assert.notEqual(newSpace.indexModel, oldSpace.indexModel, "URL aliases require explicit migration, not automatic reuse");
+  assert.notEqual(newSpace.indexModel, settings({ WAZAP_EMBED_API_URL: newSpace.api.url, WAZAP_EMBED_API_MODEL: "different-model" }).indexModel);
+  assert.notEqual(newSpace.indexModel, settings({ WAZAP_EMBED_API_URL: newSpace.api.url, WAZAP_EMBED_API_DIMS: "4" }).indexModel);
+  assert.notEqual(newSpace.indexModel, settings({ WAZAP_EMBED_API_URL: newSpace.api.url, WAZAP_EMBED_API_INPUT_TYPE: "direct" }).indexModel);
+  assert.equal(readRecallSettings({ WAZAP_EMBED_API_URL: newSpace.api.url }, "/unused").enabled, false, "HTTP acceptance does not enable API uploads");
+});
+
+test("API embedding redirects never forward text or either credential header", async (t) => {
+  let leaked = 0;
+  const target = http.createServer((req, res) => { leaked++; req.resume(); res.end("unexpected target"); });
+  await new Promise((resolve) => target.listen(0, "127.0.0.1", resolve));
+  t.after(() => { target.closeAllConnections(); target.close(); });
+  for (const status of [301, 302, 303, 307, 308]) {
+    for (const header of ["Authorization", "x-bf-vk"]) {
+      for (const sameOrigin of [false, true]) {
+        let requests = 0;
+        const server = http.createServer(async (req, res) => {
+          if (req.url === "/leak") { leaked++; req.resume(); res.end("unexpected same-origin target"); return; }
+          let body = ""; for await (const chunk of req) body += chunk;
+          requests++;
+          assert.equal(req.headers[header.toLowerCase()], header === "Authorization" ? "Bearer synthetic-private-key" : "synthetic-private-key");
+          assert.deepEqual(JSON.parse(body).input, ["synthetic retained words"]);
+          res.writeHead(status, { location: sameOrigin ? "/leak" : `http://127.0.0.1:${target.address().port}/leak` }); res.end();
+        });
+        await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+        const engine = await engineFor(settings({ WAZAP_EMBED_API_URL: `http://127.0.0.1:${server.address().port}/v1`, WAZAP_EMBED_AUTH_HEADER: header }));
+        try {
+          await assert.rejects(() => engine.embed(["synthetic retained words"], "document"), (err) => {
+            assert.equal(err.code, "RECALL_FAILED");
+            assert.doesNotMatch(err.message + (err.fix ?? ""), /synthetic-private-key|synthetic retained words/);
+            return true;
+          });
+          assert.equal(requests, 1);assert.equal(leaked, 0, "redirect targets receive no text or credentials");
+        } finally { await engine.stop();server.closeAllConnections();await new Promise((resolve) => server.close(resolve)); }
+      }
+    }
+  }
 });
