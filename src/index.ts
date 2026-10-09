@@ -89,7 +89,7 @@ Options:
   --service           With setup: keep wazap running on this machine, without asking
   --expose            With setup: also give it a public URL cloud agents can reach
   --model <alias>     With transcribe download: turbo (default), large-v3 or medium.
-                      With embed download: embeddinggemma-300m (default) or e5-base-multilingual
+                      With embed download: embeddinggemma-300m (default), bge-m3 or e5-base-multilingual
   --dry-run           With connect, skills install, service install or update: print what would happen, and do nothing
   --force             With backup: replace a file already at the destination
   --live              With status: reach WhatsApp for real, then close the connection

@@ -837,7 +837,10 @@ test("the floor defaults to the model's own, and the env override wins over both
   const e5 = readRecallSettings({ WAZAP_EMBED_MODEL: "e5-base-multilingual" }, dir);
   assert.equal(e5.minSimilarity, EMBED_MODELS["e5-base-multilingual"].defaultMinSimilarity);
   assert.notEqual(e5.minSimilarity, 0.35, "e5 must not silently inherit gemma's floor");
-  for (const model of ["embeddinggemma-300m", "e5-base-multilingual"]) {
+  const bge = readRecallSettings({ WAZAP_EMBED_MODEL: "bge-m3" }, dir);
+  assert.equal(bge.model, "bge-m3");
+  assert.equal(bge.minSimilarity, 0.55, "bge-m3 prices similarity higher than gemma");
+  for (const model of ["embeddinggemma-300m", "e5-base-multilingual", "bge-m3"]) {
     const env = { WAZAP_EMBED_MODEL: model, WAZAP_RECALL_MIN_SIMILARITY: "0.5" };
     assert.equal(readRecallSettings(env, dir).minSimilarity, 0.5, model);
   }
