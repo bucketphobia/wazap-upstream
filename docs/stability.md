@@ -227,7 +227,7 @@ Stable: the 26 `WAZAP_*` listed in `.env.example` and in the settings table of
 `WAZAP_WEBHOOK_TAG`, `WAZAP_WEBHOOK_COALESCE`, `WAZAP_WEBHOOK_RETRY_401`,
 `WAZAP_RETENTION`, `WAZAP_PRE_MIGRATION_BACKUP`.
 Any other `WAZAP_*` a running wazap reads is a development knob, documented in
-`AGENTS.md` and nowhere else; it may change or go at any time.
+`CLAUDE.md` and nowhere else; it may change or go at any time.
 
 A setting that stops being read is not silently ignored: it moves into
 `RETIRED_SETTINGS` and whoever still sets it gets one warning naming the

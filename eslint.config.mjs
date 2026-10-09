@@ -5,6 +5,7 @@ import globals from "globals";
 
 export default tseslint.config(
   {
+    // Generated output only; src/, test/ and scripts/ are all linted.
     ignores: ["dist/", "dist-bundle/", "node_modules/"],
   },
   {
