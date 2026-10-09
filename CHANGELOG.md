@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.6
+
+### Changed
+
+- **Local transcription takes every voice note, not just incoming live ones.**
+  With `WAZAP_TRANSCRIBE=local`, the user's own voice notes are transcribed
+  too, and each time the account connects the stored notes still without a
+  transcript are queued (the newest 500, behind anything new). It costs nothing
+  on this machine; an API provider keeps the old rule, so nothing new is billed.
+
 ## 1.3.5
 
 ### Added
