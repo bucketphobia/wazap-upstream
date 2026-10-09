@@ -92,8 +92,8 @@ node scripts/eval/manual.mjs score
 It writes `summary.json` in the session's run directory
 (`~/.wazap-eval/runs/<timestamp>-chatgpt/`) and prints the table. Copy the
 summary to `eval/results/<version>/<date>-chatgpt-manual.summary.json` to keep
-it. Tool calls, arguments and effects come from the server; only the replies and
-the dialog decisions come from you.
+it locally; `eval/results/` is gitignored. Tool calls, arguments and effects
+come from the server; only the replies and the dialog decisions come from you.
 
 ## What passes
 
