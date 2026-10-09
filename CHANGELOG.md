@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.5
+
+### Added
+
+- **`bge-m3` as an embedding model, for a history in more than one language.**
+  Set `WAZAP_EMBED_MODEL=bge-m3` and run `wazap embed download --model bge-m3`
+  (~635 MB). Measured on real messages, it finds an answer asked in another
+  language that the default model misses ("where is my package" finds "A ajuns
+  coletul?"), and ranks the answer in the top five more often (7 of 10 against
+  4). It carries its own floor, 0.55. Gemma stays the default: bge-m3 is twice
+  its size and embed time.
+
 ## 1.3.4
 
 ### Fixed
