@@ -457,9 +457,21 @@ const TOOLS: readonly ToolDef[] = [
     name: "get_status",
     title: "Get the WhatsApp connection status",
     description: `Whether the account works: status (connected, not_linked, linking with its pairing code…), sync, how fresh the history is, webhook delivery, versions. accounts lists every account, with default. Call it on NOT_CONNECTED, NOT_LINKED or SYNC_IN_PROGRESS.`,
-    schema: {},
+    schema: {
+      include_picture: z.boolean().default(false).describe("Add picture_url, the account's own profile photo (the link expires)"),
+    },
     write: false,
-    handler: async (_args, { wa, hub, allowWrite }) => renderGetStatus(wa.getStatus(), allowWrite, hub),
+    handler: async ({ include_picture }, { wa, hub, allowWrite }) => {
+      const status = wa.getStatus();
+      const payload = renderGetStatus(status, allowWrite, hub);
+      if (!include_picture || status.account === null) return payload;
+      // A photo that cannot be read is no photo: the status itself still answers.
+      const picture = await wa.getContact(status.account.id).then(
+        (contact) => contact.profile_pic_url,
+        () => null
+      );
+      return { ...payload, structuredContent: { ...payload.structuredContent, picture_url: picture } };
+    },
   }),
 
   tool({

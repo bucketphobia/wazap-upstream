@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`get_status` can return the account's own profile photo.** With
+  `include_picture: true` it adds `picture_url`, the link WhatsApp gives for
+  the photo, or `null` when there is none or it cannot be read; the status
+  answers either way. Off by default, so nothing changes for agents that do not
+  ask. The link expires: a client that shows it keeps its own copy.
 - **The webhook can post only some chats.** `WAZAP_WEBHOOK_CHATS` lists chat
   ids and phone numbers, and `WAZAP_WEBHOOK_TAG` names a contact tag such as
   `autopeloc`. Set either and only a matching chat is posted. A direct chat

@@ -348,6 +348,46 @@ test("get_status says write tools are missing and how to enable them", async () 
   assert.doesNotMatch(result.structuredContent.hint, /token/i);
 });
 
+test("get_status adds the account's own profile photo only when asked", async () => {
+  const { svc } = connectedService(WhatsAppService, {
+    prefix: "wazap-status-picture-",
+    id: "40700000001@s.whatsapp.net",
+    name: "Răzvan",
+  });
+  const asked = [];
+  svc.getContact = async (id) => {
+    asked.push(id);
+    return { profile_pic_url: "https://pps.whatsapp.net/v/me.jpg" };
+  };
+  const server = fakeServer();
+  registerTools(server, asToolSource(svc), { allowWrite: false });
+
+  const plain = await server.tools.get("get_status").handler({});
+  assert.equal("picture_url" in plain.structuredContent, false);
+  assert.deepEqual(asked, [], "no photo lookup unless include_picture");
+
+  const result = await server.tools.get("get_status").handler({ include_picture: true });
+  assert.equal(result.structuredContent.picture_url, "https://pps.whatsapp.net/v/me.jpg");
+  assert.deepEqual(asked, ["40700000001@s.whatsapp.net"]);
+});
+
+test("get_status still answers when the profile photo cannot be read", async () => {
+  const { svc } = connectedService(WhatsAppService, {
+    prefix: "wazap-status-no-picture-",
+    id: "40700000001@s.whatsapp.net",
+    name: "Răzvan",
+  });
+  svc.getContact = async () => {
+    throw new WazapError("NOT_CONNECTED", "offline");
+  };
+  const server = fakeServer();
+  registerTools(server, asToolSource(svc), { allowWrite: false });
+  const result = await server.tools.get("get_status").handler({ include_picture: true });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.structuredContent.picture_url, null);
+  assert.equal(result.structuredContent.status, "connected");
+});
+
 test("get_status on a write-enabled server hides write tools from a read-token session", async () => {
   const { svc } = connectedService(WhatsAppService, {
     prefix: "wazap-status-read-token-",
