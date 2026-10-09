@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.4
+
+### Fixed
+
+- **Search finds old messages by meaning again.** The similarity floor was
+  applied after age had lowered the score, so a message two months old needed a
+  0.50 match to count and most real paraphrases (0.40-0.50) were dropped. The
+  floor now reads the similarity itself; age only orders the results.
+- **One shared word no longer puts a long, unrelated message at the top.** For
+  a two-word query, a hit that carries one of the words now needs part of the
+  query's meaning (70% of the floor). Without meaning search it stays, as
+  before.
+
+### Changed
+
+- The `search` tool, its docs and the recall skill no longer promise that a
+  question in another language finds the message: with the default model such
+  matches sit under the floor. Ask in the chat's language.
+
 ## 1.3.3
 
 ### Added
