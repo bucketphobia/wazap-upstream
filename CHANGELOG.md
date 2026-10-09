@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A chat read on the phone no longer shows as unread.** `list_chats` took
+  WhatsApp's own unread count, which stays where it was when the user reads on
+  the phone. A chat where the user had the last word, or where the phone's read
+  receipts reached the last message, now has `unread_count` 0 and leaves the
+  `unread` filter.
+
 ## 1.3.0
 
 ### Added
