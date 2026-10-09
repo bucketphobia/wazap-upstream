@@ -792,7 +792,10 @@ export class WhatsAppService implements WhatsAppApi {
     this.statusSince = Date.now();
     this.webhooks.queueConnectionWebhook(next);
     // Notes that waited for the connection run now rather than at the worker's next look.
-    if (next === "connected" && this.voice.autoTranscribe) this.voice.transcribeWorker.kick();
+    if (next === "connected" && this.voice.autoTranscribe) {
+      this.voice.backfillTranscripts();
+      this.voice.transcribeWorker.kick();
+    }
   }
 
   getStatus(): StatusInfo {

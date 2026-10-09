@@ -101,7 +101,8 @@ The key is treated as a secret rather than as a setting:
 ## Without being asked
 
 With a provider configured, incoming voice notes of up to ten minutes are
-transcribed in the background as they arrive, never holding up a message. The
+transcribed in the background as they arrive, never holding up a message. With
+`local`, which costs nothing, the user's own voice notes are too. The
 transcript is stored with the message, so a voice note is transcribed once, and
 its words are searchable, recalled and carried by the webhook event.
 
@@ -138,13 +139,16 @@ its words are searchable, recalled and carried by the webhook event.
   `local` or for an API. A note queued under `local` is never sent to an API
   provider configured afterwards: it is given up on as `provider_changed`. A
   note queued for an API may still be transcribed locally.
-- **History: the last day only.** A note that a history sync brings (a first
-  link, a relink) is queued only when it is less than 24 hours old, so linking
-  never transcribes the archive. A note WhatsApp delivers live is always
-  queued, however old its timestamp.
+- **History: the last day, or all of it locally.** A note that a history sync
+  brings (a first link, a relink) is queued on arrival only when it is less
+  than 24 hours old. With `local`, each time the account connects the notes
+  already stored without a transcript are queued as well, the newest 500 at a
+  time behind anything new, so the archive is transcribed on this machine
+  without a bill; an API provider never does this. A note WhatsApp delivers
+  live is always queued, however old its timestamp.
 
 Audio *files* are left alone, since one can be an hour long, and so are notes
-you recorded and notes WhatsApp gave no length for; call
+WhatsApp gave no length for, and with an API provider the notes you recorded; call
 `get_media(message_id)` for those. `WAZAP_TRANSCRIBE_AUTO=0` keeps that and
 stops the background work; with it, or with the provider switched
 off, a queue already stored is kept and waits, and it continues under the
