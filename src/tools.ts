@@ -504,15 +504,20 @@ const TOOLS: readonly ToolDef[] = [
     schema: {
       filter: z.enum(["all", "unread", "groups", "individual", "archived"]).default("all").describe('"all" leaves out archived'),
       limit: z.number().int().min(1).max(100).default(20),
+      include_pictures: z.boolean().default(false).describe("Add picture_url, each chat's profile photo (links expire)"),
     },
     outputSchema: LIST_CHATS_OUTPUT,
     write: false,
-    handler: async ({ filter, limit }, ctx) => {
+    handler: async ({ filter, limit, include_pictures }, ctx) => {
       const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId) });
-      return ok(
-        renderChats(result.data, filter),
-        synced(result, { filter, count: result.data.length, chats: result.data })
-      );
+      let chats: Array<ChatSummary & { picture_url?: string | null }> = result.data;
+      if (include_pictures && ctx.wa.profilePictures) {
+        // A #private person's chat shows who, not their face.
+        const open = chats.filter((chat) => chat.last_message?.private !== true).map((chat) => chat.chat_id);
+        const pictures = await ctx.wa.profilePictures(open).catch(() => ({}) as Record<string, string | null>);
+        chats = chats.map((chat) => ({ ...chat, picture_url: pictures[chat.chat_id] ?? null }));
+      }
+      return ok(renderChats(result.data, filter), synced(result, { filter, count: chats.length, chats }));
     },
   }),
 
