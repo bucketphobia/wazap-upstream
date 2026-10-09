@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **A chat marked read with `manage_chat` stays read.** WhatsApp sends the
+  account no echo of its own read, so the chat kept its unread count and showed
+  as unread again at the next `list_chats`. `mark_read` now clears it.
+
 ## 1.3.1
 
 ### Fixed
