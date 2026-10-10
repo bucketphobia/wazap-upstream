@@ -107,8 +107,8 @@ provider, upload scope and charges, set `WAZAP_TRANSCRIBE_ALLOW_API=1` alongside
 `WAZAP_TRANSCRIBE=openai`. WhatsApp send and mutation tools stay disabled.
 The permission flag does not enable a provider or grant WhatsApp writes.
 This opt-in defaults to on-request transcription; explicitly set
-`WAZAP_TRANSCRIBE_AUTO=1` to process eligible incoming voice notes in the
-background. Local transcription and existing write-enabled API defaults are
+`WAZAP_TRANSCRIBE_AUTO=auto` (or `1`) to keep existing automatic behavior,
+or `on` to include new live outgoing and self-chat voice notes. Local transcription and existing write-enabled API defaults are
 unchanged when the permission flag is unset.
 
 Transcripts are cached and concurrent requests are deduplicated. Background
@@ -183,12 +183,14 @@ its words are searchable, recalled and carried by the webhook event.
   already stored without a transcript are queued as well, the newest 500 at a
   time behind anything new, so the archive is transcribed on this machine
   without a bill; an API provider never does this. A note WhatsApp delivers
-  live is always queued, however old its timestamp.
+  live is queued regardless of age, except outgoing API notes: `on` accepts
+  only newly inserted live notes created since this process started.
 
 Audio *files* are left alone, since one can be an hour long, and so are notes
-WhatsApp gave no length for, and with an API provider the notes you recorded; call
-`get_media(message_id)` for those. `WAZAP_TRANSCRIBE_AUTO=0` keeps that and
-stops the background work; with it, or with the provider switched
+WhatsApp gave no length for. API transcription of your own notes requires
+`WAZAP_TRANSCRIBE_AUTO=on` and `WAZAP_TRANSCRIBE_ALLOW_API=1`; history and
+stored replays stay excluded. `get_media(message_id)` remains available on
+request. `WAZAP_TRANSCRIBE_AUTO=off` (or `0`) stops the background work; with it, or with the provider switched
 off, a queue already stored is kept and waits, and it continues under the
 provider configured next, within the day and the local-stays-local rule.
 `get_status` shows the queue under `transcription` (how many wait, how long

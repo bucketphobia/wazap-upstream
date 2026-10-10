@@ -16,7 +16,7 @@ import type { AccountDb, StoredMessage, UpsertResult } from "../db/index.js";
 import { asWazapError, WazapError } from "../errors.js";
 import { isStatusJid } from "../ids.js";
 import { logError } from "../logger.js";
-import { isoWithOffset, mediaInfo, messageTimestampMs, messageType, voiceSeconds } from "../messages.js";
+import { isoWithOffset, mediaInfo, messageTimestampMs, messageType, protoNumber, voiceSeconds } from "../messages.js";
 import { mediaFilename } from "../outgoing-media.js";
 import type { EmbedFeed } from "../recall/index.js";
 import {
@@ -71,7 +71,7 @@ function readTranscribeConfig(dataDir: string): TranscribeSettings | WazapError 
  * A voice note the service transcribes without being asked: not a story,
  * recorded as a voice note rather than attached as an audio file, and of a
  * length WhatsApp stated and kept to ten minutes. The user's own notes too when
- * transcription is free (`own`); a billed provider takes incoming ones only.
+ * transcription is free (`own`) or the owner explicitly opts in to new outgoing API notes.
  */
 function transcribable(raw: WAMessage, own: boolean): boolean {
   if ((raw.key.fromMe && !own) || isStatusJid(raw.key.remoteJid ?? "") || messageType(raw) !== "voice") return false;
@@ -121,6 +121,10 @@ export class AccountVoice {
   readonly autoTranscribe: boolean;
   /** Where the configured provider sends the audio, recorded with each note queued; null with no provider. */
   private readonly transcribeClass: "local" | "api" | null;
+  /** Paid outgoing notes require both explicit API consent and their own opt-in. */
+  private readonly autoOwn: boolean;
+  /** Only notes created since this process enabled the opt-in can join the paid queue. */
+  private readonly ownAutoSince = Math.floor(Date.now() / 1000) * 1000;
   /** This account as the process's transcription worker sees it. */
   readonly transcribeSource: TranscribeSource;
   /** The worker every account shares; a seam for tests. */
@@ -145,6 +149,7 @@ export class AccountVoice {
       settings.provider !== null &&
       settings.auto &&
       !(this.effectiveReadOnly && settings.provider === "openai" && !settings.allowApi);
+    this.autoOwn = !(settings instanceof WazapError) && settings.autoOwn && settings.allowApi;
     this.transcribeClass = settings instanceof WazapError || settings.provider === null ? null : PROVIDERS[settings.provider].kind;
     this.transcribeSource = {
       name: account.id,
@@ -375,7 +380,13 @@ export class AccountVoice {
    * queue a turn later, once the transaction has committed.
    */
   queueTranscript(raw: WAMessage, result: UpsertResult, live: boolean): void {
-    if (!this.autoTranscribe || result.sid === null || !transcribable(raw, this.transcribeClass === "local")) return;
+    if (!this.autoTranscribe || result.sid === null || !transcribable(raw, this.transcribeClass === "local" || this.autoOwn)) return;
+    // Outgoing API opt-in applies only to new live notes, never history/import or a stored replay.
+    if (this.transcribeClass === "api" && raw.key.fromMe) {
+      const seconds = protoNumber(raw.messageTimestamp);
+      if (!live || result.outcome !== "inserted" || seconds === undefined ||
+        !Number.isFinite(seconds) || seconds * 1000 < this.ownAutoSince) return;
+    }
     if (result.outcome !== "inserted" && !(live && result.outcome === "updated")) return;
     if (!live && messageTimestampMs(raw) <= Date.now() - HISTORY_TRANSCRIBE_WINDOW_MS) return;
     if (this.transcribeClass === null) return;
@@ -396,7 +407,7 @@ export class AccountVoice {
   private async transcribeQueued(sid: string): Promise<void> {
     const message = this.views.storedOrThrow(sid);
     if (message.transcript !== null) return;
-    if (!transcribable(this.views.messageOrThrow(sid), this.transcribeClass === "local")) {
+    if (!transcribable(this.views.messageOrThrow(sid), this.transcribeClass === "local" || this.autoOwn)) {
       throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short voice note to transcribe."), "gone", "not a voice note to transcribe");
     }
     await this.host.transcribeAudio(sid);

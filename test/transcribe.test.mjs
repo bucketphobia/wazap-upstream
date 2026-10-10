@@ -59,6 +59,7 @@ test("readTranscribeSettings defaults to transcription off", () => {
     provider: null,
     language: "auto",
     auto: false,
+    autoOwn: false,
     model: "turbo",
     whisperBin: null,
     apiKey: null,
@@ -594,4 +595,21 @@ test("API transcriber refuses redirects without leaking audio or either credenti
       }
     }
   });
+});
+
+
+
+test("AUTO off/auto/on and numeric aliases distinguish background and outgoing permission", () => {
+  const dir = scratch("auto-modes");
+  for (const [value, automatic, own] of [["off", false, false], ["0", false, false], ["auto", true, false], ["1", true, false], ["on", true, true]]) {
+    const settings = readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: value }, dir);
+    assert.equal(settings.auto, automatic, value);
+    assert.equal(settings.autoOwn, own, value);
+  }
+  const providerOff = readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTO: "on" }, dir);
+  assert.equal(providerOff.provider, null);
+  assert.equal(providerOff.auto, false);
+  assert.equal(providerOff.allowApi, false);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1" }, dir).auto, false);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "local" }, dir).auto, true);
 });

@@ -82,10 +82,14 @@ function parseModel(raw: string | undefined): ModelAlias {
   );
 }
 
-function asBool(raw: string | undefined, fallback: boolean): boolean {
-  const value = stripPasted(raw ?? "");
-  if (value === "") return fallback;
-  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
+/** off disables background work; auto preserves provider behavior; on also opts in own API notes. */
+function autoMode(raw: string | undefined, fallback: boolean): { enabled: boolean; own: boolean } {
+  const value = stripPasted(raw ?? "").toLowerCase();
+  if (value === "") return { enabled: fallback, own: false };
+  if (["off", "0", "false", "no"].includes(value)) return { enabled: false, own: false };
+  if (["auto", "1", "true", "yes"].includes(value)) return { enabled: true, own: false };
+  if (value === "on") return { enabled: true, own: true };
+  throw new WazapError("INVALID_ID", "WAZAP_TRANSCRIBE_AUTO must be off, auto or on.", "Use off (0), auto (1) or on for all eligible new voice notes");
 }
 
 function orNull(raw: string | undefined): string | null {
@@ -111,10 +115,12 @@ export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string):
   const provider = parseProvider(env.WAZAP_TRANSCRIBE);
   const url = orNull(env.WAZAP_TRANSCRIBE_URL) ?? DEFAULT_URL;
   const allowApi = apiPermission(env.WAZAP_TRANSCRIBE_ALLOW_API);
+  const automatic = autoMode(env.WAZAP_TRANSCRIBE_AUTO, !(provider === "openai" && allowApi));
   return {
     provider,
     language: "auto",
-    auto: provider !== null && asBool(env.WAZAP_TRANSCRIBE_AUTO, !(provider === "openai" && allowApi)),
+    auto: provider !== null && automatic.enabled,
+    autoOwn: automatic.own,
     model: parseModel(env.WAZAP_WHISPER_MODEL),
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),

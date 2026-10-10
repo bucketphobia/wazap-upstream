@@ -43,6 +43,8 @@ export interface TranscribeSettings {
   /** "auto" or an ISO code. */
   language: string;
   auto: boolean;
+  /** AUTO=on opts in new live outgoing API notes; API permission is still required. */
+  autoOwn: boolean;
   /** local only. */
   model: ModelAlias;
   /** local only: WAZAP_WHISPER_BIN override. */
