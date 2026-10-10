@@ -2,10 +2,92 @@
 
 ## Unreleased
 
-- Allow explicitly configured HTTP embedding gateways while retaining endpoint-sensitive index identities, explicit API opt-in, credential-safe diagnostics and redirect refusal. HTTP carries API keys and message/query text unencrypted.
+### Added
+
+- Add explicitly opted-in authenticated OpenAI-compatible API embeddings for retained messages and search queries, with validated vectors and endpoint/model/dimensions/input-mode index identity.
+
+### Changed
+
+- Allow explicitly configured HTTP embedding gateways while retaining explicit API opt-in, credential-safe diagnostics and redirect refusal. HTTP carries API keys and message/query text unencrypted.
+
+## 1.3.6
+
+### Changed
+
+- **Local transcription takes every voice note, not just incoming live ones.**
+  With `WAZAP_TRANSCRIBE=local`, the user's own voice notes are transcribed
+  too, and each time the account connects the stored notes still without a
+  transcript are queued (the newest 500, behind anything new). It costs nothing
+  on this machine; an API provider keeps the old rule, so nothing new is billed.
+
+## 1.3.5
 
 ### Added
 
+- **`bge-m3` as an embedding model, for a history in more than one language.**
+  Set `WAZAP_EMBED_MODEL=bge-m3` and run `wazap embed download --model bge-m3`
+  (~635 MB). Measured on real messages, it finds an answer asked in another
+  language that the default model misses ("where is my package" finds "A ajuns
+  coletul?"), and ranks the answer in the top five more often (7 of 10 against
+  4). It carries its own floor, 0.55. Gemma stays the default: bge-m3 is twice
+  its size and embed time.
+
+## 1.3.4
+
+### Fixed
+
+- **Search finds old messages by meaning again.** The similarity floor was
+  applied after age had lowered the score, so a message two months old needed a
+  0.50 match to count and most real paraphrases (0.40-0.50) were dropped. The
+  floor now reads the similarity itself; age only orders the results.
+- **One shared word no longer puts a long, unrelated message at the top.** For
+  a two-word query, a hit that carries one of the words now needs part of the
+  query's meaning (70% of the floor). Without meaning search it stays, as
+  before.
+
+### Changed
+
+- The `search` tool, its docs and the recall skill no longer promise that a
+  question in another language finds the message: with the default model such
+  matches sit under the floor. Ask in the chat's language.
+
+## 1.3.3
+
+### Added
+
+- **`list_chats` can return each chat's profile photo.** With
+  `include_pictures: true` every chat gets `picture_url`, or `null` when there
+  is none or WhatsApp does not answer in time. Lookups go a few at a time and a
+  link is reused for six hours; a contact tagged `#private` gets none. Off by
+  default, so agents that do not ask see no change.
+
+## 1.3.2
+
+### Fixed
+
+- **A chat marked read with `manage_chat` stays read.** WhatsApp sends the
+  account no echo of its own read, so the chat kept its unread count and showed
+  as unread again at the next `list_chats`. `mark_read` now clears it.
+
+## 1.3.1
+
+### Fixed
+
+- **A chat read on the phone no longer shows as unread.** `list_chats` took
+  WhatsApp's own unread count, which stays where it was when the user reads on
+  the phone. A chat where the user had the last word, or where the phone's read
+  receipts reached the last message, now has `unread_count` 0 and leaves the
+  `unread` filter.
+
+## 1.3.0
+
+### Added
+
+- **`get_status` can return the account's own profile photo.** With
+  `include_picture: true` it adds `picture_url`, the link WhatsApp gives for
+  the photo, or `null` when there is none or it cannot be read; the status
+  answers either way. Off by default, so nothing changes for agents that do not
+  ask. The link expires: a client that shows it keeps its own copy.
 - **The webhook can post only some chats.** `WAZAP_WEBHOOK_CHATS` lists chat
   ids and phone numbers, and `WAZAP_WEBHOOK_TAG` names a contact tag such as
   `autopeloc`. Set either and only a matching chat is posted. A direct chat
@@ -26,8 +108,6 @@
   signature and the outbox across a restart are unchanged.
 - **A 401 can be retried.** `WAZAP_WEBHOOK_RETRY_401=on` retries a 401 on the
   same schedule as a 5xx. Unset, a 401 still fails the event at once.
-
-- Add explicitly enabled authenticated OpenAI-compatible API embeddings with secure transport, validated vectors, durable indexing and optional query/document input-type transport.
 
 ### Changed
 

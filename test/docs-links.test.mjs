@@ -101,7 +101,7 @@ test("the README names every page in docs/, so the reference cannot be written i
 });
 
 /**
- * AGENTS.md: ".env.example and the README's Settings table list every WAZAP_* a
+ * CLAUDE.md: ".env.example and the README's Settings table list every WAZAP_* a
  * user sets, and nothing else." The table is in docs/settings.md since the
  * README got short; the rule is the same one.
  */

@@ -12,7 +12,7 @@ import type { EmbedApiSettings, EmbedModelAlias, RecallSettings } from "./types.
 
 const OFF = new Set(["", "off", "0", "no", "none", "false"]);
 const ON = new Set(["local", "on", "1", "yes", "true"]);
-const MODEL_ALIASES: readonly EmbedModelAlias[] = ["embeddinggemma-300m", "e5-base-multilingual"];
+const MODEL_ALIASES: readonly EmbedModelAlias[] = ["embeddinggemma-300m", "e5-base-multilingual", "bge-m3"];
 /** The shared llama-server is stopped after this long without an embed; the next one starts it again. */
 const EMBED_IDLE_MS = 30 * 60_000;
 

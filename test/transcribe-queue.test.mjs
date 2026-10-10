@@ -838,3 +838,54 @@ test("a service on a v2 database upgraded to v3 transcribes nothing stored befor
   assert.equal(svc.db.messages.get(sidOf("NEW")).transcript, "am uitat umbrela acasă");
   await svc.stop();
 });
+
+test("with transcription on this machine the user's own voice notes are queued too", async () => {
+  const { svc, sock } = serviceWith({ WAZAP_TRANSCRIBE: "local" });
+  svc.status = "disconnected";
+  deliver(sock, [voiceNote("THEIRS"), { ...voiceNote("MINE"), key: { remoteJid: PEER, fromMe: true, id: "MINE" } }]);
+  assert.deepEqual(
+    storageRows(svc, "SELECT m.key_id FROM transcribe_queue q JOIN messages m ON m.id = q.message_id ORDER BY m.key_id").map((row) => row.key_id),
+    ["MINE", "THEIRS"],
+    "free to run, so no reason to leave the user's own words out"
+  );
+  await svc.stop();
+});
+
+test("with transcription on this machine, notes stored without a transcript are queued once the account connects", async () => {
+  const { svc, sock } = serviceWith({ WAZAP_TRANSCRIBE: "local" });
+  svc.transcribeReadiness = async () => ({ ok: true, detail: "whisper.cpp, stubbed" });
+  svc.status = "disconnected";
+  const provider = stub(svc);
+  // A history sync brings notes older than a day: on arrival they are stored, not queued.
+  const old = Date.now() - 30 * 86_400_000;
+  sock.ev.emit("messaging-history.set", {
+    chats: [],
+    contacts: [],
+    messages: [voiceNote("OLD1", { at: old }), { ...voiceNote("OLD2", { at: old + 60_000 }), key: { remoteJid: PEER, fromMe: true, id: "OLD2" } }],
+    isLatest: true,
+  });
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")) !== null);
+  assert.equal(storageRows(svc, "SELECT count(*) AS n FROM transcribe_queue")[0].n, 0);
+
+  svc.setStatus("connected");
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")).transcript !== null, 2_000);
+  assert.deepEqual(provider.started, ["OLD2", "OLD1"], "newest first, the user's own among them");
+  assert.equal(svc.db.messages.get(sidOf("OLD1")).transcript, "am uitat umbrela acasă");
+  svc.setStatus("disconnected");
+  svc.setStatus("connected");
+  await svc.transcribeIdle();
+  assert.equal(provider.calls, 2, "a note with its transcript is not queued again");
+  await svc.stop();
+});
+
+test("with a billed provider, notes stored without a transcript stay off the queue when the account connects", async () => {
+  const { svc, sock } = serviceWith(CONFIGURED);
+  svc.status = "disconnected";
+  const provider = stub(svc);
+  sock.ev.emit("messaging-history.set", { chats: [], contacts: [], messages: [voiceNote("OLD1", { at: Date.now() - 30 * 86_400_000 })], isLatest: true });
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")) !== null);
+  svc.setStatus("connected");
+  await svc.transcribeIdle();
+  assert.equal(provider.calls, 0);
+  await svc.stop();
+});

@@ -457,9 +457,21 @@ const TOOLS: readonly ToolDef[] = [
     name: "get_status",
     title: "Get the WhatsApp connection status",
     description: `Whether the account works: status (connected, not_linked, linking with its pairing code…), sync, how fresh the history is, webhook delivery, versions. accounts lists every account, with default. Call it on NOT_CONNECTED, NOT_LINKED or SYNC_IN_PROGRESS.`,
-    schema: {},
+    schema: {
+      include_picture: z.boolean().default(false).describe("Add picture_url, the account's own profile photo (the link expires)"),
+    },
     write: false,
-    handler: async (_args, { wa, hub, allowWrite }) => renderGetStatus(wa.getStatus(), allowWrite, hub),
+    handler: async ({ include_picture }, { wa, hub, allowWrite }) => {
+      const status = wa.getStatus();
+      const payload = renderGetStatus(status, allowWrite, hub);
+      if (!include_picture || status.account === null) return payload;
+      // A photo that cannot be read is no photo: the status itself still answers.
+      const picture = await wa.getContact(status.account.id).then(
+        (contact) => contact.profile_pic_url,
+        () => null
+      );
+      return { ...payload, structuredContent: { ...payload.structuredContent, picture_url: picture } };
+    },
   }),
 
   tool({
@@ -492,15 +504,20 @@ const TOOLS: readonly ToolDef[] = [
     schema: {
       filter: z.enum(["all", "unread", "groups", "individual", "archived"]).default("all").describe('"all" leaves out archived'),
       limit: z.number().int().min(1).max(100).default(20),
+      include_pictures: z.boolean().default(false).describe("Add picture_url, each chat's profile photo (links expire)"),
     },
     outputSchema: LIST_CHATS_OUTPUT,
     write: false,
-    handler: async ({ filter, limit }, ctx) => {
+    handler: async ({ filter, limit, include_pictures }, ctx) => {
       const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId) });
-      return ok(
-        renderChats(result.data, filter),
-        synced(result, { filter, count: result.data.length, chats: result.data })
-      );
+      let chats: Array<ChatSummary & { picture_url?: string | null }> = result.data;
+      if (include_pictures && ctx.wa.profilePictures) {
+        // A #private person's chat shows who, not their face.
+        const open = chats.filter((chat) => chat.last_message?.private !== true).map((chat) => chat.chat_id);
+        const pictures = await ctx.wa.profilePictures(open).catch(() => ({}) as Record<string, string | null>);
+        chats = chats.map((chat) => ({ ...chat, picture_url: pictures[chat.chat_id] ?? null }));
+      }
+      return ok(renderChats(result.data, filter), synced(result, { filter, count: chats.length, chats }));
     },
   }),
 
@@ -663,7 +680,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "search",
     title: "Search WhatsApp messages",
-    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase or another language still hits. match: "words" for exact words (a number, a URL). since, until and from narrow it; coverage and freshness say how much history was searched.`,
+    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, a URL). since, until and from narrow it; coverage and freshness say how much history was searched.`,
     schema: {
       query: z.string().min(1),
       match: z.enum(["hybrid", "words"]).default("hybrid").describe('"words": only messages holding the words'),

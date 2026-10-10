@@ -46,6 +46,13 @@ const AUTO_TRANSCRIBE_MAX_SECONDS = 600;
 const HISTORY_TRANSCRIBE_WINDOW_MS = 24 * 60 * 60_000;
 
 /**
+ * Voice notes without a transcript that one connection queues when the
+ * provider runs on this machine, newest first: free, one at a time, and a
+ * history a few hundred notes deep is done within the hour.
+ */
+const BACKFILL_LIMIT = 500;
+
+/**
  * A wrong WAZAP_TRANSCRIBE_* value must not take a running server down with it.
  * Everything else still works, so the complaint is logged once and kept, and the
  * tool that needs it reports it instead of transcribing.
@@ -61,12 +68,13 @@ function readTranscribeConfig(dataDir: string): TranscribeSettings | WazapError 
 }
 
 /**
- * A voice note the service transcribes without being asked: incoming, not a
- * story, recorded as a voice note rather than attached as an audio file, and
- * of a length WhatsApp stated and kept to ten minutes.
+ * A voice note the service transcribes without being asked: not a story,
+ * recorded as a voice note rather than attached as an audio file, and of a
+ * length WhatsApp stated and kept to ten minutes. The user's own notes too when
+ * transcription is free (`own`); a billed provider takes incoming ones only.
  */
-function transcribable(raw: WAMessage): boolean {
-  if (raw.key.fromMe || isStatusJid(raw.key.remoteJid ?? "") || messageType(raw) !== "voice") return false;
+function transcribable(raw: WAMessage, own: boolean): boolean {
+  if ((raw.key.fromMe && !own) || isStatusJid(raw.key.remoteJid ?? "") || messageType(raw) !== "voice") return false;
   const seconds = voiceSeconds(raw);
   return seconds !== undefined && seconds <= AUTO_TRANSCRIBE_MAX_SECONDS;
 }
@@ -335,6 +343,28 @@ export class AccountVoice {
   }
 
   /**
+   * With transcription on this machine, the voice notes already stored that
+   * have no transcript join the queue too — the user's own, and those a
+   * history sync brought — newest first, up to BACKFILL_LIMIT a connection.
+   * The worker takes new arrivals ahead of them. A billed provider queues none.
+   */
+  backfillTranscripts(): void {
+    if (!this.autoTranscribe || this.transcribeClass !== "local") return;
+    try {
+      const db = this.host.readyDb();
+      if (db === null) return;
+      let queued = 0;
+      for (const sid of db.transcripts.untranscribedVoice(BACKFILL_LIMIT)) {
+        const raw = this.views.rawOf(this.views.storedOrThrow(sid));
+        if (raw !== null && transcribable(raw, true) && db.transcripts.enqueue(sid, "local")) queued++;
+      }
+      if (queued > 0) this.transcribeWorker.kick();
+    } catch (err) {
+      logError("transcribe", err);
+    }
+  }
+
+  /**
    * In the transaction that stores it, an incoming voice note joins the
    * durable queue: every one that arrives live, however old its stamp (a note
    * WhatsApp delivers only now is still an arrival), and one a history sync
@@ -346,7 +376,7 @@ export class AccountVoice {
    * queue a turn later, once the transaction has committed.
    */
   queueTranscript(raw: WAMessage, result: UpsertResult, live: boolean): void {
-    if (!this.autoTranscribe || result.sid === null || !transcribable(raw)) return;
+    if (!this.autoTranscribe || result.sid === null || !transcribable(raw, this.transcribeClass === "local")) return;
     if (result.outcome !== "inserted" && !(live && result.outcome === "updated")) return;
     if (!live && messageTimestampMs(raw) <= Date.now() - HISTORY_TRANSCRIBE_WINDOW_MS) return;
     if (this.transcribeClass === null) return;
@@ -361,14 +391,14 @@ export class AccountVoice {
   /**
    * One note off the queue, as the worker runs it: a message deleted, expired
    * or transcribed meanwhile is done with, and so is one that is no longer a
-   * short incoming voice note. The rest is get_media's own path, so a
+   * short voice note this provider may take. The rest is get_media's own path, so a
    * tool call asking for the same note at the same moment shares the upload.
    */
   private async transcribeQueued(sid: string): Promise<void> {
     const message = this.views.storedOrThrow(sid);
     if (message.transcript !== null) return;
-    if (!transcribable(this.views.messageOrThrow(sid))) {
-      throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short incoming voice note."), "gone", "not a voice note to transcribe");
+    if (!transcribable(this.views.messageOrThrow(sid), this.transcribeClass === "local")) {
+      throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short voice note to transcribe."), "gone", "not a voice note to transcribe");
     }
     await this.host.transcribeAudio(sid);
   }

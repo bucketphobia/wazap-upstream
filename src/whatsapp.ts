@@ -792,7 +792,10 @@ export class WhatsAppService implements WhatsAppApi {
     this.statusSince = Date.now();
     this.webhooks.queueConnectionWebhook(next);
     // Notes that waited for the connection run now rather than at the worker's next look.
-    if (next === "connected" && this.voice.autoTranscribe) this.voice.transcribeWorker.kick();
+    if (next === "connected" && this.voice.autoTranscribe) {
+      this.voice.backfillTranscripts();
+      this.voice.transcribeWorker.kick();
+    }
   }
 
   getStatus(): StatusInfo {
@@ -967,6 +970,10 @@ export class WhatsAppService implements WhatsAppApi {
 
   getContact(contactId: string): Promise<ContactDetails> {
     return this.contacts.getContact(contactId);
+  }
+
+  profilePictures(chatIds: readonly string[]): Promise<Record<string, string | null>> {
+    return this.contacts.profilePictures(chatIds);
   }
 
   findContact(query: FindContactQuery): Promise<AccountFind> {

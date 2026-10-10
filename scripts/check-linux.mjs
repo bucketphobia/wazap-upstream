@@ -34,7 +34,7 @@ export const IMAGES = { "22.16.0": "node:22.16.0-bookworm", 24: "node:24-bookwor
 /** What reads a document, a skill or a manifest: the tests that fail when one of them drifts. */
 export const DOCUMENT_GUARDS = ["docs-links", "tool-names", "distribution", "stability-doc", "skills"];
 
-const DOCUMENT_PATHS = [/^docs\//, /^skills\//, /^README\.md$/, /^AGENTS\.md$/, /^CHANGELOG\.md$/, /^package\.json$/, /^manifest\.json$/, /^server\.json$/, /^\.claude-plugin\//, /^\.env\.example$/];
+const DOCUMENT_PATHS = [/^docs\//, /^skills\//, /^README\.md$/, /^CLAUDE\.md$/, /^CHANGELOG\.md$/, /^package\.json$/, /^manifest\.json$/, /^server\.json$/, /^\.claude-plugin\//, /^\.env\.example$/];
 
 /**
  * The test files a set of changed paths reaches. `readTest` gives a test's text,
