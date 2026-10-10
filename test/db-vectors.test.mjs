@@ -336,7 +336,8 @@ test("hybrid: a hit sharing one word of a three-word query is noise unless its m
 
   assert.deepEqual(keys(search()), [], "five one-word matches of a five-word query are not an answer");
   assert.deepEqual(keys(search({ vector: null })), [], "nor are they without a query vector");
-  assert.deepEqual(keys(search({ query: "plasma field" })), ["FIELD", "PLASMA"], "a two-word query keeps its one-word matches");
+  assert.deepEqual(keys(search({ query: "plasma field" })), [], "one word of a two-word query, and none of its meaning, is noise too");
+  assert.deepEqual(keys(search({ query: "plasma field", vector: null })), ["FIELD", "PLASMA"], "without a query vector the word is all there is");
   assert.deepEqual(keys(search({ query: "calibration" })), ["CALIB"]);
 
   // Two words of the query, or the whole of it, stand on their own.
@@ -441,6 +442,31 @@ test("hybrid with recency: an old close match outranks fresh weak ones sharing i
   db.close();
 });
 
+test("hybrid with recency: a four-month-old paraphrase at 0.42 is still found, with no word of the query", () => {
+  const { db, clock } = openTemp();
+  clock.now = T0 + 400 * DAY;
+  db.messages.upsert(textMessage(PEER, "OLD", clock.now - 120 * DAY, "Daca tu imi promiti ca o sa ai grija de masina"));
+  assert.equal(db.vectors.put(sid(false, PEER, "OLD"), MODEL, atCosine(0.42, 1), wordsOf(db, sid(false, PEER, "OLD"))), true);
+  const result = db.vectors.hybrid({ query: "automobil", vector: direction(0), model: MODEL, limit: 10, minSimilarity: 0.35, recencyHalfLifeMs: 30 * DAY });
+  assert.deepEqual(result.hits.map((hit) => hit.message.keyId), ["OLD"], "weighed by age it would be 0.30, under the floor");
+  db.close();
+});
+
+test("hybrid: one word of a two-word query stays with part of a meaning, and long messages that only contain it go", () => {
+  const { db } = openTemp();
+  const put = (key, ts, text, vector) => {
+    db.messages.upsert(textMessage(PEER, key, ts, text));
+    assert.equal(db.vectors.put(sid(false, PEER, key), MODEL, vector, wordsOf(db, sid(false, PEER, key))), true);
+  };
+  put("REPORT", T0, "Sync-ul a adus 110 contacte noi; singura grijă rămâne lista de la service, pe care o verific mâine dimineață", atCosine(0.2, 1));
+  put("ANSWER", T0 + 1000, "Ai grijă de ea cât sunt plecat", atCosine(0.42, 2));
+  const search = (over = {}) => db.vectors.hybrid({ query: "grija automobil", vector: direction(0), model: MODEL, limit: 10, minSimilarity: 0.35, ...over });
+  const keys = (result) => result.hits.map((hit) => hit.message.keyId);
+  assert.deepEqual(keys(search()), ["ANSWER"], "0.42 clears 70% of the floor, 0.2 does not");
+  assert.deepEqual(keys(search({ vector: null })).sort(), ["ANSWER", "REPORT"]);
+  db.close();
+});
+
 test("hybrid: a word hit whose meaning is under the floor fuses as a word hit, never over a match by meaning alone", () => {
   const { db } = openTemp();
   const put = (key, ts, text, vector) => {
@@ -457,7 +483,7 @@ test("hybrid: a word hit whose meaning is under the floor fuses as a word hit, n
   db.close();
 });
 
-test("hybrid with recency: equal matches go newest first, an old borderline one must be closer, a strong old one still counts", () => {
+test("hybrid with recency: equal matches go newest first, an old one ranks lower but is never dropped", () => {
   const { db, clock } = openTemp();
   clock.now = T0 + 400 * DAY;
   const put = (key, daysAgo, text, vector) => {
@@ -472,8 +498,8 @@ test("hybrid with recency: equal matches go newest first, an old borderline one 
   const result = db.vectors.hybrid({ query: "zzz", vector: direction(0), model: MODEL, limit: 10, minSimilarity: 0.35, recencyHalfLifeMs: 30 * DAY });
   assert.deepEqual(
     result.hits.map((hit) => hit.message.keyId),
-    ["TWIN_NEW", "TWIN_OLD", "STRONG_OLD", "EDGE_NEW"],
-    "a month past its floor, a borderline guess is dropped; a year-old 0.52 keeps 70% of it"
+    ["TWIN_NEW", "TWIN_OLD", "STRONG_OLD", "EDGE_NEW", "EDGE_OLD"],
+    "age orders matches at the floor and drops none: the old borderline one comes last, a year-old 0.52 keeps 70% of its rank"
   );
   assert.ok(result.hits.every((hit) => hit.lexicalRank === null));
   db.close();

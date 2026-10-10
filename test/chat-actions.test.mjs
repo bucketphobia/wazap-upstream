@@ -741,3 +741,33 @@ test("the manage_chat schema takes every new action, message_id and pin_hours, a
   assert.match(guide, /mentions: \[\{id, name\}\]/);
   await svc.stop();
 });
+
+test("mark_read clears the chat's unread count here, since WhatsApp sends no echo of the account's own read", async () => {
+  const { svc, sock } = writableService();
+  const read = [];
+  sock.readMessages = async (keys) => void read.push(...keys);
+  arrive(sock, ANA, { ageSeconds: 60 });
+  sock.ev.emit("chats.update", [{ id: ANA, unreadCount: 1 }]);
+  await settle();
+  await svc.storageIdle?.();
+  assert.equal(svc.db.identity.chat(ANA).unread, 1);
+
+  await svc.manageChat(ANA, "mark_read");
+  assert.equal(read.length, 1, "the read receipt still goes to WhatsApp");
+  assert.equal(svc.db.identity.chat(ANA).unread, 0);
+});
+
+test("profile photos are asked of WhatsApp once and reused, a missing one is null", async () => {
+  const { svc, sock } = writableService();
+  const asked = [];
+  sock.profilePictureUrl = async (jid) => {
+    asked.push(jid);
+    if (jid === DAN) throw new Error("item-not-found");
+    return `https://pps.whatsapp.net/${jid}.jpg`;
+  };
+  const first = await svc.profilePictures([ANA, DAN, ANA]);
+  assert.deepEqual(first, { [ANA]: `https://pps.whatsapp.net/${ANA}.jpg`, [DAN]: null });
+  const again = await svc.profilePictures([ANA, DAN]);
+  assert.deepEqual(again, first);
+  assert.deepEqual(asked.sort(), [ANA, DAN].sort(), "each photo asked once");
+});

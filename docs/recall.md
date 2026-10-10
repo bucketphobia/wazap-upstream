@@ -1,8 +1,10 @@
 # Semantic recall
 
 With recall on, `search` matches what was meant and the words at once: a
-paraphrase or another language still hits through its meaning, a short or
-foreign-language question through its words, and the two rankings are fused.
+paraphrase still hits through its meaning, a short question through its words,
+and the two rankings are fused. With the default model a question in another
+language than the chat seldom finds it; `WAZAP_EMBED_MODEL=bge-m3` does (see
+below). A match counts on its similarity alone; age only orders.
 It reaches every message the account keeps. For an exact string — an id, a
 phone number, a URL — pass `match: "words"`. When meaning search cannot run —
 recall off, the embedding server failing or refusing the query, or the sidecar
@@ -45,5 +47,11 @@ Embedding requests refuse redirects, cap replies at 4 MiB and validate vector
 shape and finite values. Provider bodies and decoder stderr are not copied into
 errors.
 
-`wazap config recall local|off` sets `WAZAP_RECALL`, the one setting recall has.
-The model is embeddinggemma-300m, and every kept message is indexed.
+`wazap config recall local|off` sets `WAZAP_RECALL`, and every kept message is
+indexed. The model is embeddinggemma-300m (~318 MB). For a history written in
+more than one language, set `WAZAP_EMBED_MODEL=bge-m3` in the data dir's `.env`
+and run `wazap embed download --model bge-m3` (~635 MB): it finds an answer
+asked in another language (an English question for a Romanian message) where
+gemma does not, at twice the size and embed time. Changing the model indexes
+everything again in the background; until it is done, meaning reaches only the
+messages indexed so far.
