@@ -331,7 +331,7 @@ test("the systemd user unit quotes env values and argv items that hold spaces", 
   });
   assert.ok(unit.includes('Environment="WAZAP_DATA_DIR=/home/u/My Files/wazap"'), "a spaced data dir is one value");
   assert.ok(unit.includes('Environment="QUOTED=say \\"hi\\""'), "an embedded quote is escaped");
-  assert.ok(unit.includes('ExecStart="/opt/my node/bin/node" "/opt/wazap/dist/index.js" serve'), "a spaced argv item stays one argument");
+  assert.ok(unit.includes('ExecStart="/opt/my node/bin/node" /opt/wazap/dist/index.js serve'), "a spaced argv item stays one argument");
 });
 
 test("the unit runs the http server on loopback, with whisper and ffmpeg on its PATH", () => {
