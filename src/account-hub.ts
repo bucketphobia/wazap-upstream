@@ -333,6 +333,10 @@ export class AccountHub implements AccountSource {
     wa.onGiveUp = () => {
       if (this.services.get(account.id) === wa) this.noteGiveUp(account.id);
     };
+    // An account that came back is no longer one of those the process would exit for.
+    wa.onRecovered = () => {
+      if (this.services.get(account.id) === wa) this.givenUp.delete(account.id);
+    };
     wa.onLinked = (linked) => {
       if (this.services.get(account.id) === wa) this.noteOwner(account.id, linked.id);
     };

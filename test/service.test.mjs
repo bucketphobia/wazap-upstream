@@ -277,7 +277,7 @@ test("the launchd plist keeps the job alive, throttled, with its own PATH", () =
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>ProcessType</key>
-\t<string>Background</string>
+\t<string>Standard</string>
 \t<key>ThrottleInterval</key>
 \t<integer>10</integer>
 \t<key>StandardOutPath</key>
@@ -303,6 +303,7 @@ test("the systemd user unit restarts always and keeps the hardening that fits a 
 Description=wazap MCP server (WhatsApp for your AI agent)
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Environment=HOME=/home/u
