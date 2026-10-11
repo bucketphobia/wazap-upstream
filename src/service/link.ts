@@ -210,8 +210,8 @@ export class LinkMonitor {
     }
     if (RELINK.has(status) && this.alerted !== "relink_required") {
       this.alerted = "relink_required";
-      this.save();
       this.emit("relink_required", status, now);
+      this.save();
     }
   }
 
@@ -223,7 +223,13 @@ export class LinkMonitor {
     this.lastTick = now;
     this.flush();
     // A boot still preparing its database has not tried the link yet: the clock starts with the first socket.
-    if (this.bootClock && this.alerted === null && this.host.status() === "connecting" && this.host.socketSince() === null) {
+    if (
+      this.bootClock &&
+      this.alerted === null &&
+      this.host.starting() &&
+      this.host.status() === "connecting" &&
+      this.host.socketSince() === null
+    ) {
       this.downSince = now;
     }
     if (last !== null && now - last > WATCH_TICK_MS + WAKE_GAP_MS) this.woke(now, last);
@@ -238,9 +244,10 @@ export class LinkMonitor {
     this.lastWakeAt = now;
     const status = this.host.status();
     log(`the clock jumped ${Math.round((now - before) / 1000)}s (sleep or a frozen process); checking the WhatsApp link (${status})`);
-    // Time asleep is not time down: the owner hears of an outage the awake machine could not fix.
+    // Time asleep is not time down: the outage's clock moves forward by the sleep, keeping the awake
+    // time before it, so the owner hears of an outage the awake machine could not fix.
     if (this.downSince !== null && this.alerted === null) {
-      this.downSince = now;
+      this.downSince = Math.min(now, this.downSince + Math.max(0, now - before - WATCH_TICK_MS));
       this.save();
     }
     if (status === "connected") {
@@ -319,8 +326,8 @@ export class LinkMonitor {
     if (status === "connected" || NO_SESSION.has(status)) return;
     if (now - this.downSince < ALERT_AFTER_MS) return;
     this.alerted = "disconnected";
-    this.save();
     this.emit("disconnected", status, now);
+    this.save();
   }
 
   private emit(alert: LinkAlertKind, status: ConnectionStatus, at: number): void {
@@ -356,7 +363,8 @@ export class LinkMonitor {
         queued = true;
       }
       if (!queued) return;
-      this.pending.shift();
+      const sent = this.pending.shift()!;
+      if (sent.alert !== "recovered" && sent.alert === this.alerted) this.save();
     }
   }
 
@@ -429,10 +437,12 @@ export class LinkMonitor {
       if (!existsSync(dirname(this.file))) return;
       const now = this.now();
       this.lastSeenSave = now;
+      // An alert still waiting for the outbox is not told yet: a restart before it is queued tells it again.
+      const told = this.pending.some((alert) => alert.alert === this.alerted) ? null : this.alerted;
       const record: LinkRecord = {
         down_since: this.downSince,
         seen_at: this.downSince === null ? null : now,
-        alerted: this.alerted,
+        alerted: told,
         last_outage: this.lastOutage,
       };
       writeJsonFile(this.file, record);

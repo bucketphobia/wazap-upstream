@@ -679,9 +679,9 @@ export function asConnectionPayload({ status, account, at, health }: WebhookConn
 /** What the owner does about each alert. */
 export const ALERT_FIX: Record<WebhookAlertPayload["alert"], string> = {
   disconnected:
-    "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. Check the machine's network, and that it is awake",
+    "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. `reason` says what fails: usually the machine's network, or that it is asleep; for credentials that cannot be read, their folder's ownership and permissions",
   recovered: "Nothing to do",
-  relink_required: "Link the device again: `wazap login`, or link_account from the agent",
+  relink_required: "Link the device again: link_account from the agent, or `wazap logout` then `wazap login`",
 };
 
 /** For a link WhatsApp holds closed (a ban, a session taken over, an outdated client): no network fix, and no new link. */

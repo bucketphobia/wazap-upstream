@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { accountRows, describeAccount, describeStatusAccount, type StatusAccountRow } from "./account-cli.js";
 import { AccountHub } from "./account-hub.js";
 import { AccountRegistry, resolveAccount } from "./accounts.js";
-import { readLinkedAccount, type LinkedAccount } from "./auth-state.js";
+import { CREDENTIALS_READ_FIX, CredentialsReadError, readLinkedAccount, type LinkedAccount } from "./auth-state.js";
 import { banner } from "./banner.js";
 import { BAILEYS_VERSION, WAZAP_VERSION, paths, type AccountPaths, type Config, type Paths } from "./config.js";
 import { connectNext, whereInstalled, type Install } from "./connect.js";
@@ -103,6 +103,8 @@ interface StatusReport {
   data_dir: string;
   linked: boolean;
   credentials_readable: boolean;
+  /** Why the credentials could not be read, when it was the file system (EACCES, EIO), not their contents. */
+  credentials_error: string | null;
   account: LinkedAccount | null;
   accounts: StatusAccountRow[];
   wazap_version: string;
@@ -129,10 +131,12 @@ export async function runStatus(config: Config): Promise<StatusReport> {
 
   let account: LinkedAccount | null = null;
   let unreadable = false;
+  let credentialsError: string | null = null;
   try {
     account = readLinkedAccount(selected.paths.authDir);
-  } catch {
+  } catch (err) {
     unreadable = true;
+    if (err instanceof CredentialsReadError) credentialsError = err.code;
   }
 
   // A sidecar outliving the process that wrote it is stale, so only the lock
@@ -149,6 +153,7 @@ export async function runStatus(config: Config): Promise<StatusReport> {
     // selected one, and `accounts` carries each row's own credentials.
     linked: account !== null || rows.some((row) => row.account !== null),
     credentials_readable: !unreadable,
+    credentials_error: credentialsError,
     account,
     accounts: rows,
     wazap_version: WAZAP_VERSION,
@@ -183,7 +188,9 @@ function plainStatus(report: StatusReport): string[] {
   const lines = [`data dir: ${report.data_dir}`];
   const credsNote = report.credentials_readable
     ? ""
-    : " (credentials unreadable — run `wazap logout` then `wazap login`)";
+    : report.credentials_error !== null
+      ? ` (credentials cannot be read: ${report.credentials_error} — ${CREDENTIALS_READ_FIX})`
+      : " (credentials unreadable — run `wazap logout` then `wazap login`)";
   lines.push(`linked: ${report.linked ? "yes" : "no"}${credsNote}`);
   if (report.account) lines.push(`account: ${describeAccount(report.account)}`);
   if (report.accounts.length > 1) {
@@ -224,7 +231,9 @@ function describeInstall(install: Install): string {
 
 function richStatus(report: StatusReport): string[] {
   const account = !report.credentials_readable
-    ? "credentials unreadable"
+    ? report.credentials_error !== null
+      ? `credentials cannot be read (${report.credentials_error})`
+      : "credentials unreadable"
     : report.account
       ? describeAccount(report.account)
       : "not linked";
@@ -526,7 +535,8 @@ export function leftoverRefusal(config: Config): WazapError | null {
   return new WazapError("WHATSAPP_ERROR", `wazap is running (pid ${running}).`, leftoverFix(running));
 }
 
-export type GreetState = Pick<StatusReport, "linked" | "credentials_readable" | "server_pid" | "server_is_service">;
+export type GreetState = Pick<StatusReport, "linked" | "credentials_readable" | "server_pid" | "server_is_service"> &
+  Partial<Pick<StatusReport, "credentials_error">>;
 
 /** After status, the lines that say what to type next. A leftover does not hide them. */
 export function greetNext(report: GreetState): string[] {
@@ -536,6 +546,11 @@ export function greetNext(report: GreetState): string[] {
     if (!report.linked || !report.credentials_readable) {
       lines.push(fix(leftoverFix(report.server_pid, report.server_is_service === true)));
     }
+  }
+  // A file the system would not read is not a broken session: logging out would throw it away.
+  if (!report.credentials_readable && report.credentials_error) {
+    lines.push(fix(CREDENTIALS_READ_FIX));
+    return lines;
   }
   if (!report.credentials_readable) {
     lines.push(next("wazap logout", "(then wazap login)"));

@@ -327,3 +327,11 @@ test("`contacts resync` refuses while a server owns the session", async () => {
     return true;
   });
 });
+
+test("greetNext never advises a logout for credentials the file system would not read", () => {
+  const lines = greetNext({ linked: false, credentials_readable: false, credentials_error: "EACCES", server_pid: null }).join("\n");
+  assert.doesNotMatch(lines, /logout/);
+  assert.match(lines, /owns the account's auth folder/);
+  const corrupt = greetNext({ linked: false, credentials_readable: false, credentials_error: null, server_pid: null }).join("\n");
+  assert.match(corrupt, /wazap logout/, "a corrupt file still needs the logout");
+});

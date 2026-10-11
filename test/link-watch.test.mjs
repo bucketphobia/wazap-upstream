@@ -696,7 +696,7 @@ test("the service retries unreadable credentials as a dropped link, never not_li
   assert.equal(svc.readAccount(), "unreadable");
   const status = svc.getStatus();
   assert.equal(status.status, "disconnected");
-  assert.match(status.last_error, /could not be read \(EISDIR\); retrying/);
+  assert.match(status.last_error, /could not be read \(EISDIR\)\. Retrying; .*do not log out/);
   assert.doesNotMatch(status.last_error, /accounts/, "no local path");
   assert.notEqual(svc.reconnectTimer, null, "a reconnect is on its way");
 });
@@ -717,11 +717,12 @@ test("the outage hint is for an outage wazap is fixing, and a logout ends the ou
 });
 
 test("a first boot still preparing its database is not an outage until a socket is tried", (t) => {
-  const host = fakeHost({ statusValue: "connecting" });
+  const host = fakeHost({ statusValue: "connecting", isStarting: true });
   const watch = watching(t, host, tempFile(t));
   awake(watch, host, ALERT_AFTER_MS * 3);
   assert.deepEqual(host.alerts, [], "fifteen minutes of import alerts nobody");
   host.socketAt = host.now;
+  host.isStarting = false;
   awake(watch, host, ALERT_AFTER_MS - 2 * WATCH_TICK_MS);
   assert.deepEqual(host.alerts, []);
   awake(watch, host, 3 * WATCH_TICK_MS);
@@ -751,4 +752,52 @@ test("unreadable credentials reach the webhook without the path they live at", (
   const watch = watching(t, host, tempFile(t));
   setStatus(watch, host, "session_corrupt");
   assert.equal(host.alerts[0].reason, "The stored credentials cannot be read.");
+});
+
+// The second review pass ----------------------------------------------------------
+
+test("credentials unreadable at boot still arm the watch, so a read that keeps failing is told", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dataDir = mkdtempSync(join(tmpdir(), "wazap-link-boot-"));
+  t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+  mkdirSync(join(dataDir, "accounts", "default", "auth", "creds.json"), { recursive: true });
+  const svc = openService(WhatsAppService, offlineConfig("wazap-link-boot-", { dataDir }));
+  t.after(() => svc.stop());
+  await svc.start();
+  assert.equal(svc.getStatus().status, "disconnected");
+  assert.notEqual(svc.linkWatch.timer, null, "the watchdog runs");
+  assert.notEqual(svc.getStatus().link.down_since, null, "the outage clock runs");
+});
+
+test("an alert still waiting for the outbox is not recorded as told, so a restart tells it", (t) => {
+  const file = tempFile(t);
+  const host = fakeHost({ statusValue: "connected", queueable: false });
+  const watch = watching(t, host, file);
+  setStatus(watch, host, "session_corrupt");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).alerted, null);
+  host.queueable = true;
+  awake(watch, host, WATCH_TICK_MS);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).alerted, "relink_required", "recorded once queued");
+});
+
+test("a sleep moves the outage forward by its length, keeping the awake minutes before it", (t) => {
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, tempFile(t));
+  setStatus(watch, host, "disconnected");
+  host.pending = "backoff";
+  awake(watch, host, 3 * 60_000);
+  host.now += 8 * 3_600_000;
+  watch.tick();
+  awake(watch, host, 2 * 60_000 + WATCH_TICK_MS);
+  assert.equal(host.alerts.length, 1, "three minutes before the sleep and two after make five");
+});
+
+test("a boot whose socket failed to open is counted once start() is done", (t) => {
+  const host = fakeHost({ statusValue: "connecting", isStarting: true });
+  const watch = watching(t, host, tempFile(t));
+  awake(watch, host, ALERT_AFTER_MS * 2);
+  assert.deepEqual(host.alerts, [], "preparing");
+  host.isStarting = false; // the open threw: connecting, no socket, not starting
+  awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
+  assert.equal(host.alerts.length, 1);
 });

@@ -537,9 +537,10 @@ export class WhatsAppService implements WhatsAppApi {
     this.starting = true;
     try {
       let linked = this.readAccount();
-      if (linked === "unreadable") return;
       // From the first start on: the status it found is where the outage clock starts, if anywhere.
+      // Unreadable credentials too, so a read that keeps failing is watched and, past the threshold, told.
       this.linkWatch.arm();
+      if (linked === "unreadable") return;
       if (linked !== "corrupt" && linked !== null) {
         this.account = linked;
         this.storage.claimDatabase(linked.id);
@@ -878,7 +879,7 @@ export class WhatsAppService implements WhatsAppApi {
     const outage = this.linkWatch.hint();
     if (outage !== null) hints.push(outage);
     if (this.status === "logged_out") {
-      hints.push("WhatsApp unlinked this device: link it again with link_account, or `npx wazap-mcp login`.");
+      hints.push("WhatsApp unlinked this device: link it again with link_account, or run `npx wazap-mcp logout` then `npx wazap-mcp login`.");
     }
     if (this.storage.storageState === "preparing") {
       hints.push("The account is preparing its database from its earlier message files (once, after an upgrade); tools answer NOT_CONNECTED until it is done.");
@@ -1642,7 +1643,7 @@ export class WhatsAppService implements WhatsAppApi {
    */
   private credentialsUnreadable(err: CredentialsReadError): void {
     logError("auth state", err);
-    this.lastError = err.message;
+    this.lastError = `${err.message} Retrying; ${err.fix}.`;
     this.setStatus("disconnected");
     this.scheduleReconnect(err.message);
   }

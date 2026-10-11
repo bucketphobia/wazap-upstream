@@ -444,14 +444,17 @@ outage, where `connection` reports every change. `alert` is one of:
 - `disconnected`: the link has been down for 5 minutes (`get_status` →
   `link.alert_after_seconds`). A dropped link, a WhatsApp restart, or a Mac
   waking from sleep reconnects well inside that, and is not told. Time the
-  machine spent asleep does not count.
-- `recovered`: the link is back after a `disconnected` alert, or after a
-  `relink_required` one when the device was linked again with `wazap login`
-  (a `link_account` from the agent starts afresh and sends none).
-  `down_for_seconds` is how long the outage lasted.
-- `relink_required`: WhatsApp unlinked the device (or the saved credentials
-  cannot be read). Sent at once. Nothing reconnects from this; link again with
-  `wazap login` or `link_account`.
+  machine spent asleep does not count: `down_since` moves forward by the
+  sleep.
+- `recovered`: the link is back after a `disconnected` alert.
+  `down_for_seconds` is how long the outage lasted. Linking the device again
+  after a `relink_required` starts afresh and sends none.
+- `relink_required`: WhatsApp unlinked the device, or the saved credentials
+  are corrupt. Sent at once. Nothing reconnects from this; link again with
+  `link_account` from the agent, or `wazap logout` then `wazap login`.
+  Credentials the file system will not read for the moment (a permission, an
+  I/O error) are a dropped link instead: retried, and a `disconnected` alert
+  if it lasts, its `reason` naming the error.
 
 Each is posted once, also across the restart wazap asks its supervisor for when
 reconnects run out: the outage is kept in `<data-dir>/accounts/<id>/link.json`.

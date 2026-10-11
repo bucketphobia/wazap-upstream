@@ -119,11 +119,16 @@ export async function useAtomicAuthState(
  * session whose first save writes over the real one. The caller retries instead.
  */
 export class CredentialsReadError extends Error {
+  readonly fix = CREDENTIALS_READ_FIX;
   constructor(readonly code: string) {
-    super(`The stored credentials could not be read (${code}); retrying.`);
+    super(`The stored credentials could not be read (${code}).`);
     this.name = "CredentialsReadError";
   }
 }
+
+/** What to do about credentials the file system would not read: never a logout, which deletes them. */
+export const CREDENTIALS_READ_FIX =
+  "check that the user wazap runs as owns the account's auth folder and can read it, then retry; do not log out";
 
 /** Only a file that is not there means nothing is linked; any other failure to read it is thrown. */
 function missingOrThrow(err: unknown): null {
