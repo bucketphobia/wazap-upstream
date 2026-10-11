@@ -40,7 +40,12 @@ function fileFor(dir: string, name: string): string {
  * has to be re-linked.
  */
 export async function useAtomicAuthState(
-  dir: string
+  dir: string,
+  /**
+   * The caller read these credentials a moment ago: a file gone since is a read that failed, not a
+   * fresh session whose first save would write over it once the disk is back.
+   */
+  options: { expectLinked?: boolean } = {}
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> {
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -81,7 +86,9 @@ export async function useAtomicAuthState(
     return serialize(path, () => unlink(path).catch(() => undefined));
   };
 
-  const creds = (await readCreds(dir)) ?? initAuthCreds();
+  const stored = await readCreds(dir);
+  if (stored === null && options.expectLinked === true) throw new CredentialsReadError("ENOENT");
+  const creds = stored ?? initAuthCreds();
 
   return {
     state: {

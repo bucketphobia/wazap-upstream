@@ -986,3 +986,35 @@ test("credentials that read again stop being the outage's cause", (t) => {
   assert.notEqual(watch.hint(), null);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).credentials_missing, undefined);
 });
+
+// The tenth review pass ------------------------------------------------------------
+
+test("a credentials file gone between the read and the session start is not a fresh session", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wazap-creds-gone-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await assert.rejects(useAtomicAuthState(dir, { expectLinked: true }), CredentialsReadError);
+  assert.equal(existsSync(join(dir, "creds.json")), false, "nothing was written in its place");
+  await useAtomicAuthState(dir); // a pairing, which expects nothing, still starts fresh
+});
+
+test("credentials that read again clear their advice from last_error at once", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { svc, dataDir } = serviceWatch(t);
+  svc.readAccount(); // missing: the logout advice is up
+  assert.match(svc.getStatus().last_error, /wazap logout/);
+  const auth = join(dataDir, "accounts", "default", "auth");
+  mkdirSync(auth, { recursive: true });
+  writeFileSync(join(auth, "creds.json"), JSON.stringify({ me: { id: "40700000001@s.whatsapp.net" } }));
+  svc.credentialsRead();
+  assert.equal(svc.getStatus().last_error, null);
+});
+
+test("the give-up line built on a credentials error is cleared too when they read again", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { svc } = serviceWatch(t);
+  svc.reconnectAttempts = 10;
+  svc.readAccount();
+  assert.match(svc.getStatus().last_error, /could not be reached after 10 attempts/);
+  svc.credentialsRead();
+  assert.equal(svc.getStatus().last_error, null);
+});

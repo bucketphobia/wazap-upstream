@@ -173,6 +173,8 @@ export class WhatsAppService implements WhatsAppApi {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** What the pending reconnect waits for: a backoff a wake may cut short, or a temporary ban nothing may. */
   private reconnectKind: "backoff" | "ban" = "backoff";
+  /** The credentials read error last put in `lastError`, whose advice ends when they read again. */
+  private credentialsError: string | null = null;
   /** When the live socket was opened; null while there is none. */
   private socketOpenedAt: number | null = null;
   private starting = false;
@@ -543,6 +545,8 @@ export class WhatsAppService implements WhatsAppApi {
       this.linkWatch.arm();
       if (linked === "unreadable") return;
       if (linked !== "corrupt" && linked !== null) {
+        // They read again: the advice about unreadable credentials is over before the boot that follows.
+        this.credentialsRead();
         this.account = linked;
         this.storage.claimDatabase(linked.id);
       }
@@ -564,14 +568,14 @@ export class WhatsAppService implements WhatsAppApi {
 
       let state;
       try {
-        ({ state, saveCreds: this.saveCreds } = await useAtomicAuthState(this.paths.authDir));
+        ({ state, saveCreds: this.saveCreds } = await useAtomicAuthState(this.paths.authDir, { expectLinked: true }));
       } catch (err) {
         if (err instanceof CredentialsReadError) this.credentialsUnreadable(err);
         else this.markCorrupt(err);
         return;
       }
       // Read whole: an outage that goes on from here is the link's, not the credentials'.
-      this.linkWatch.noteCredentialsRead();
+      this.credentialsRead();
       if (this.stopped) return;
 
       this.teardownSocket();
@@ -1293,6 +1297,8 @@ export class WhatsAppService implements WhatsAppApi {
       this.lastError =
         `${reason} — WhatsApp could not be reached after ${RECONNECT_MAX_ATTEMPTS} attempts. ` +
         "The session is kept: wazap exits so its supervisor restarts it, or tries again every 30 min.";
+      // A credentials error carried into this line is still theirs to clear when they read again.
+      if (this.credentialsError !== null && reason === this.credentialsError) this.credentialsError = this.lastError;
       this.setStatus("disconnected");
       logError("reconnect", this.lastError);
       this.onGiveUp?.();
@@ -1656,9 +1662,17 @@ export class WhatsAppService implements WhatsAppApi {
     logError("auth state", err);
     this.linkWatch.noteCredentialsMissing(err.errno);
     this.lastError = `${err.message} Retrying; ${err.fix}.`;
+    this.credentialsError = this.lastError;
     this.setStatus("disconnected");
     // The whole line, fix included: past the give-up it is what last_error keeps saying.
     this.scheduleReconnect(this.lastError);
+  }
+
+  private credentialsRead(): void {
+    this.linkWatch.noteCredentialsRead();
+    // Only its own words: an error written since (a dropped link) stays.
+    if (this.credentialsError !== null && this.lastError === this.credentialsError) this.lastError = null;
+    this.credentialsError = null;
   }
 
   private markCorrupt(err: unknown): void {
