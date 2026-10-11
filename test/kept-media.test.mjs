@@ -687,3 +687,16 @@ test("a file bigger than the whole quota is not downloaded again and again", asy
   assert.equal(keptPath(svc, understated), undefined);
   assert.ok(state.downloads <= 1, `${state.downloads} downloads for media that can never be kept`);
 });
+
+test("a kept folder that cannot be written costs a few downloads, not one per catch-up", async (t) => {
+  const { svc, arrive, state } = await setup(t);
+  writeFileSync(svc.paths.keptDir, "a file where the folder should be");
+  const sid = arrive(ANA, photo(Buffer.from("w")), Buffer.from("w"));
+  await settled(svc);
+  for (let i = 0; i < 5; i++) {
+    svc.keep.connected();
+    await settled(svc);
+  }
+  assert.equal(keptPath(svc, sid), undefined);
+  assert.equal(state.downloads, 3, "three attempts in all");
+});

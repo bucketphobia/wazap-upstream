@@ -218,6 +218,12 @@ export class AccountKeep {
     return db.messages.media(sid).some((media) => media.kind === KEPT_KIND);
   }
 
+  /** Records a failure: `final` gives up on the message for this process, else it counts towards TRIES. */
+  private failed(sid: string, final: boolean): void {
+    if (this.failures.size >= FAILED_MAX && !this.failures.has(sid)) this.failures.clear();
+    this.failures.set(sid, final ? TRIES : (this.failures.get(sid) ?? 0) + 1);
+  }
+
   private gaveUp(sid: string): boolean {
     return (this.failures.get(sid) ?? 0) >= TRIES;
   }
@@ -336,26 +342,29 @@ export class AccountKeep {
     } catch (err) {
       // Expired, too big, or the link dropped: get_media will say which if asked. A dropped link is tried
       // again by a later catch-up, a few times; expired and too big are not.
-      if (this.failures.size >= FAILED_MAX) this.failures.clear();
-      this.failures.set(sid, permanent(err) ? TRIES : (this.failures.get(sid) ?? 0) + 1);
+      this.failed(sid, permanent(err));
       return;
     }
     const expected = mediaSha256(raw);
     if (expected !== undefined && !createHash("sha256").update(buffer).digest().equals(expected)) {
       // Not the file the sender stated: asking again brings the same bytes.
-      this.failures.set(sid, TRIES);
+      this.failed(sid, true);
       return;
     }
-    if (buffer.length === 0 || buffer.length > this.largest()) {
+    if (buffer.length > this.largest()) {
       // An understated size: the same bytes would come again.
-      this.failures.set(sid, TRIES);
+      this.failed(sid, true);
       return;
     }
-    this.failures.delete(sid);
-    if (!(await this.store(sid, raw, buffer))) {
-      // Refused after all (no room on the disk, or deleted meanwhile): a later catch-up may try it, a few times.
-      this.failures.set(sid, (this.failures.get(sid) ?? 0) + 1);
+    let stored = false;
+    try {
+      stored = buffer.length > 0 && (await this.store(sid, raw, buffer));
+    } catch (err) {
+      logError("kept media", err);
     }
+    if (stored) this.failures.delete(sid);
+    // Empty, refused after all (no room, deleted meanwhile) or not writable: a later catch-up may try it, a few times.
+    else this.failed(sid, false);
   }
 
   /** get_media downloaded this from WhatsApp: kept too when the settings keep it. */
