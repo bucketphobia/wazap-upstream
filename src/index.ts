@@ -73,7 +73,7 @@ Options:
   --account <id>      With login, logout, status, contacts, backup, config writes|webhook, webhook test:
                       pick this account. A running server applies account add|enable|disable|default|remove
   --event <name>      With webhook test: message_received (default), message_sent, connection,
-                      reminder or scheduled
+                      alert, reminder or scheduled
   --name <name>       With account add: a display name
   --read-only         Refuse every write; the write tools are not registered at all
   --http              Serve Streamable HTTP instead of stdio
