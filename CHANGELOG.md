@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The server recovers on its own, and tells the owner.** A watchdog notices
+  a sleep (the clock jumps) and pings the link at once, replacing a dead
+  socket; it also replaces a socket stuck opening or one that stops answering
+  pings, and cuts a backoff wait short after a wake. A new opt-in webhook
+  event, `alert`, says when the link has been down for 5 minutes, when it is
+  back, and when WhatsApp unlinked the device. It is kept across the restart
+  wazap asks its supervisor for (`accounts/<id>/link.json`), so it is told
+  once. `get_status` shows the same under `link`.
+
+### Changed
+
+- **Running out of reconnects keeps the session, and says so.** The account
+  stays `disconnected` (it was `auth_failure`, which `link_account` accepted
+  and the `connection` event posted as `expired`), the process still exits
+  with code 3 for its supervisor, and an account that gives up while another
+  is up tries again every 30 minutes.
+- **`all` in `WAZAP_WEBHOOK_EVENTS` keeps meaning the three events it always
+  did.** `alert` is asked for by name: `all,alert`.
+- **Service units.** The launchd agent runs as a Standard process rather than
+  a throttled Background one, and the systemd units set
+  `StartLimitIntervalSec=0`. Run `wazap service install` again to rewrite an
+  installed unit.
+
+### Fixed
+
+- **A credentials file that cannot be read for a moment no longer looks
+  unlinked.** An I/O error other than a missing file (EMFILE, EIO after a
+  wake) used to read as "not linked", and the session that followed could
+  write fresh credentials over the real ones. It is now a dropped link,
+  retried.
+- **A 401 is a logout only when WhatsApp says it.** A proxy or captive portal
+  answering the WebSocket with 401 is retried as a dropped link instead of
+  marking the session logged out.
+
 ## 1.3.8
 
 ### Fixed

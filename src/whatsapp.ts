@@ -14,11 +14,12 @@
  * webhook, healContacts, saveCreds) stay here.
  */
 
+import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { downloadMediaMessage, type WAMessage, type WASocket } from "baileys";
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import { accountPolicy, type AccountRecord } from "./accounts.js";
-import { clearAuth, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
+import { clearAuth, CredentialsReadError, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
 import {
   type CatchupQuote,
   type CatchupScan,
@@ -47,6 +48,7 @@ import { AccountGroups } from "./service/groups.js";
 import { AccountHealth, classifyClose, TEMP_BAN_RETRY_MAX_MS, type NewChatCapReport, type ReachoutLock } from "./service/health.js";
 import { AccountIdentity } from "./service/identity.js";
 import { AccountIngest, type MessageRef } from "./service/ingest.js";
+import { LinkMonitor, type ProbeResult } from "./service/link.js";
 import { AccountMedia } from "./service/media.js";
 import { AccountRecall } from "./service/recall.js";
 import { AccountReads } from "./service/reads.js";
@@ -105,11 +107,15 @@ import type {
 /** Reconnect pacing. A closed socket used to be retried instantly, which turns
  * any persistent rejection into a login storm — WhatsApp answers that by
  * throttling the account and refusing to link *any* new device to it, phone
- * included. Retries are spaced, jittered and capped; past the cap we stop and
- * wait for a human instead of hammering. */
+ * included. Retries are spaced, jittered and capped. Past the cap the caller is
+ * told once (the server exits for its supervisor), and a process that stays up
+ * tries again only every RECONNECT_AFTER_GIVE_UP_MS. */
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 5 * 60_000;
 const RECONNECT_MAX_ATTEMPTS = 10;
+const RECONNECT_AFTER_GIVE_UP_MS = 30 * 60_000;
+/** WhatsApp's own server: where a keepalive ping goes. */
+const WA_SERVER_JID = "@s.whatsapp.net";
 
 const SYNC_WAIT_MS = 10_000;
 const HISTORY_FETCH_WAIT_MS = 5_000;
@@ -165,6 +171,10 @@ export class WhatsAppService implements WhatsAppApi {
   private saveCreds: (() => Promise<void>) | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** What the pending reconnect waits for: a backoff a wake may cut short, or a temporary ban nothing may. */
+  private reconnectKind: "backoff" | "ban" = "backoff";
+  /** When the live socket was opened; null while there is none. */
+  private socketOpenedAt: number | null = null;
   private starting = false;
   private stopped = false;
   /** Bumped per socket, so events from a superseded socket are ignored. */
@@ -177,6 +187,8 @@ export class WhatsAppService implements WhatsAppApi {
    * fix. The CLI turns it into an exit code, so a supervisor gets its turn.
    */
   onGiveUp: (() => void) | null = null;
+  /** Fires at every open, so a caller that counted this account as given up stops counting it. */
+  onRecovered: (() => void) | null = null;
   /** Fires when a `link` lands, so the hub can persist the owner on the record. */
   onLinked: ((account: LinkedAccount) => void) | null = null;
   private account: StatusInfo["account"] = null;
@@ -240,6 +252,8 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly health = new AccountHealth(Date.now, () => {
     if (this.status === "connected") this.webhooks.queueConnectionWebhook(this.status);
   });
+  /** The link's outage clock, its alerts and the watchdog for sleeps and dead sockets (src/service/link.ts). */
+  private readonly linkWatch: LinkMonitor;
   /** The reachout timelock question in flight, so a burst of refused sends asks once. */
   private reachoutCheck: Promise<void> | null = null;
   private readonly webhook: WebhookSink;
@@ -496,6 +510,22 @@ export class WhatsAppService implements WhatsAppApi {
       this.voice,
       account
     );
+    // Only the server keeps the outage record and alerts; a short-lived command would only muddle both.
+    this.linkWatch = new LinkMonitor(
+      {
+        status: () => this.status,
+        statusSince: () => this.statusSince,
+        lastError: () => this.lastError,
+        socketSince: () => (this.sockClient === null ? null : this.socketOpenedAt),
+        reconnectPending: () => (this.reconnectTimer === null ? null : this.reconnectKind),
+        starting: () => this.starting,
+        probe: (timeoutMs) => this.probeSocket(timeoutMs),
+        forceReconnect: (reason) => this.forceReconnect(reason),
+        retryNow: (reason) => this.retryNow(reason),
+        alert: (alert) => this.webhooks.queueAlert(alert),
+      },
+      config.command === "serve" ? join(paths.root, "link.json") : null
+    );
     this.storage.openDatabase();
     // Only the server transcribes: a short-lived command (status --live, contacts resync, the sync after a
     // link) queues what arrives and leaves the backlog to it.
@@ -507,6 +537,9 @@ export class WhatsAppService implements WhatsAppApi {
     this.starting = true;
     try {
       let linked = this.readAccount();
+      if (linked === "unreadable") return;
+      // From the first start on: the status it found is where the outage clock starts, if anywhere.
+      this.linkWatch.arm();
       if (linked !== "corrupt" && linked !== null) {
         this.account = linked;
         this.storage.claimDatabase(linked.id);
@@ -531,7 +564,8 @@ export class WhatsAppService implements WhatsAppApi {
       try {
         ({ state, saveCreds: this.saveCreds } = await useAtomicAuthState(this.paths.authDir));
       } catch (err) {
-        this.markCorrupt(err);
+        if (err instanceof CredentialsReadError) this.credentialsUnreadable(err);
+        else this.markCorrupt(err);
         return;
       }
       if (this.stopped) return;
@@ -540,6 +574,7 @@ export class WhatsAppService implements WhatsAppApi {
       this.initialSyncDone = false;
       this.setStatus("connecting");
       const generation = ++this.generation;
+      this.socketOpenedAt = Date.now();
       const sock = socketFactory.open({
         auth: state,
         logger: silentLogger,
@@ -564,6 +599,7 @@ export class WhatsAppService implements WhatsAppApi {
   private async stopOnce(): Promise<void> {
     this.stopped = true;
     this.health.dispose();
+    this.linkWatch.dispose(true);
     if (this.storage.expiryTimer) clearTimeout(this.storage.expiryTimer);
     if (this.storage.legacyTimer) clearInterval(this.storage.legacyTimer);
     this.storage.legacyTimer = null;
@@ -661,6 +697,7 @@ export class WhatsAppService implements WhatsAppApi {
       // Pairing clears the credentials: not while they would come back on their own.
       if (this.health.blocksLink()) throw this.health.refusal("link");
       this.health.forgetSession();
+      this.linkWatch.forgetSession();
       // A new link supersedes a try the ban scheduled.
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -791,6 +828,7 @@ export class WhatsAppService implements WhatsAppApi {
     this.status = next;
     this.statusSince = Date.now();
     this.webhooks.queueConnectionWebhook(next);
+    this.linkWatch.noteStatus(next);
     // Notes that waited for the connection run now rather than at the worker's next look.
     if (next === "connected" && this.voice.autoTranscribe) {
       this.voice.backfillTranscripts();
@@ -823,6 +861,7 @@ export class WhatsAppService implements WhatsAppApi {
       storage: this.storage.storageInfo(),
       transcription: this.voice.transcriptionStatus(),
       health: this.health.info(),
+      link: this.linkWatch.info(),
       diagnostics: {
         read_self: {
           seen: this.ingest.readSelf.seen,
@@ -836,6 +875,11 @@ export class WhatsAppService implements WhatsAppApi {
     const hints: string[] = [];
     const restricted = this.health.hint();
     if (restricted !== null) hints.push(restricted);
+    const outage = this.linkWatch.hint();
+    if (outage !== null) hints.push(outage);
+    if (this.status === "logged_out") {
+      hints.push("WhatsApp unlinked this device: link it again with link_account, or `npx wazap-mcp login`.");
+    }
     if (this.storage.storageState === "preparing") {
       hints.push("The account is preparing its database from its earlier message files (once, after an upgrade); tools answer NOT_CONNECTED until it is done.");
     }
@@ -1161,6 +1205,7 @@ export class WhatsAppService implements WhatsAppApi {
     const sock = this.sockClient;
     if (!sock) return;
     this.sockClient = null;
+    this.socketOpenedAt = null;
     try {
       sock.ev.removeAllListeners("connection.update");
       void sock.end(undefined);
@@ -1224,6 +1269,7 @@ export class WhatsAppService implements WhatsAppApi {
     if (until === null || this.stopped || this.reconnectTimer) return;
     const wait = until - Date.now();
     if (wait > TEMP_BAN_RETRY_MAX_MS) return;
+    this.reconnectKind = "ban";
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.reconnectAttempts = 0;
@@ -1238,19 +1284,27 @@ export class WhatsAppService implements WhatsAppApi {
   private scheduleReconnect(reason: string): void {
     if (this.stopped || this.reconnectTimer) return;
     this.teardownSocket();
-    if (this.reconnectAttempts >= RECONNECT_MAX_ATTEMPTS) {
-      this.setStatus("auth_failure");
+    if (this.reconnectAttempts === RECONNECT_MAX_ATTEMPTS) {
+      // Not an unlink: a 401 never comes here, so the credentials stay and nothing invites a new link.
       this.lastError =
-        `${reason} — gave up after ${RECONNECT_MAX_ATTEMPTS} attempts. ` +
-        "WhatsApp keeps rejecting this session: re-link the device with `npx wazap-mcp login`.";
+        `${reason} — WhatsApp could not be reached after ${RECONNECT_MAX_ATTEMPTS} attempts. ` +
+        "The session is kept: wazap exits so its supervisor restarts it, or tries again every 30 min.";
+      this.setStatus("disconnected");
       logError("reconnect", this.lastError);
       this.onGiveUp?.();
-      return;
+      if (this.stopped) return;
     }
     const attempt = this.reconnectAttempts++;
-    const backoff = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
-    const delay = Math.round(backoff * (0.5 + Math.random()));
-    log(`disconnected (${reason}); retry ${attempt + 1}/${RECONNECT_MAX_ATTEMPTS} in ${Math.round(delay / 1000)}s`);
+    const delay =
+      attempt >= RECONNECT_MAX_ATTEMPTS
+        ? RECONNECT_AFTER_GIVE_UP_MS
+        : Math.round(Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS) * (0.5 + Math.random()));
+    log(
+      attempt >= RECONNECT_MAX_ATTEMPTS
+        ? `disconnected (${reason}); next try in ${Math.round(delay / 60_000)} min`
+        : `disconnected (${reason}); retry ${attempt + 1}/${RECONNECT_MAX_ATTEMPTS} in ${Math.round(delay / 1000)}s`
+    );
+    this.reconnectKind = "backoff";
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start().catch((err) => {
@@ -1258,6 +1312,50 @@ export class WhatsAppService implements WhatsAppApi {
         this.scheduleReconnect("reconnect failed");
       });
     }, delay);
+    // Past the cap the process stays up for something else (an HTTP listener, another account) or not at all.
+    if (attempt >= RECONNECT_MAX_ATTEMPTS) this.reconnectTimer.unref?.();
+  }
+
+  /**
+   * The watchdog's way to drop a socket that looks alive and is not (src/service/link.ts): torn
+   * down and muted, then the same paced reconnect a dropped link gets. Never while a temporary
+   * ban's one try is pending, and never touching the credentials.
+   */
+  private forceReconnect(reason: string): void {
+    if (this.stopped) return;
+    if (this.reconnectTimer !== null && this.reconnectKind === "ban") return;
+    if (this.status !== "connected" && this.status !== "connecting" && this.status !== "disconnected") return;
+    this.teardownSocket();
+    this.lastError = reason;
+    this.setStatus("disconnected");
+    this.scheduleReconnect(reason);
+  }
+
+  /** A backoff wait cut short (the machine woke): the reconnect runs now, with a fresh budget. */
+  private retryNow(reason: string): void {
+    if (this.stopped || this.reconnectTimer === null || this.reconnectKind !== "backoff") return;
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    this.reconnectAttempts = 0;
+    this.scheduleReconnect(reason);
+  }
+
+  /**
+   * One keepalive ping on the live socket, the one Baileys sends itself. A reply, even an error,
+   * proves the socket; a timeout or a closed socket does not. A socket replaced meanwhile is "gone".
+   */
+  private async probeSocket(timeoutMs: number): Promise<ProbeResult> {
+    const sock = this.sockClient;
+    if (sock === null || this.status !== "connected" || typeof sock.query !== "function") return "gone";
+    try {
+      await sock.query({ tag: "iq", attrs: { to: WA_SERVER_JID, type: "get", xmlns: "w:p" }, content: [{ tag: "ping", attrs: {} }] }, timeoutMs);
+      return "alive";
+    } catch (err) {
+      if (this.sockClient !== sock || this.status !== "connected") return "gone";
+      const code = (err as { output?: { statusCode?: unknown } } | null)?.output?.statusCode;
+      // 408 timed out, 428 the socket is closed; anything else is an answer, and an answer is life.
+      return code === 408 || code === 428 || code === undefined ? "dead" : "alive";
+    }
   }
 
   /**
@@ -1289,6 +1387,7 @@ export class WhatsAppService implements WhatsAppApi {
       if (reachout !== undefined) this.health.noteReachout(reachout);
       if (connection === "open") {
         this.reconnectAttempts = 0;
+        this.onRecovered?.();
         this.health.noteOpen();
         this.setStatus("connected");
         this.lastError = null;
@@ -1302,22 +1401,23 @@ export class WhatsAppService implements WhatsAppApi {
         const verdict = classifyClose(lastDisconnect?.error);
         if (verdict.kind === "logged_out") {
           this.health.forgetSession();
-          this.setStatus("logged_out");
+          // The error first: the status change is what the link watch reads it on.
           this.lastError = "The account was unlinked from the phone.";
+          this.setStatus("logged_out");
           logError("auth", this.lastError);
           this.teardownSocket();
         } else if (verdict.kind !== "transient") {
           // About the account, not the link: reconnecting would only knock on a closed door, and a
           // restart cannot open it, so onGiveUp is not called. A temporary ban gets one try when it ends.
           this.health.noteClose(verdict);
-          this.setStatus("auth_failure");
           this.lastError = this.health.refusal("write").message;
+          this.setStatus("auth_failure");
           logError("account", `${this.lastError} (WhatsApp close ${verdict.code})`);
           this.teardownSocket();
           this.retryAfterBan();
         } else if (!this.stopped) {
-          this.setStatus("disconnected");
           this.lastError = lastDisconnect?.error?.message ?? "connection closed";
+          this.setStatus("disconnected");
           this.scheduleReconnect(this.lastError);
         }
       }
@@ -1503,11 +1603,15 @@ export class WhatsAppService implements WhatsAppApi {
     });
   }
 
-  private readAccount(): StatusInfo["account"] | "corrupt" {
+  private readAccount(): StatusInfo["account"] | "corrupt" | "unreadable" {
     let linked;
     try {
       linked = readLinkedAccount(this.paths.authDir);
     } catch (err) {
+      if (err instanceof CredentialsReadError) {
+        this.credentialsUnreadable(err);
+        return "unreadable";
+      }
       this.markCorrupt(err);
       return "corrupt";
     }
@@ -1532,9 +1636,20 @@ export class WhatsAppService implements WhatsAppApi {
     }
   }
 
+  /**
+   * The credentials are there and could not be read just now: a dropped link, not a lost session.
+   * Retried on the reconnect schedule, and never `not_linked`, which would invite a new link.
+   */
+  private credentialsUnreadable(err: CredentialsReadError): void {
+    logError("auth state", err);
+    this.lastError = err.message;
+    this.setStatus("disconnected");
+    this.scheduleReconnect(err.message);
+  }
+
   private markCorrupt(err: unknown): void {
-    this.setStatus("session_corrupt");
     this.lastError = describe(err);
+    this.setStatus("session_corrupt");
     logError("auth state", err);
   }
 

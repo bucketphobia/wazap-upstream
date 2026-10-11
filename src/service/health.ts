@@ -84,11 +84,19 @@ function fromWhatsApp(error: unknown): boolean {
   return typeof message === "string" && /^(Connection Failure|Stream Errored)/.test(message);
 }
 
+/** Baileys' own `logout()` ends the socket with this, before WhatsApp has said anything. */
+function ownLogout(error: unknown): boolean {
+  return (error as { message?: unknown } | undefined)?.message === "Intentional Logout";
+}
+
 /** Reads a close the way WhatsApp's own clients do. Unknown codes, and closes WhatsApp did not send, are a dropped link. */
 export function classifyClose(error: unknown, now: number = Date.now()): CloseVerdict {
   const code = codeOf(error);
   const data = dataOf(error);
-  if (code === 401) return { kind: "logged_out" };
+  // Only WhatsApp, or this process's own logout, unlinks the device. A proxy, a captive portal or a
+  // firewall that answers the WebSocket upgrade with 401 says nothing about the session, and reading
+  // it as a logout would invite a new link that throws good credentials away.
+  if (code === 401) return fromWhatsApp(error) || ownLogout(error) ? { kind: "logged_out" } : { kind: "transient" };
   if (!fromWhatsApp(error)) return { kind: "transient" };
   if (code === 402) {
     const expire = Number(data.expire);

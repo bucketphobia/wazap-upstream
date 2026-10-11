@@ -113,13 +113,32 @@ export async function useAtomicAuthState(
   };
 }
 
+/**
+ * The stored credentials could not be read for a reason that may pass (EMFILE, EIO, EACCES, a disk
+ * not there yet after a wake). Not "nothing is linked": reading it that way would start a fresh
+ * session whose first save writes over the real one. The caller retries instead.
+ */
+export class CredentialsReadError extends Error {
+  constructor(readonly code: string) {
+    super(`The stored credentials could not be read (${code}); retrying.`);
+    this.name = "CredentialsReadError";
+  }
+}
+
+/** Only a file that is not there means nothing is linked; any other failure to read it is thrown. */
+function missingOrThrow(err: unknown): null {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR") return null;
+  throw new CredentialsReadError(typeof code === "string" ? code : "unknown error");
+}
+
 /** Stored credentials, or null when nothing is linked yet. */
 async function readCreds(dir: string): Promise<AuthenticationCreds | null> {
   let text: string;
   try {
     text = await readFile(fileFor(dir, CREDS_FILE), "utf8");
-  } catch {
-    return null;
+  } catch (err) {
+    return missingOrThrow(err);
   }
   try {
     return JSON.parse(text, BufferJSON.reviver) as AuthenticationCreds;
@@ -128,13 +147,13 @@ async function readCreds(dir: string): Promise<AuthenticationCreds | null> {
   }
 }
 
-/** The linked account, or null when no account is linked. Throws SESSION_CORRUPT. */
+/** The linked account, or null when no account is linked. Throws SESSION_CORRUPT, or CredentialsReadError. */
 export function readLinkedAccount(dir: string): LinkedAccount | null {
   let text: string;
   try {
     text = readFileSync(fileFor(dir, CREDS_FILE), "utf8");
-  } catch {
-    return null;
+  } catch (err) {
+    return missingOrThrow(err);
   }
   let creds: AuthenticationCreds;
   try {

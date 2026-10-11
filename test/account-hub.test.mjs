@@ -86,13 +86,13 @@ test("one account giving up does not exit; both giving up does", () => {
   home.reconnectAttempts = 10;
   home.scheduleReconnect("Connection Terminated");
   assert.equal(exited, 0, "the other account is still up");
-  assert.equal(home.getStatus().status, "auth_failure");
+  assert.equal(home.getStatus().status, "disconnected");
   assert.equal(work.getStatus().status, "connected");
 
   work.reconnectAttempts = 10;
   work.scheduleReconnect("Connection Terminated");
   assert.equal(exited, 1);
-  assert.equal(work.getStatus().status, "auth_failure");
+  assert.equal(work.getStatus().status, "disconnected");
 });
 
 test("findByChat and findByMessage look across two stores", () => {

@@ -149,7 +149,8 @@ function voiceNote(id, seconds, at = Date.now(), chat = PEER) {
 /** The close Baileys reports, carrying the status code the handler reads. */
 const closedWith = (statusCode) => ({
   connection: "close",
-  lastDisconnect: { error: { message: "Connection Terminated", output: { statusCode } } },
+  // An unlink comes from WhatsApp's failure node; a dropped socket says it was terminated.
+  lastDisconnect: { error: { message: statusCode === 401 ? "Connection Failure" : "Connection Terminated", output: { statusCode } } },
 });
 
 /** Point the in-process sink at `url`, and hand back the restore the test owes. */
@@ -1266,6 +1267,41 @@ test("connection changes post linked, disconnected and expired, once per mapped 
       assert.equal(hit.body.account_name, "default");
       assert.match(hit.body.timestamp, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
     }
+  } finally {
+    await svc.stop();
+    await server.close();
+    restoreEnv();
+  }
+});
+
+test("an unlinked device posts a relink_required alert, signed, beside the expired connection event", async () => {
+  const received = [];
+  const server = await listen(async (req, res) => {
+    received.push({ header: req.headers["x-wazap-event"], body: JSON.parse(await readBody(req)) });
+    res.writeHead(204);
+    res.end();
+  });
+  const restoreEnv = saveWebhookEnv(server.url, "connection,alert");
+  const svc = openService(WhatsAppService, offlineConfig("wazap-webhook-alert-"));
+  const sock = fakeSocket();
+  svc.start = async () => {};
+  svc.wireEvents(sock, ++svc.generation);
+  try {
+    await svc.bootStorage();
+    sock.ev.emit("connection.update", { connection: "open" });
+    sock.ev.emit("connection.update", closedWith(DisconnectReason.loggedOut));
+    await waitFor(() => received.some((hit) => hit.header === "alert"), 3_000, "the alert POST");
+    const body = received.find((hit) => hit.header === "alert").body;
+    assert.equal(body.event, "alert");
+    assert.equal(body.alert, "relink_required");
+    assert.equal(body.status, "expired");
+    assert.match(body.down_since, /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    assert.equal(typeof body.down_for_seconds, "number");
+    assert.equal(body.reason, "The account was unlinked from the phone.", "the error that unlinked it, not the one before");
+    assert.match(body.fix, /link_account/);
+    assert.equal(body.account_id, "default");
+    assert.equal(body.account_name, "default");
+    assert.ok(received.some((hit) => hit.body.event === "connection" && hit.body.status === "expired"), "the connection event still goes out");
   } finally {
     await svc.stop();
     await server.close();

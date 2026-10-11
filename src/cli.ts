@@ -671,8 +671,10 @@ export async function runServe(config: Config): Promise<void> {
   // A socket WhatsApp keeps refusing is not something this process can fix, and
   // a live MCP server answering NOT_CONNECTED forever is worse than a dead one:
   // exiting hands the problem to whoever started us, which is a supervisor that
-  // restarts it, or a client that shows the error. An unlinked device is the
-  // exception and stays up in auth_failure, because no restart brings it back.
+  // restarts it, or a client that shows the error. The session is kept: giving
+  // up leaves the account `disconnected`, never a state that invites a new link.
+  // An unlinked device (logged_out) or one WhatsApp holds closed (auth_failure)
+  // is the exception and stays up, because no restart brings it back.
   // One dead account stays down; the process exits only when every enabled
   // account has given up.
   hub.onGiveUp = () => {

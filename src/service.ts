@@ -131,6 +131,12 @@ function waitUntilUnloaded(ref: UnitRef, timeoutMs = 10_000): void {
   }
 }
 
+/**
+ * KeepAlive restarts the server whatever way it ended, a clean exit included: the exit wazap makes
+ * when its reconnects run out is how it asks for a fresh process. ThrottleInterval spaces those
+ * restarts. ProcessType Standard, not Background: launchd throttles a Background job's CPU and I/O
+ * and coalesces its timers, and the server's keepalive, watchdog and HTTP answers run on those.
+ */
 const launchd: Supervisor = {
   name: "launchd",
   available: () => process.platform === "darwin" && commandOnPath("launchctl"),
@@ -156,7 +162,7 @@ ${plistEnv(unit.env)}
 \t<key>RunAtLoad</key>
 \t<true/>
 \t<key>ProcessType</key>
-\t<string>Background</string>
+\t<string>Standard</string>
 \t<key>ThrottleInterval</key>
 \t<integer>10</integer>
 \t<key>StandardOutPath</key>
@@ -212,6 +218,10 @@ function systemdQuote(value: string): string {
   return /[\s"\\]/.test(value) ? `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : value;
 }
 
+/**
+ * Restart=always brings the server back after the exit wazap makes when its reconnects run out.
+ * StartLimitIntervalSec=0 keeps systemd from ever giving up on it after a burst of restarts.
+ */
 const systemd: Supervisor = {
   name: "systemd",
   available: () => process.platform === "linux" && commandOnPath("systemctl"),
@@ -222,6 +232,7 @@ const systemd: Supervisor = {
 Description=${unit.describe}
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 ${Object.entries(unit.env)
@@ -523,7 +534,7 @@ function portHolder(port: number): number | null {
 }
 
 const SLEEP_NOTE =
-  "A Mac that sleeps is a wazap that is offline: System Settings → Lock Screen, or Battery → Options, to keep it awake on power.";
+  "A Mac that sleeps is a wazap that is offline until it wakes (it reconnects on its own then). To keep it up: System Settings → Energy (or Battery → Options), prevent automatic sleeping on power, and turn on wake for network access.";
 
 export async function installService(
   config: Config,

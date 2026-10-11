@@ -141,9 +141,10 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
 
 ## 4. The outbound webhook
 
-- The three event names `message_received`, `message_sent` and `connection`; the
-  last two are opt-in through `WAZAP_WEBHOOK_EVENTS`, and unset means
-  `message_received` only.
+- The four event names `message_received`, `message_sent`, `connection` and
+  `alert` (added after 1.3.8); the last three are opt-in through
+  `WAZAP_WEBHOOK_EVENTS`, and unset means `message_received` only. `all` means
+  the first three and never grows: a new event is asked for by name.
 - The signature is `x-wazap-signature: sha256=<hex>`, an HMAC-SHA256 over the
   exact raw request body with the configured secret; the body is JSON.
 - With `WAZAP_WEBHOOK_AUTH` set (or an account's own), its header
@@ -165,6 +166,11 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
   change while the link stays up is a connection event too. A connection
   event is not a chat: the allowlist and `#private` do not apply to it,
   because it carries no message content.
+- Alert-event fields: `event`, `alert`, `status`, `timestamp`, `down_since`,
+  `down_for_seconds`, `reason`, `fix`, `account_id`, `account_name`, where
+  `alert` names a long outage, its end, or a device to link again. Like a connection
+  event it is not a chat. Guarded by `test/link-watch.test.mjs`; the 5-minute
+  threshold is current behaviour, not a promise.
 - A message wazap itself sent produces no `message_sent`, and history sync
   produces no events at all.
 
