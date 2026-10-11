@@ -903,7 +903,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "get_media",
     title: "Get the media of a WhatsApp message",
-    description: `What a message's media holds: a voice note or audio as its transcript (kept once made; an API provider bills it), or with save_to its file; a photo attached as an image; any file saved at path on the machine running wazap. A copy kept when it arrived answers first. MEDIA_UNAVAILABLE: WhatsApp no longer has it, and none was kept.`,
+    description: `What a message's media holds: a voice note or audio as its transcript (kept once made; an API provider bills it), or with save_to its file; a photo attached as an image; any file saved at path on the machine running wazap; a copy kept on arrival answers first. MEDIA_UNAVAILABLE: gone, none kept.`,
     schema: {
       message_id: messageId,
       save_to: z.string().min(1).optional().describe("Absolute directory; default <data-dir>/media. A recording: its file, and no new transcript"),
