@@ -203,6 +203,15 @@ function systemdUnitName(label: string): string {
 
 const SYSTEMD_FIX = "check `systemctl --user status wazap` and `journalctl --user -u wazap`";
 
+/**
+ * systemd splits unit values on whitespace; a path holding a space needs
+ * double quotes, with `\` and `"` escaped inside. Values without them stay
+ * bare, the form every existing unit already carries.
+ */
+function systemdQuote(value: string): string {
+  return /[\s"\\]/.test(value) ? `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"` : value;
+}
+
 const systemd: Supervisor = {
   name: "systemd",
   available: () => process.platform === "linux" && commandOnPath("systemctl"),
@@ -216,9 +225,9 @@ Wants=network-online.target
 
 [Service]
 ${Object.entries(unit.env)
-  .map(([key, value]) => `Environment=${key}=${value}`)
+  .map(([key, value]) => `Environment=${systemdQuote(`${key}=${value}`)}`)
   .join("\n")}
-ExecStart=${unit.argv.join(" ")}
+ExecStart=${unit.argv.map(systemdQuote).join(" ")}
 Restart=always
 RestartSec=5
 KillSignal=SIGTERM
