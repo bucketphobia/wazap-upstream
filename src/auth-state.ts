@@ -40,9 +40,19 @@ function fileFor(dir: string, name: string): string {
  * has to be re-linked.
  */
 export async function useAtomicAuthState(
-  dir: string
+  dir: string,
+  /**
+   * The caller read these credentials a moment ago: a file gone since is a read that failed, not a
+   * fresh session whose first save would write over it once the disk is back.
+   */
+  options: { expectLinked?: boolean } = {}
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    // The folder the credentials live in, not there or not writable for now, is not a corrupt session.
+    throw new CredentialsReadError((err as NodeJS.ErrnoException | null)?.code ?? "unknown error");
+  }
 
   const queues = new Map<string, Promise<unknown>>();
   const serialize = <T>(path: string, task: () => Promise<T>): Promise<T> => {
@@ -76,7 +86,9 @@ export async function useAtomicAuthState(
     return serialize(path, () => unlink(path).catch(() => undefined));
   };
 
-  const creds = (await readCreds(dir)) ?? initAuthCreds();
+  const stored = await readCreds(dir);
+  if (stored === null && options.expectLinked === true) throw new CredentialsReadError("ENOENT");
+  const creds = stored ?? initAuthCreds();
 
   return {
     state: {
@@ -113,13 +125,45 @@ export async function useAtomicAuthState(
   };
 }
 
+/**
+ * The stored credentials could not be read for a reason that may pass (EMFILE, EIO, EACCES, a disk
+ * not there yet after a wake). Not "nothing is linked": reading it that way would start a fresh
+ * session whose first save writes over the real one. The caller retries instead.
+ */
+export class CredentialsReadError extends WazapError {
+  declare readonly fix: string;
+  constructor(readonly errno: string) {
+    super(
+      "SERVICE_ERROR",
+      errno === "ENOENT" ? "The stored credentials file is missing." : `The stored credentials could not be read (${errno}).`,
+      errno === "ENOENT" ? CREDENTIALS_MISSING_FIX : CREDENTIALS_READ_FIX
+    );
+    this.name = "CredentialsReadError";
+  }
+}
+
+/** A running session's credentials gone from under it: usually a disk not mounted yet, sometimes gone for good. */
+export const CREDENTIALS_MISSING_FIX =
+  "wazap retries until the file is back (a data disk not mounted yet); if it is gone for good, run `wazap logout`, then link again";
+
+/** What to do about credentials the file system would not read: never a logout, which deletes them. */
+export const CREDENTIALS_READ_FIX =
+  "check that the user wazap runs as owns the account's auth folder and can read it, then retry; do not log out";
+
+/** Only a file that is not there means nothing is linked; any other failure to read it is thrown. */
+function missingOrThrow(err: unknown): null {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR") return null;
+  throw new CredentialsReadError(typeof code === "string" ? code : "unknown error");
+}
+
 /** Stored credentials, or null when nothing is linked yet. */
 async function readCreds(dir: string): Promise<AuthenticationCreds | null> {
   let text: string;
   try {
     text = await readFile(fileFor(dir, CREDS_FILE), "utf8");
-  } catch {
-    return null;
+  } catch (err) {
+    return missingOrThrow(err);
   }
   try {
     return JSON.parse(text, BufferJSON.reviver) as AuthenticationCreds;
@@ -128,13 +172,13 @@ async function readCreds(dir: string): Promise<AuthenticationCreds | null> {
   }
 }
 
-/** The linked account, or null when no account is linked. Throws SESSION_CORRUPT. */
+/** The linked account, or null when no account is linked. Throws SESSION_CORRUPT, or CredentialsReadError. */
 export function readLinkedAccount(dir: string): LinkedAccount | null {
   let text: string;
   try {
     text = readFileSync(fileFor(dir, CREDS_FILE), "utf8");
-  } catch {
-    return null;
+  } catch (err) {
+    return missingOrThrow(err);
   }
   let creds: AuthenticationCreds;
   try {

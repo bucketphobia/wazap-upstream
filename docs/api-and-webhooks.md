@@ -43,7 +43,7 @@ Only `message_received` is posted unless you ask for more, because a consumer
 that answers every POST without reading `event` would otherwise answer the
 messages its own owner typed on the phone.
 
-The `event` field names one of five. `message_received` is a message another
+The `event` field names one of six. `message_received` is a message another
 person sent. `message_sent` is a message this account sent itself, typed on
 the phone or on another linked device; a message wazap sent through its own
 tools is not announced, so a consumer can never be made to answer itself.
@@ -53,14 +53,19 @@ new_chats_capped, reachout_restricted, temporarily_banned, banned,
 session_replaced or client_outdated, with `until` and WhatsApp's `reason`).
 A restriction that comes or goes while the link stays up is a `connection`
 event too, with the same `status`; the pair of status and state is posted
-once per change. `reminder` is a reminder the user set with the `reminder`
-tool, now due, and `scheduled` says what became of a scheduled message; see
-[Reminders and scheduled messages](#reminders-and-scheduled-messages).
+once per change. `alert` is for the owner rather than an agent: the link has
+been down for 5 minutes, it came back after such an alert, or WhatsApp
+unlinked the device and it needs linking again (see
+[Link alerts](#link-alerts)). `reminder` is a reminder the user set with the
+`reminder` tool, now due, and `scheduled` says what became of a scheduled
+message; see [Reminders and scheduled messages](#reminders-and-scheduled-messages).
 
-Ask for the others in `WAZAP_WEBHOOK_EVENTS`, comma-separated
-(`message_received,connection,reminder`). `all` names the first three, as it
-always has: `reminder` and `scheduled` are posted only when named, so a
-receiver set to `all` is not handed reminders it never asked for. Case
+Ask for the other five in `WAZAP_WEBHOOK_EVENTS`, comma-separated
+(`message_received,alert,reminder`). `all` means the first three, as it always
+has, so an integration that wrote it is not sent an event it does not know,
+and a receiver set to `all` is not handed reminders it never asked for; ask
+for the others beside it by name, as in `all,alert` or
+`all,reminder,scheduled`. Case
 does not matter and the spaces around a name are ignored. An unknown name
 fails `wazap status`, doctor and setup. An account carries its own list as
 `webhook_events` in `accounts.json`.
@@ -69,6 +74,7 @@ fails `wazap status`, doctor and setup. An account carries its own list as
 npx wazap-mcp config webhook on    # asks for URL + secret (secret is not echoed)
 npx wazap-mcp webhook test         # POST a probe event
 npx wazap-mcp webhook test --event connection   # needs connection enabled
+npx wazap-mcp webhook test --event alert        # needs alert enabled
 npx wazap-mcp webhook test --account work
 npx wazap-mcp config webhook off
 ```
@@ -491,3 +497,52 @@ mean the link is up. Poll `get_status` when you need to know that. A
 `connection` event the receiver did not take is retried like any other, until
 a newer change is queued behind it: then it is cancelled, so after an outage
 the receiver hears the current status once, not every flap.
+
+### Link alerts
+
+An `alert` tells the owner something they may have to act on, once per
+outage, where `connection` reports every change. `alert` is one of:
+
+- `disconnected`: the link has been down for 5 minutes (`get_status` →
+  `link.alert_after_seconds`). A dropped link, a WhatsApp restart, or a Mac
+  waking from sleep reconnects well inside that, and is not told. Time the
+  machine spent asleep does not count: `down_since` moves forward by the
+  sleep.
+- `recovered`: the link is back after a `disconnected` alert.
+  `down_for_seconds` is how long the outage lasted. Linking the device again
+  after a `relink_required` starts afresh and sends none.
+- `relink_required`: WhatsApp unlinked the device, or the saved credentials
+  are corrupt. Sent at once. Nothing reconnects from this; link again with
+  `link_account` from the agent, or `wazap logout` then `wazap login`.
+  Credentials the file system will not read for the moment (a permission, an
+  I/O error) are a dropped link instead: retried, and a `disconnected` alert
+  if it lasts, its `reason` naming the error. So is a running session's
+  credentials file gone missing (a data disk not mounted yet); its `fix` says
+  to run `wazap logout`, then link again, if the file is gone for good.
+
+Each is posted once, also across the restart wazap asks its supervisor for when
+reconnects run out: the outage is kept in `<data-dir>/accounts/<id>/link.json`.
+Alerts have their own lane in the outbox, so a later `connection` event never
+cancels one, and `recovered` follows `disconnected` in order. An alert waits in
+the outbox like any event, so one about a network outage is usually delivered
+when the network is back, unless the receiver is on the same machine or
+network. `reason` is the last error the link saw, with any credentials in a
+URL removed.
+
+```json
+{
+  "event": "alert",
+  "alert": "disconnected",
+  "status": "disconnected",
+  "timestamp": "2026-09-08T14:15:00.000Z",
+  "down_since": "2026-09-08T14:10:00.000Z",
+  "down_for_seconds": 300,
+  "reason": "WebSocket Error (getaddrinfo ENOTFOUND web.whatsapp.com)",
+  "fix": "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. `reason` says what fails: usually the machine's network, or that it is asleep; for credentials that cannot be read, their folder's ownership and permissions",
+  "account_id": "default",
+  "account_name": "default"
+}
+```
+
+`status` is the `connection` status at that moment (`linked`, `disconnected`
+or `expired`). `reason` is null on `recovered`.

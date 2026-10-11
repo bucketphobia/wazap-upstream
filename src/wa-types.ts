@@ -106,11 +106,31 @@ export interface StatusInfo {
   transcription: TranscriptionStatus;
   /** What WhatsApp says about the account itself: a restriction, a ban, a session taken over. */
   health: HealthInfo;
+  /** The link's own watch: an outage under way, whether the owner was told, sleeps seen, sockets replaced. */
+  link: LinkInfo;
   /** Counters for checking live what the account receives; no tool acts on them. */
   diagnostics?: StatusDiagnostics;
   /** Present only while `status` is "linking". */
   pairing?: PairingInfo;
   hint?: string;
+}
+
+/** get_status's `link` block (src/service/link.ts). Times are local with their offset. */
+export interface LinkInfo {
+  /** When the link went down, while it is down; null while connected or with no session. */
+  down_since: string | null;
+  down_for_seconds: number | null;
+  /** How long an outage lasts before the webhook's `alert` event tells the owner. */
+  alert_after_seconds: number;
+  /** What the owner was told about the outage under way, if anything. */
+  alerted: "disconnected" | "relink_required" | null;
+  last_outage: { from: string; to: string; seconds: number } | null;
+  /** Times this process saw the clock jump: the machine slept, or the process was frozen. */
+  wakes: number;
+  last_wake_at: string | null;
+  /** Sockets the watchdog replaced: unanswered pings, stuck opening, opened before a sleep. */
+  forced_reconnects: number;
+  last_forced_reconnect: { at: string; reason: string } | null;
 }
 
 /**

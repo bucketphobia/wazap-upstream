@@ -225,6 +225,7 @@ function checkCredentials(config: Config): Check {
     try {
       if (readLinkedAccount(accountPaths(config.dataDir, record.id).authDir) !== null) linkedIds.push(record.id);
     } catch (err) {
+      // CredentialsReadError carries its own fix too: check permissions, never log out.
       const wazap = err as WazapError;
       return { name: "credentials", state: "fail", detail: `${record.id}: ${wazap.message}`, fix: wazap.fix };
     }

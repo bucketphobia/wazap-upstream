@@ -177,8 +177,29 @@ from what it is doing — an idle connection is at the low end, a history sync, 
 search or a catch-up at the high end. A local transcription or embedding model
 is a separate process and is not counted in that.
 
-A sleeping Mac is an offline wazap. System Settings → Lock Screen, or Battery →
-Options, has the switch that keeps it awake on power.
+The service recovers on its own. A dropped link is retried with a growing,
+jittered wait (2 s up to 5 min). A watchdog notices what the socket does not
+say: after a sleep it pings the link and replaces a dead socket at once, and it
+replaces one stuck opening or one that stops answering pings. When ten tries in
+a row fail (about 20 minutes) on every enabled account, wazap exits with code 3
+and launchd or systemd starts a fresh process; the unit restarts it whatever
+way it ended. An account that gives up while another is still up keeps trying
+every 30 minutes instead. None of
+this touches the linked session: only WhatsApp unlinking the device makes it
+need linking again, and `get_status` and the webhook's
+[`alert` event](api-and-webhooks.md#link-alerts) say so. An outage longer than
+5 minutes, and its end, are told the same way.
+
+A sleeping Mac is an offline wazap until it wakes. On a Mac mini kept as a
+server: System Settings → Energy (Battery → Options on a laptop), turn on
+"Prevent automatic sleeping when the display is off" and "Wake for network
+access", and "Start up automatically after a power failure". The launchd agent
+starts at login, so the Mac also needs to log in on its own after a restart.
+
+A unit written by an earlier wazap keeps its old settings until you run
+`npx wazap-mcp service install` again, which rewrites it: the launchd agent now
+runs as a Standard process rather than a throttled Background one, and the
+systemd unit never stops restarting after a burst of exits.
 
 ```bash
 npx wazap-mcp expose

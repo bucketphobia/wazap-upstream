@@ -1,7 +1,7 @@
 /**
- * W1 outbound webhook: five live events (`message_received`, `message_sent`,
- * `connection`, and the owner's own `reminder` and `scheduled`), of which only
- * `message_received` is posted unless
+ * W1 outbound webhook: six live events (`message_received`, `message_sent`,
+ * `connection`, the owner's `alert`, and the owner's own `reminder` and
+ * `scheduled`), of which only `message_received` is posted unless
  * `WAZAP_WEBHOOK_EVENTS` asks for more. Global URL, secret, event list, chat
  * allowlist, coalescing window and the optional 401 retry live in `.env`; an
  * account may override any of them. This module is the settings, the payloads
@@ -20,8 +20,14 @@ import { discardResponse } from "./http-response.js";
 import { withCode } from "./error-code.js";
 import type { ConnectionStatus, HealthState, MessageType, MessageView, WebhookDelivery, WebhookInfo } from "./wa-types.js";
 
-export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection", "reminder", "scheduled"] as const;
+export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection", "alert", "reminder", "scheduled"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
+/**
+ * What `all` asks for: the events it named when it was introduced. An integration that wrote `all`
+ * routes on those, so a newer event, `alert` among them, is asked for by name (`all,alert`). So are
+ * `reminder` and `scheduled`: a receiver set to `all` is never handed a reminder about a chat it might answer.
+ */
+export const WEBHOOK_EVENTS_ALL: readonly WebhookEvent[] = ["message_received", "message_sent", "connection"];
 
 /** What `webhook test` posts when `--event` does not name another one. */
 export const WEBHOOK_EVENT = "message_received" as const;
@@ -36,13 +42,7 @@ export const WEBHOOK_URL_FIX = "set WAZAP_WEBHOOK_URL to an https:// URL, or htt
 export const WEBHOOK_TEST_FIX = "run `wazap webhook test`";
 export const WEBHOOK_EVENT_FIX = `pass one of ${WEBHOOK_EVENTS.join(", ")}`;
 export const WEBHOOK_EVENTS_DEFAULT: readonly WebhookEvent[] = ["message_received"] as const;
-/**
- * What `all` names: the three events of 1.x before reminders. `reminder` and
- * `scheduled` are named on their own, so a receiver set to `all` is never
- * handed a reminder about a chat it might answer.
- */
-export const WEBHOOK_EVENTS_ALL: readonly WebhookEvent[] = ["message_received", "message_sent", "connection"] as const;
-export const WEBHOOK_EVENTS_FIX = `set WAZAP_WEBHOOK_EVENTS to all (the first three) or a comma-separated list of ${WEBHOOK_EVENTS.join(", ")}`;
+export const WEBHOOK_EVENTS_FIX = `set WAZAP_WEBHOOK_EVENTS to all (${WEBHOOK_EVENTS_ALL.join(", ")}) or a comma-separated list of ${WEBHOOK_EVENTS.join(", ")}`;
 export const WEBHOOK_AUTH_FIX =
   "run `wazap config webhook auth` and paste what the receiver expects: `Bearer <token>` for Authorization, or `<Header-Name>: <value>`";
 /** A burst waits at most this long after its first message, however fast the chat keeps going. */
@@ -219,6 +219,28 @@ export interface WebhookReminderPayload {
   account_name: string;
 }
 
+/**
+ * The link has been down past the alert threshold, is back after such an alert, or needs linking
+ * again because WhatsApp unlinked the device. For the owner, not for an agent to answer.
+ */
+export interface WebhookAlertPayload {
+  event: "alert";
+  alert: "disconnected" | "recovered" | "relink_required";
+  /** The connection status as the `connection` event names it. */
+  status: WebhookConnectionStatus;
+  timestamp: string;
+  /** When the outage began; null when it is not known. */
+  down_since: string | null;
+  /** How long it lasted (`recovered`) or has lasted so far (`disconnected`, `relink_required`), in seconds. */
+  down_for_seconds: number | null;
+  /** The last error the link saw, without credentials; null on `recovered`. */
+  reason: string | null;
+  /** What the owner should do, in one sentence. */
+  fix: string;
+  account_id: string;
+  account_name: string;
+}
+
 /** What became of a scheduled message: sent, unknown, failed or missed. Never its words. */
 export interface WebhookScheduledPayload {
   event: "scheduled";
@@ -237,7 +259,12 @@ export interface WebhookScheduledPayload {
   account_name: string;
 }
 
-export type WebhookPayload = WebhookMessagePayload | WebhookConnectionPayload | WebhookReminderPayload | WebhookScheduledPayload;
+export type WebhookPayload =
+  | WebhookMessagePayload
+  | WebhookConnectionPayload
+  | WebhookAlertPayload
+  | WebhookReminderPayload
+  | WebhookScheduledPayload;
 
 /** The preview and whether it had to be cut, so the payload never decides twice. */
 export interface WebhookText {
@@ -594,6 +621,7 @@ export function describeWebhookEvents(events: readonly WebhookEvent[]): string {
     message_received: "messages you receive",
     message_sent: "messages you send from your phone or another device",
     connection: "link changes",
+    alert: "outage alerts",
     reminder: "your reminders when they are due",
     scheduled: "what became of your scheduled messages",
   };
@@ -690,6 +718,53 @@ export function asConnectionPayload({ status, account, at, health }: WebhookConn
     account_id: account.id,
     account_name: account.name,
     ...(health === undefined ? {} : { health }),
+  };
+}
+
+/** What the owner does about each alert. */
+export const ALERT_FIX: Record<WebhookAlertPayload["alert"], string> = {
+  disconnected:
+    "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. `reason` says what fails: usually the machine's network, or that it is asleep; for credentials that cannot be read, their folder's ownership and permissions",
+  recovered: "Nothing to do",
+  relink_required: "Link the device again: link_account from the agent, or `wazap logout` then `wazap login`",
+};
+
+/** For a link WhatsApp holds closed (a ban, a session taken over, an outdated client): no network fix, and no new link. */
+const ALERT_FIX_REFUSED =
+  "WhatsApp refuses this account for now: `reason` says why and get_status → health until when. Linking again does not help";
+
+/** The credentials file of a running session is missing: retried, but a new link if it is gone for good. */
+const ALERT_FIX_CREDENTIALS_MISSING =
+  "The credentials file is missing: wazap retries until it is back (a data disk not mounted yet); if it is gone for good, run `wazap logout`, then link again";
+
+export interface WebhookAlertEvent {
+  alert: WebhookAlertPayload["alert"];
+  status: ConnectionStatus;
+  account: Pick<WebhookAccount, "id" | "name">;
+  at: number;
+  downSince: number | null;
+  downForMs: number | null;
+  reason: string | null;
+  credentialsMissing?: boolean;
+}
+
+export function asAlertPayload({ alert, status, account, at, downSince, downForMs, reason, credentialsMissing }: WebhookAlertEvent): WebhookAlertPayload {
+  return {
+    event: "alert",
+    alert,
+    status: webhookConnectionStatus(status) ?? (alert === "recovered" ? "linked" : "disconnected"),
+    timestamp: new Date(at).toISOString(),
+    down_since: downSince === null ? null : new Date(downSince).toISOString(),
+    down_for_seconds: downForMs === null ? null : Math.max(0, Math.round(downForMs / 1000)),
+    reason,
+    fix:
+      alert === "disconnected" && credentialsMissing === true
+        ? ALERT_FIX_CREDENTIALS_MISSING
+        : alert === "disconnected" && status === "auth_failure"
+          ? ALERT_FIX_REFUSED
+          : ALERT_FIX[alert],
+    account_id: account.id,
+    account_name: account.name,
   };
 }
 
@@ -858,16 +933,19 @@ export class WebhookSink {
 /** A list is set whole, so enabling one event means naming the ones already on. */
 function enableEventFix(active: readonly WebhookEvent[], event: WebhookEvent, account?: WebhookAccount): string {
   const both = WEBHOOK_EVENTS.filter((known) => active.includes(known) || known === event).join(",");
-  // `all` does not name reminder or scheduled, so it is offered only for the events it covers.
-  const orAll = WEBHOOK_EVENTS_ALL.includes(event) ? ", or all" : "";
-  if (account?.webhook_events === undefined) return `set WAZAP_WEBHOOK_EVENTS=${both}${orAll}`;
-  return `set webhook_events for "${account.id}" in accounts.json to ${both}${orAll}`;
+  // `all` covers only the events it always did; one outside it is named beside it.
+  const all = WEBHOOK_EVENTS_ALL.includes(event) ? "all" : `all,${event}`;
+  if (account?.webhook_events === undefined) return `set WAZAP_WEBHOOK_EVENTS=${both}, or ${all}`;
+  return `set webhook_events for "${account.id}" in accounts.json to ${both}, or ${all}`;
 }
 
 function testPayload(event: WebhookEvent, account?: Pick<WebhookAccount, "id" | "name">): WebhookPayload {
   const now = new Date().toISOString();
   const named = { account_id: account?.id ?? "default", account_name: account?.name ?? "default" };
   if (event === "connection") return { event, status: "linked", timestamp: now, ...named, health: { state: "ok", until: null, reason: null } };
+  if (event === "alert") {
+    return { event, alert: "recovered", status: "linked", timestamp: now, down_since: now, down_for_seconds: 0, reason: null, fix: ALERT_FIX.recovered, ...named };
+  }
   if (event === "reminder") {
     return {
       event,

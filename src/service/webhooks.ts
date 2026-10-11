@@ -13,15 +13,16 @@ import { webhookAllowsMessage } from "../webhook-filter.js";
 import { logError } from "../logger.js";
 import { isUserMessage, messageIdFor } from "../messages.js";
 import {
+  asAlertPayload,
   asConnectionPayload,
   asWebhookPayload,
   webhookConnectionStatus,
-  type WebhookConnectionPayload,
   type WebhookHealth,
   type WebhookPayload,
   type WebhookSink,
 } from "../webhook.js";
 import {
+  ALERT_LANE,
   CONNECTION_LANE,
   WEBHOOK_TRANSCRIPT_WAIT_MS,
   chatLane,
@@ -30,6 +31,7 @@ import {
 } from "../webhook-outbox.js";
 import type { ConnectionStatus, StatusInfo } from "../wa-types.js";
 import type { AccountIdentity } from "./identity.js";
+import type { LinkAlert } from "./link.js";
 import type { AccountSends } from "./send.js";
 import type { AccountStorage } from "./storage.js";
 import type { MessageViews } from "./views.js";
@@ -95,6 +97,34 @@ export class AccountWebhooks {
     }
     this.lastWebhookKey = key;
     this.host.outbox().nudge();
+  }
+
+  /**
+   * A link alert (src/service/link.ts), in its own lane: unlike a connection event, a newer one
+   * never cancels it, so the owner hears both that the link was down and that it came back.
+   * False when it cannot be queued yet, for the caller to try again; true once it is queued, or
+   * when the webhook does not post alerts and there is nothing to queue.
+   */
+  queueAlert(alert: LinkAlert): boolean {
+    if (this.host.stopped()) return true;
+    const settings = this.host.webhook().settings();
+    if (settings.kind !== "ready" || !settings.events.includes("alert")) return true;
+    const db = this.storage.readyDb();
+    if (db === null) return false;
+    try {
+      db.events.enqueue({
+        kind: "alert",
+        lane: ALERT_LANE,
+        messageId: null,
+        payload: JSON.stringify(asAlertPayload({ ...alert, account: this.accountRecord })),
+        createdAt: alert.at,
+      });
+    } catch (err) {
+      this.host.outbox().dropped(`alert ${alert.alert}`, err);
+      return true;
+    }
+    this.host.outbox().nudge();
+    return true;
   }
 
   /**
@@ -196,14 +226,14 @@ export class AccountWebhooks {
   /**
    * The body of an event as it is posted: a message event from the message as
    * the database holds it now, so an edit or a transcript that landed since it
-   * was queued goes with it; a connection event as it was queued, under the
-   * account's current name.
+   * was queued goes with it; a connection or alert event as it was queued,
+   * under the account's current name.
    */
   webhookPayload(event: EventRecord, message: StoredMessage | null): WebhookPayload {
     const stored = JSON.parse(event.payload) as Record<string, unknown>;
     const account = this.accountRecord;
     if (message === null) {
-      return { ...(stored as unknown as WebhookConnectionPayload), account_id: account.id, account_name: account.name };
+      return { ...(stored as unknown as WebhookPayload), account_id: account.id, account_name: account.name } as WebhookPayload;
     }
     return asWebhookPayload({
       event: event.kind === "message_sent" ? "message_sent" : "message_received",

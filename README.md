@@ -194,6 +194,15 @@ it registers itself, and the consent page asks you for the password and
 whether that agent may only read or also send. See
 [Keep it running](docs/install.md#keep-it-running).
 
+The service recovers by itself: a dropped link is retried with backoff, a
+watchdog replaces a socket that went dead across a sleep or stopped answering,
+and when reconnecting keeps failing wazap exits so launchd or systemd starts it
+fresh. The linked session is never deleted for any of that; only WhatsApp
+unlinking the device needs a new link. Set `WAZAP_WEBHOOK_EVENTS` to include
+`alert` to be told when the link has been down for 5 minutes, when it is back,
+and when it needs linking again ([Link alerts](docs/api-and-webhooks.md#link-alerts));
+`get_status` shows the same under `link`.
+
 ## Deployment
 
 On a server of your own, the session never leaves it. With Docker (images for

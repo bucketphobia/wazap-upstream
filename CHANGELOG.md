@@ -4,6 +4,14 @@
 
 ### Added
 
+- **The server recovers on its own, and tells the owner.** A watchdog notices
+  a sleep (the clock jumps) and pings the link at once, replacing a dead
+  socket; it also replaces a socket stuck opening or one that stops answering
+  pings, and cuts a backoff wait short after a wake. A new opt-in webhook
+  event, `alert`, says when the link has been down for 5 minutes, when it is
+  back, and when WhatsApp unlinked the device. It is kept across the restart
+  wazap asks its supervisor for (`accounts/<id>/link.json`), so it is told
+  once. `get_status` shows the same under `link`.
 - **Scheduled messages.** `send_message` takes `send_at` (a wall-clock time in
   `time_zone`, the server's by default, or a time with its offset), and the
   preview shows the exact time with its zone and UTC offset. `confirm_send` on
@@ -19,15 +27,44 @@
   `condition` `no_reply` skipping one once someone wrote in the chat. A due
   reminder is posted to the webhook as the new `reminder` event.
 - **Webhook events `reminder` and `scheduled`**, posted only when named in
-  `WAZAP_WEBHOOK_EVENTS` (`all` keeps meaning the three it always named); the
-  second tells what became of each scheduled message, without its words.
+  `WAZAP_WEBHOOK_EVENTS` (`all` keeps meaning the three it always named, as
+  with `alert`: `all,reminder,scheduled`); the second tells what became of
+  each scheduled message, without its words.
 - Error codes `INVALID_TIME`, `SCHEDULE_NOT_FOUND` and `SCHEDULE_FULL`.
 
 ### Changed
 
+- **Running out of reconnects keeps the session, and says so.** The account
+  stays `disconnected` (it was `auth_failure`, which `link_account` accepted
+  and the `connection` event posted as `expired`), the process still exits
+  with code 3 for its supervisor, and an account that gives up while another
+  is up tries again every 30 minutes.
+- **`all` in `WAZAP_WEBHOOK_EVENTS` keeps meaning the three events it always
+  did.** `alert` is asked for by name: `all,alert`.
+- **Service units.** The launchd agent runs as a Standard process rather than
+  a throttled Background one, and the systemd units set
+  `StartLimitIntervalSec=0`. Run `wazap service install` again to rewrite an
+  installed unit.
 - The account database moves to schema 6 (two new tables). The upgrade copies
   the file first, as every schema upgrade does; an older wazap refuses the
   upgraded file.
+
+### Fixed
+
+- **A credentials file that cannot be read for a moment no longer looks
+  unlinked.** An I/O error other than a missing file (EMFILE, EIO after a
+  wake) used to read as "not linked", and the session that followed could
+  write fresh credentials over the real ones. It is now a dropped link,
+  retried, and so is a credentials file that goes missing from under a
+  running session (a volume not mounted yet). `wazap status` and doctor say to
+  check the folder's ownership instead of advising a logout, and
+  `status --json` carries the reason as `credentials_error`.
+- **The relink steps work.** After WhatsApp unlinks the device, `get_status`
+  and the alert say `link_account`, or `wazap logout` then `wazap login`
+  (`wazap login` alone answers "already linked").
+- **A 401 is a logout only when WhatsApp says it.** A proxy or captive portal
+  answering the WebSocket with 401 is retried as a dropped link instead of
+  marking the session logged out.
 
 ## 1.3.8
 
