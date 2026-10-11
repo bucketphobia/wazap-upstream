@@ -1155,6 +1155,70 @@ export class Messages {
       .map((row) => ({ kind: row.kind, path: row.path, createdAt: row.created_at }));
   }
 
+  /** Every file recorded under `kind`, oldest first: what a quota or an age limit walks. */
+  mediaOfKind(kind: string): Array<{ path: string; createdAt: number }> {
+    return this.c
+      .all<{ path: string; created_at: number }>("SELECT path, created_at FROM media WHERE kind = ? ORDER BY created_at, path", kind)
+      .map((row) => ({ path: row.path, createdAt: row.created_at }));
+  }
+
+  /**
+   * Forgets these files' `kind` rows; a path no row references any more is
+   * queued for unlinking in the same transaction (pending_unlinks). Returns
+   * how many rows went.
+   */
+  dropMedia(kind: string, paths: readonly string[]): number {
+    if (paths.length === 0) return 0;
+    return this.c.write(() => {
+      let dropped = 0;
+      for (const path of new Set(paths)) {
+        dropped += this.c.run("DELETE FROM media WHERE kind = ? AND path = ?", kind, path);
+      }
+      return dropped;
+    });
+  }
+
+  /**
+   * Points `kind` rows at `from` to `to` instead: the same file, reached by a
+   * new path (the data dir moved). Nothing is released: the trigger's queueing
+   * of `from` is taken back in the same transaction, since on a file system
+   * that ignores case `from` can name the very file `to` does.
+   */
+  rehomeMedia(kind: string, from: string, to: string): number {
+    return this.c.write(() => {
+      const moved = this.c.run("UPDATE media SET path = ? WHERE kind = ? AND path = ?", to, kind, from);
+      if (moved > 0 && this.c.get("SELECT 1 FROM media WHERE path = ?", from) === undefined) {
+        this.c.run("DELETE FROM pending_unlinks WHERE path = ?", from);
+      }
+      return moved;
+    });
+  }
+
+  /**
+   * Visible messages of these types from `since` on (and below the id
+   * `before`, for the next page), newest first, that carry
+   * no file of `kind` yet: what arrived while nothing was there to keep it.
+   */
+  withoutMedia(kind: string, types: readonly string[], since: number, limit: number, before = NO_UPPER_BOUND): StoredMessage[] {
+    if (types.length === 0) return [];
+    const floor = Math.max(1, since);
+    return this.c
+      .all<MessageRow>(
+        `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
+         WHERE m.id >= ? AND m.id < ? AND m.ts >= ? AND m.type IN (SELECT value FROM json_each(?)) AND ${VISIBLE}
+           AND NOT EXISTS (SELECT 1 FROM media k WHERE k.message_id = m.id AND k.kind = ?)
+         ORDER BY m.id DESC LIMIT ?`,
+        idLowerBound(floor),
+        before,
+        floor,
+        JSON.stringify(types),
+        this.c.now(),
+        kind,
+        Math.max(1, Math.floor(limit))
+      )
+      .map(messageFromRow);
+  }
+
   /** A message by any sid spelling; tombstones and expired rows only when asked for. */
   get(sid: string, options: { includeHidden?: boolean } = {}): StoredMessage | null {
     const key = this.identity.findMessage(sid);

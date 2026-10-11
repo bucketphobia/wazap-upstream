@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import dotenv from "dotenv";
 import { WazapError } from "./errors.js";
+import { mediaKeepSettings, mediaKeepWarnings, type MediaKeepSettings } from "./media-keep.js";
 import { trustedProxies } from "./proxy-trust.js";
 
 const require = createRequire(import.meta.url);
@@ -45,6 +46,8 @@ export interface Config {
    * history off discards caches an earlier history-on run left. Off by default.
    */
   retention?: boolean;
+  /** Which arriving media is downloaded at once and kept (src/media-keep.ts); absent keeps none. */
+  mediaKeep?: MediaKeepSettings;
   transport: "stdio" | "http";
   httpHost: string;
   httpPort: number;
@@ -127,6 +130,8 @@ export interface AccountPaths {
   mediaDir: string;
   historyDir: string;
   previewsDir: string;
+  /** Media kept as it arrived (src/service/keep.ts), each file recorded against its message. */
+  keptDir: string;
   notesFile: string;
   storeFile: string;
   qrFile: string;
@@ -155,6 +160,7 @@ export function accountPaths(dataDir: string, accountId: string): AccountPaths {
     mediaDir: join(root, "media"),
     historyDir: join(root, "history"),
     previewsDir: join(root, "previews"),
+    keptDir: join(root, "kept"),
     notesFile: join(root, "notes.json"),
     storeFile: join(root, "store.json"),
     qrFile: join(root, "qr.png"),
@@ -306,6 +312,7 @@ export function settingWarnings(env: NodeJS.ProcessEnv = process.env): string[] 
       lines.push(`${key} is no longer read and was ignored: ${now}. Remove it from your environment or .env.`);
     }
   }
+  lines.push(...mediaKeepWarnings(env));
   return lines;
 }
 
@@ -419,6 +426,7 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       syncFullHistory: false,
       persistHistory: asBool(process.env.WAZAP_PERSIST_HISTORY, true),
       retention: asBool(process.env.WAZAP_RETENTION, false),
+      mediaKeep: mediaKeepSettings(process.env),
       transport: values.http === true || httpFromEnv ? "http" : "stdio",
       httpHost: values.host ?? (process.env.WAZAP_HOST?.trim() || "127.0.0.1"),
       httpPort: values.port ? asInt(values.port, 8766) : asInt(process.env.WAZAP_PORT, 8766),

@@ -622,6 +622,8 @@ export interface MediaResult {
   filename: string;
   /** Base64 of images small enough to inline in the tool result. */
   inline_base64: string | null;
+  /** "kept": the copy wazap kept when the media arrived; "whatsapp": downloaded from WhatsApp now. */
+  source: "kept" | "whatsapp";
 }
 
 /** How a caller spends a transcription. */

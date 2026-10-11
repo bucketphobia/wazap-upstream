@@ -98,8 +98,10 @@ export interface VoiceHost {
   status(): ConnectionStatus;
   guarded<T>(work: () => Promise<T>): Promise<T>;
   ensureConnected(): WASocket;
-  /** The bytes behind a message's media. */
+  /** The bytes behind a message's media, from WhatsApp. */
   mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage): Promise<Buffer>;
+  /** The kept copy of a message's media, or null (src/service/keep.ts): it needs no link. */
+  keptMedia(messageId: string, raw: WAMessage): Promise<Buffer | null>;
   /** The provider run, and its readiness check: the service's, so a test can stub them. */
   transcriber(...args: Parameters<typeof transcribeFile>): ReturnType<typeof transcribeFile>;
   transcribeReadiness(...args: Parameters<typeof transcribeReady>): ReturnType<typeof transcribeReady>;
@@ -224,8 +226,7 @@ export class AccountVoice {
     // Readiness is never ok while no provider is configured.
     const provider = settings.provider!;
     this.views.messageOrThrow(messageId);
-    const sock = this.host.ensureConnected();
-    const buffer = await this.host.mediaBuffer(sock, messageId, raw);
+    const buffer = (await this.host.keptMedia(messageId, raw)) ?? (await this.host.mediaBuffer(this.host.ensureConnected(), messageId, raw));
     this.views.messageOrThrow(messageId);
     // Its own temp dir, deleted straight after: nobody asked to keep this file,
     // and the media dir is where the files the user did ask for live.

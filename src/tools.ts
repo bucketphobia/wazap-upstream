@@ -190,6 +190,7 @@ const MEDIA_OUTPUT = {
   mime: z.string().optional(),
   size: z.number().optional(),
   filename: z.string().optional().describe("The name it was saved under"),
+  source: z.enum(["kept", "whatsapp"]).optional().describe("kept: the copy wazap kept when it arrived; whatsapp: downloaded now"),
   image_attached: z.boolean().optional().describe("The photo, or a small preview of it, is attached"),
   transcript: z
     .object({ text: z.string(), language: z.string().optional(), duration_seconds: z.number().optional(), provider: z.string(), cached: z.boolean() })
@@ -902,7 +903,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "get_media",
     title: "Get the media of a WhatsApp message",
-    description: `What a message's media holds: a voice note or audio as its transcript (kept once made; an API provider bills it), or with save_to its file; a photo attached as an image; any file saved at path on the machine running wazap. MEDIA_UNAVAILABLE: WhatsApp no longer has it.`,
+    description: `What a message's media holds: a voice note or audio as its transcript (kept once made; an API provider bills it), or with save_to its file; a photo attached as an image; any file saved at path on the machine running wazap; a copy kept on arrival answers first. MEDIA_UNAVAILABLE: gone, none kept.`,
     schema: {
       message_id: messageId,
       save_to: z.string().min(1).optional().describe("Absolute directory; default <data-dir>/media. A recording: its file, and no new transcript"),
