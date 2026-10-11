@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.3.8
+
+### Fixed
+
+- **`--qr` is honoured.** `wazap login --qr` was accepted and then ignored; it
+  now picks the QR without asking which way to link (`--code` and `--phone`
+  still win).
+- **The systemd service survives a path with spaces.** `Environment=` and
+  `ExecStart=` values holding spaces or quotes are quoted, so a spaced data
+  dir or Node path no longer produces a broken unit. Units without them stay
+  byte-identical.
+- **`wazap connect` writes the client config atomically.** A run killed
+  mid-write can no longer leave a half-written `claude_desktop_config.json`.
+
+### Security
+
+- **A read-only HTTP credential can no longer file notes.** `remember` (notes,
+  tags such as `#private`, handled marks) answers to the credential's own
+  right to change local state: a read token is refused, a write credential on
+  a read-only server still can. The tool stays registered.
+- **The local `llama-server` answers only to wazap.** Each run gets its own
+  API key, sent with every health and embedding call, so another process on
+  the machine cannot use the loopback endpoint. It needs a llama.cpp from
+  mid-2024 or later; an older one fails at start and recall degrades as it
+  already does. External `WAZAP_EMBED_URL` backends are unchanged.
+- **Key ids from the wire stay inside `auth/`.** Characters that could act as a
+  path separator (`\` on Windows) fold to `_`; the names already on disk,
+  including base64 key ids with `+` and `=`, keep loading.
+
 ## 1.3.7
 
 ### Added
