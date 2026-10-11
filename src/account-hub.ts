@@ -340,6 +340,14 @@ export class AccountHub implements AccountSource {
     wa.onLinked = (linked) => {
       if (this.services.get(account.id) === wa) this.noteOwner(account.id, linked.id);
     };
+    // Scheduled messages go from the server's own services only, each checked against the record on disk then.
+    wa.enableSchedule(() => {
+      try {
+        return this.recordOnDisk(account.id);
+      } catch {
+        return undefined;
+      }
+    });
     this.services.set(account.id, wa);
     this.givenUp.delete(account.id);
     return wa;

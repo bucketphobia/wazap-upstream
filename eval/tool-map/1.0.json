@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "description": "Capabilities the cases assert on, mapped to the tools of wazap 1.x: the 20 of 1.0 (design §D1), and list_contacts since 1.2, which no case asks for yet. One tool serves several capabilities where 1.0 folded tools together: catch_up is the catch-up and who is waiting, read_messages reads stories with chat_id \"status\", get_media downloads and transcribes. `only_when` narrows a tool that serves several capabilities: a get_media call is transcribe only when its answer carries transcript or transcript_unavailable, or the message it names is a voice note or audio; a find_contact call is also read_context when it brought the chat's recent messages, and `seen` holds their texts, so a case can accept that look only when the message it depends on was among them. `normalize` gives each call the portable fields assertions read, so a case written for 0.23 scores the same intent here.",
+  "description": "Capabilities the cases assert on, mapped to the tools of wazap 1.x: the 20 of 1.0 (design §D1), and list_contacts since 1.2, scheduled_messages and reminder since 1.4, which no case asks for yet. One tool serves several capabilities where 1.0 folded tools together: catch_up is the catch-up and who is waiting, read_messages reads stories with chat_id \"status\", get_media downloads and transcribes. `only_when` narrows a tool that serves several capabilities: a get_media call is transcribe only when its answer carries transcript or transcript_unavailable, or the message it names is a voice note or audio; a find_contact call is also read_context when it brought the chat's recent messages, and `seen` holds their texts, so a case can accept that look only when the message it depends on was among them. `normalize` gives each call the portable fields assertions read, so a case written for 0.23 scores the same intent here.",
   "capabilities": {
     "meta": ["learn"],
     "accounts": ["get_status"],
@@ -19,7 +19,9 @@
     "commit": ["confirm_send"],
     "immediate_write": ["react_to_message", "edit_message", "delete_message", "manage_chat", "manage_group"],
     "wait": ["wait_for_messages"],
-    "link": ["link_account"]
+    "link": ["link_account"],
+    "schedule": ["scheduled_messages"],
+    "reminder": ["reminder"]
   },
   "only_when": {
     "transcribe": {
@@ -30,9 +32,9 @@
     }
   },
   "groups": {
-    "write": ["draft", "commit", "immediate_write"],
+    "write": ["draft", "commit", "immediate_write", "schedule"],
     "whatsapp_read": ["catchup", "waiting", "stories", "read", "read_context", "search", "contact", "media", "transcribe", "wait"],
-    "any": ["meta", "accounts", "catchup", "waiting", "stories", "read", "read_context", "search", "contact", "remember", "media", "transcribe", "draft", "commit", "immediate_write", "wait", "link"]
+    "any": ["meta", "accounts", "catchup", "waiting", "stories", "read", "read_context", "search", "contact", "remember", "media", "transcribe", "draft", "commit", "immediate_write", "wait", "link", "schedule", "reminder"]
   },
   "normalize": {
     "chat": ["args.chat_id", "args.group_id", { "tool": "find_contact", "from": "result.contact.chat_id" }],

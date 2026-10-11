@@ -13,7 +13,8 @@ accounts moves into `accounts/default/` the first time a wazap command runs.
     media/          files saved by get_media
     wazap.sqlite    the account database: chats, contacts, messages, reactions,
                     receipts, transcripts, notes, recall vectors, deletion
-                    barriers, the webhook outbox (plus -wal and -shm beside it)
+                    barriers, the webhook outbox, scheduled messages and
+                    reminders (plus -wal and -shm beside it)
     previews/       one small JPEG per photo or video already previewed
     kept/           media kept as it arrived, so get_media outlives WhatsApp's copy
     qr.png          last QR, when login showed one
@@ -67,9 +68,16 @@ only small bounded caches stay in the process.
   **`wazap account remove`** stops the account, closes its database and deletes
   the whole folder with it.
 - **`WAZAP_PERSIST_HISTORY=0`** removes every stored message at each start and
-  stop, whatever `WAZAP_RETENTION` says, and with them every draft and the words
+  stop, whatever `WAZAP_RETENTION` says, and with them every draft (a scheduled
+  message's own attempt aside) and the words
   of every send record; chats, contacts, notes, deletion barriers and the send
-  records themselves stay, and recall is off.
+  records themselves stay, and recall is off. A scheduled message still waiting
+  keeps its words, or it could not be sent after a restart; a closed one loses
+  them. Reminders stay, like notes.
+- **Scheduled messages and reminders** (schema 6) are rows in the account
+  database, so they survive a restart and follow the number: a different
+  number linking sets them aside with the rest. A sent one keeps no words; a
+  closed one, and a fired, skipped or cancelled reminder, goes a week later.
 - **A schema upgrade copies the file first.** When a start finds a database an
   older wazap wrote, it writes `wazap.<old version>.pre-migration.sqlite` beside
   it — the file as it was, whole — and only then migrates. If the copy cannot be

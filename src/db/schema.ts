@@ -857,6 +857,72 @@ INSERT INTO meta(key, value) SELECT 'flags_backfill_before', CAST(max(id) + 1 AS
 `;
 // ---- end v5 ----------------------------------------------------------------
 
+// ---- v6: scheduled messages and reminders ----------------------------------
+// Self-contained and additive: two tables and their indexes, both empty on a
+// file upgraded from an earlier version.
+/**
+ * - scheduled: a draft confirm_send scheduled instead of sending. draft_id is
+ *   that draft's id (unique, so a repeated confirm answers the same schedule);
+ *   key_id the WhatsApp key it was drafted with, which it goes out under.
+ *   payload is the frozen draft (the sends row's), emptied to '{}' once sent.
+ *   state: pending (waiting for send_at, or next_attempt_at after a failure
+ *   that may pass), sending (a send row, send_id, was made and confirmed; one
+ *   a crash left is settled from that row when the database is next served),
+ *   then sent, unknown (handed to WhatsApp, arrival not known), failed (a
+ *   failure no retry fixes), missed (not sent by send_at plus the grace
+ *   window) or cancelled, for good. reported_at: when a webhook event about
+ *   the outcome was queued.
+ * - reminders: a note about a chat, due at due_at. condition no_reply holds
+ *   while no message of someone else's reached the chat after the reminder was
+ *   made: since_seq is the newest stored_seq then, and since_ts its time.
+ *   state: pending, fired (posted to the webhook, or due with it off: outcome
+ *   says which), skipped (someone replied) or cancelled.
+ */
+const V6 = `
+CREATE TABLE scheduled(
+  id TEXT PRIMARY KEY,
+  draft_id TEXT NOT NULL UNIQUE,
+  owner TEXT,
+  chat_jid TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  key_id TEXT NOT NULL UNIQUE,
+  send_at INTEGER NOT NULL,
+  time_zone TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'sent', 'unknown', 'failed', 'missed', 'cancelled')),
+  send_id TEXT,
+  message_id TEXT,
+  error_code TEXT,
+  error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER,
+  reported_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX scheduled_due ON scheduled(send_at) WHERE state = 'pending';
+CREATE INDEX scheduled_state ON scheduled(state, updated_at);
+
+CREATE TABLE reminders(
+  id TEXT PRIMARY KEY,
+  owner TEXT,
+  chat_jid TEXT NOT NULL,
+  note TEXT NOT NULL,
+  condition TEXT NOT NULL CHECK (condition IN ('always', 'no_reply')),
+  due_at INTEGER NOT NULL,
+  time_zone TEXT,
+  since_seq INTEGER NOT NULL,
+  since_ts INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'fired', 'skipped', 'cancelled')),
+  outcome TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX reminders_due ON reminders(due_at) WHERE state = 'pending';
+CREATE INDEX reminders_state ON reminders(state, updated_at);
+`;
+// ---- end v6 ----------------------------------------------------------------
+
 /** Every migration, in order. The schema version a build knows is the last one's. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1 },
@@ -864,6 +930,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 3, sql: V3 },
   { version: 4, sql: V4 },
   { version: 5, sql: V5 },
+  { version: 6, sql: V6 },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

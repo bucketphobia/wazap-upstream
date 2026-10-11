@@ -139,8 +139,8 @@ for (const from of [1, 2, 3, 4]) {
   test(`a version ${from} file, written through the released migrations, upgrades to v5 with its messages intact and its marks worked out`, async () => {
     const { path, ids } = releasedFile(from);
     const db = AccountDb.open(path, { now: () => T0 + DAY, checkpointDelayMs: 0 });
-    assert.equal(SCHEMA_VERSION, 5);
-    assert.equal(db.schemaVersion, 5);
+    assert.ok(SCHEMA_VERSION >= 5);
+    assert.equal(db.schemaVersion, SCHEMA_VERSION);
     assert.ok(db.getMeta("migrated_v5") !== null);
 
     // Nothing it held moved or changed.
@@ -192,7 +192,7 @@ for (const from of [1, 2, 3, 4]) {
 
 test("a new file starts at v5 with no backfill owed", () => {
   const { db } = openTemp();
-  assert.equal(db.schemaVersion, 5);
+  assert.equal(db.schemaVersion, SCHEMA_VERSION);
   assert.equal(db.getMeta("flags_backfill_before"), null);
   assert.equal(db.messages.flagsBackfillPending(), false);
   db.close();

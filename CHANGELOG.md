@@ -12,6 +12,25 @@
   back, and when WhatsApp unlinked the device. It is kept across the restart
   wazap asks its supervisor for (`accounts/<id>/link.json`), so it is told
   once. `get_status` shows the same under `link`.
+- **Scheduled messages.** `send_message` takes `send_at` (a wall-clock time in
+  `time_zone`, the server's by default, or a time with its offset), and the
+  preview shows the exact time with its zone and UTC offset. `confirm_send` on
+  that draft is the yes that schedules it; no confirm sends it early. At its
+  time it goes through the same send as any confirm, so the account's record on
+  disk, the read-only switch, the send rules and the write rate limit are
+  checked again then. One not sent within 15 minutes of its time (wazap down,
+  link down) is missed and reported, never sent late or in a burst after a
+  restart; a send a crash interrupted is settled from its send record. The new
+  `scheduled_messages` tool (write) lists and cancels them.
+- **Reminders.** The new `reminder` tool (local, like `remember`) keeps "remind
+  me if Ana has not answered in 2 days": `create`, `list`, `cancel`, with
+  `condition` `no_reply` skipping one once someone wrote in the chat. A due
+  reminder is posted to the webhook as the new `reminder` event.
+- **Webhook events `reminder` and `scheduled`**, posted only when named in
+  `WAZAP_WEBHOOK_EVENTS` (`all` keeps meaning the three it always named, as
+  with `alert`: `all,reminder,scheduled`); the second tells what became of
+  each scheduled message, without its words.
+- Error codes `INVALID_TIME`, `SCHEDULE_NOT_FOUND` and `SCHEDULE_FULL`.
 
 ### Changed
 
@@ -26,6 +45,9 @@
   a throttled Background one, and the systemd units set
   `StartLimitIntervalSec=0`. Run `wazap service install` again to rewrite an
   installed unit.
+- The account database moves to schema 6 (two new tables). The upgrade copies
+  the file first, as every schema upgrade does; an older wazap refuses the
+  upgraded file.
 
 ### Fixed
 

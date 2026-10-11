@@ -1,6 +1,7 @@
 /**
- * W1 outbound webhook: three live events (`message_received`, `message_sent`
- * and `connection`), of which only `message_received` is posted unless
+ * W1 outbound webhook: six live events (`message_received`, `message_sent`,
+ * `connection`, the owner's `alert`, and the owner's own `reminder` and
+ * `scheduled`), of which only `message_received` is posted unless
  * `WAZAP_WEBHOOK_EVENTS` asks for more. Global URL, secret, event list, chat
  * allowlist, coalescing window and the optional 401 retry live in `.env`; an
  * account may override any of them. This module is the settings, the payloads
@@ -19,11 +20,12 @@ import { discardResponse } from "./http-response.js";
 import { withCode } from "./error-code.js";
 import type { ConnectionStatus, HealthState, MessageType, MessageView, WebhookDelivery, WebhookInfo } from "./wa-types.js";
 
-export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection", "alert"] as const;
+export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection", "alert", "reminder", "scheduled"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 /**
  * What `all` asks for: the events it named when it was introduced. An integration that wrote `all`
- * routes on those, so a newer event, `alert` among them, is asked for by name (`all,alert`).
+ * routes on those, so a newer event, `alert` among them, is asked for by name (`all,alert`). So are
+ * `reminder` and `scheduled`: a receiver set to `all` is never handed a reminder about a chat it might answer.
  */
 export const WEBHOOK_EVENTS_ALL: readonly WebhookEvent[] = ["message_received", "message_sent", "connection"];
 
@@ -199,6 +201,24 @@ export interface WebhookConnectionPayload {
   health?: WebhookHealth;
 }
 
+/** A reminder the owner set with the `reminder` tool, now due (src/service/schedule.ts). */
+export interface WebhookReminderPayload {
+  event: "reminder";
+  reminder_id: string;
+  chat_id: string;
+  /** Who the chat is, as the account names them when the reminder fires. */
+  chat_name: string;
+  /** The owner's own words, as the reminder was set. */
+  note: string;
+  condition: "always" | "no_reply";
+  /** When it was due, and when it was set: ISO 8601, UTC. */
+  due_at: string;
+  created_at: string;
+  timestamp: string;
+  account_id: string;
+  account_name: string;
+}
+
 /**
  * The link has been down past the alert threshold, is back after such an alert, or needs linking
  * again because WhatsApp unlinked the device. For the owner, not for an agent to answer.
@@ -221,7 +241,30 @@ export interface WebhookAlertPayload {
   account_name: string;
 }
 
-export type WebhookPayload = WebhookMessagePayload | WebhookConnectionPayload | WebhookAlertPayload;
+/** What became of a scheduled message: sent, unknown, failed or missed. Never its words. */
+export interface WebhookScheduledPayload {
+  event: "scheduled";
+  schedule_id: string;
+  state: "sent" | "unknown" | "failed" | "missed";
+  chat_id: string;
+  chat_name: string;
+  /** When it was to go, ISO 8601, UTC. */
+  send_at: string;
+  /** The sent message, when it went. */
+  message_id: string | null;
+  error_code: string | null;
+  error: string | null;
+  timestamp: string;
+  account_id: string;
+  account_name: string;
+}
+
+export type WebhookPayload =
+  | WebhookMessagePayload
+  | WebhookConnectionPayload
+  | WebhookAlertPayload
+  | WebhookReminderPayload
+  | WebhookScheduledPayload;
 
 /** The preview and whether it had to be cut, so the payload never decides twice. */
 export interface WebhookText {
@@ -579,6 +622,8 @@ export function describeWebhookEvents(events: readonly WebhookEvent[]): string {
     message_sent: "messages you send from your phone or another device",
     connection: "link changes",
     alert: "outage alerts",
+    reminder: "your reminders when they are due",
+    scheduled: "what became of your scheduled messages",
   };
   const list = events.map((event) => phrases[event]);
   if (list.length <= 1) return list[0] ?? "nothing";
@@ -900,6 +945,35 @@ function testPayload(event: WebhookEvent, account?: Pick<WebhookAccount, "id" | 
   if (event === "connection") return { event, status: "linked", timestamp: now, ...named, health: { state: "ok", until: null, reason: null } };
   if (event === "alert") {
     return { event, alert: "recovered", status: "linked", timestamp: now, down_since: now, down_for_seconds: 0, reason: null, fix: ALERT_FIX.recovered, ...named };
+  }
+  if (event === "reminder") {
+    return {
+      event,
+      reminder_id: "test",
+      chat_id: "test@s.whatsapp.net",
+      chat_name: "wazap",
+      note: "wazap webhook test",
+      condition: "always",
+      due_at: now,
+      created_at: now,
+      timestamp: now,
+      ...named,
+    };
+  }
+  if (event === "scheduled") {
+    return {
+      event,
+      schedule_id: "test",
+      state: "sent",
+      chat_id: "test@s.whatsapp.net",
+      chat_name: "wazap",
+      send_at: now,
+      message_id: "test",
+      error_code: null,
+      error: null,
+      timestamp: now,
+      ...named,
+    };
   }
   return {
     event,

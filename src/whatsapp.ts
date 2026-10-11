@@ -39,7 +39,7 @@ import { momentsOf } from "./store.js";
 import { isoWithOffset, mediaInfo, messageIdFor, protoNumber } from "./messages.js";
 import { PAIRING_TIMEOUT_MS, WA_BROWSER, prettyCode, socketFactory, startPairing } from "./pairing.js";
 import { transcribeFile, transcribeReady } from "./transcribe/index.js";
-import { DraftStore, type DraftPayload, type DraftView } from "./drafts.js";
+import { DraftStore, type DraftPayload, type DraftSchedule, type DraftView } from "./drafts.js";
 import { READ_MARK_MULTIPLIER, RateLimiter } from "./ratelimit.js";
 import { maskNumber } from "./ui.js";
 import { AccountChats } from "./service/chats.js";
@@ -53,6 +53,7 @@ import { LINK_FILE, LinkMonitor, type ProbeResult } from "./service/link.js";
 import { AccountMedia } from "./service/media.js";
 import { AccountRecall } from "./service/recall.js";
 import { AccountReads } from "./service/reads.js";
+import { AccountSchedule } from "./service/schedule.js";
 import { AccountSends, type SendAttempt } from "./service/send.js";
 import { AccountStorage } from "./service/storage.js";
 import { MessageViews } from "./service/views.js";
@@ -84,11 +85,14 @@ import type {
   MediaSource,
   MessageType,
   MessageView,
+  NewReminderInput,
   PairingInfo,
   PrivateRule,
   ParticipantResult,
   RecallAnswer,
   RecentConversation,
+  ReminderView,
+  ScheduledView,
   SentMessage,
   StatusInfo,
   SyncState,
@@ -240,6 +244,8 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly chats: AccountChats;
   /** What the account posts to the webhook, and its status (src/service/webhooks.ts). */
   private readonly webhooks: AccountWebhooks;
+  /** Scheduled messages and reminders, and the timer that runs them (src/service/schedule.ts). */
+  private readonly schedule: AccountSchedule;
   /** Lid chats still folding into their number's chat; list_chats lets them land. */
   private readonly folds = new Set<Promise<unknown>>();
   private stopPromise: Promise<void> | null = null;
@@ -351,6 +357,7 @@ export class WhatsAppService implements WhatsAppApi {
         storeRaw: (raw, chatJid, live) => this.ingest.storeRaw(raw, chatJid, live),
         kept: (result) => this.ingest.kept(result),
         embedFeed: () => this.recallIndex.embedFeed,
+        keepsHistory: () => this.config.persistHistory,
         refuseNewChat: async (jid, sock) => {
           if (!this.health.blocksNewChats()) return;
           if (this.heardFrom(jid) || (await hasPrivacyToken(sock, jid))) return;
@@ -537,6 +544,23 @@ export class WhatsAppService implements WhatsAppApi {
       this.voice,
       account
     );
+    this.schedule = new AccountSchedule(
+      {
+        readyDb: () => this.storage.readyDb(),
+        db: () => this.storage.db,
+        stopped: () => this.stopped,
+        guarded: (work) => this.guarded(work),
+        connectedSince: () => (this.status === "connected" ? this.statusSince : null),
+        readOnly: () => this.effectiveReadOnly,
+        confirm: (draftId, owner, notAfter) => this.sends.confirm(draftId, owner, { scheduled: true, notAfter }),
+        scheduleDraft: (draftId, owner) => this.sends.scheduleDraft(draftId, owner),
+        resolveId: (chatId) => this.identity.resolveId(chatId),
+        displayName: (jid) => this.identity.displayName(jid),
+        webhook: () => this.webhook,
+        outbox: () => this.outbox,
+      },
+      account
+    );
     // Only the server keeps the outage record and alerts; a short-lived command would only muddle both.
     this.linkWatch = new LinkMonitor(
       {
@@ -647,6 +671,8 @@ export class WhatsAppService implements WhatsAppApi {
     this.releaseWaiters();
     this.waits.wakeArrivalWaiters();
     this.teardownSocket();
+    // A scheduled send under way fails fast without its socket, and its row is written before the database closes.
+    await this.schedule.stop();
     await this.outbox.stop();
     await this.stopPairing();
     await this.ingest.historyIdle();
@@ -663,9 +689,16 @@ export class WhatsAppService implements WhatsAppApi {
       await this.storage.fileWork.catch(() => {});
       // An account that keeps no history forgets it when it stops, as it did when nothing reached the disk.
       if (!this.config.persistHistory && this.storage.storageState === "ready") {
+        // A reply a no-reply reminder is waiting for goes with the purge: the reminder learns of it first.
+        try {
+          db.schedule.settleReplied(Date.now());
+        } catch (err) {
+          logError("reminders", err);
+        }
         await db.messages.purgeLive().catch((err: unknown) => logError("history purge", err));
         try {
           db.sends.forgetWords();
+          db.schedule.forgetWords();
         } catch (err) {
           logError("send record", err);
         }
@@ -863,6 +896,8 @@ export class WhatsAppService implements WhatsAppApi {
     this.statusSince = Date.now();
     this.webhooks.queueConnectionWebhook(next);
     this.linkWatch.noteStatus(next);
+    // Scheduled messages that waited for the link go now; reminders waiting for no reply look once it settles.
+    if (next === "connected") this.schedule.kick();
     // Notes that waited for the connection run now rather than at the worker's next look.
     if (next === "connected" && this.voice.autoTranscribe) {
       this.voice.backfillTranscripts();
@@ -914,6 +949,8 @@ export class WhatsAppService implements WhatsAppApi {
     if (this.status === "logged_out") {
       hints.push("WhatsApp unlinked this device: link it again with link_account, or run `npx wazap-mcp logout` then `npx wazap-mcp login`.");
     }
+    const scheduled = this.schedule.statusHint();
+    if (scheduled !== null) hints.push(scheduled);
     if (this.storage.storageState === "preparing") {
       hints.push("The account is preparing its database from its earlier message files (once, after an upgrade); tools answer NOT_CONNECTED until it is done.");
     }
@@ -1143,8 +1180,52 @@ export class WhatsAppService implements WhatsAppApi {
     await Promise.race([Promise.allSettled([...this.folds]), sleep(FOLD_SETTLE_MS, undefined, { ref: false })]);
   }
 
-  draft(payload: DraftPayload, owner?: string): Promise<DraftView> {
-    return this.sends.draft(payload, owner);
+  draft(payload: DraftPayload, owner?: string, schedule?: DraftSchedule): Promise<DraftView> {
+    return this.sends.draft(payload, owner, schedule);
+  }
+
+  /**
+   * Runs the account's scheduled messages and reminders, each send checked
+   * against `record` (accounts.json as it is then). The hub calls it for the
+   * services it serves; a short-lived command never does.
+   */
+  enableSchedule(record: () => AccountRecord | undefined): void {
+    this.schedule.enable(record);
+  }
+
+  scheduleDelivery(): { webhook: boolean; reminder: boolean; scheduled: boolean } {
+    const settings = this.webhook.settings();
+    if (settings.kind !== "ready") return { webhook: false, reminder: false, scheduled: false };
+    return { webhook: true, reminder: settings.events.includes("reminder"), scheduled: settings.events.includes("scheduled") };
+  }
+
+  /** Test barrier, off the WhatsAppApi like transcribeIdle: the scheduler looks now, and finishes. */
+  scheduleIdle(): Promise<void> {
+    return this.schedule.settle();
+  }
+
+  confirmSchedule(draftId: string, owner?: string): Promise<ScheduledView> {
+    return this.schedule.confirmSchedule(draftId, owner);
+  }
+
+  listScheduled(includeClosed: boolean, limit: number): Promise<ScheduledView[]> {
+    return this.schedule.listScheduled(includeClosed, limit);
+  }
+
+  cancelScheduled(scheduleId: string): Promise<{ cancelled: boolean; scheduled: ScheduledView }> {
+    return this.schedule.cancelScheduled(scheduleId);
+  }
+
+  addReminder(input: NewReminderInput, owner?: string): Promise<ReminderView> {
+    return this.schedule.addReminder(input, owner);
+  }
+
+  listReminders(includeClosed: boolean, limit: number): Promise<ReminderView[]> {
+    return this.schedule.listReminders(includeClosed, limit);
+  }
+
+  cancelReminder(reminderId: string): Promise<{ cancelled: boolean; reminder: ReminderView }> {
+    return this.schedule.cancelReminder(reminderId);
   }
 
   confirm(draftId: string, owner?: string): Promise<SentMessage> {

@@ -11,7 +11,7 @@ import { MAX_DESCRIPTION_CHARS, MAX_LIST_TOKENS, measureToolBudget } from "../sc
 
 test("a session that can write lists its tools within the token budget", async () => {
   const report = await measureToolBudget({ allowWrite: true });
-  assert.equal(report.tools, 21);
+  assert.equal(report.tools, 23);
   assert.ok(report.list_tokens <= MAX_LIST_TOKENS, `${report.list_tokens} tokens, over ${MAX_LIST_TOKENS}`);
 });
 
@@ -31,8 +31,9 @@ test("account_id is named on each tool and explained once, in the server's instr
   assert.match(skillInstructions(loadSkills()), /account_id/);
 });
 
-test("a session without writes lists the reads and remember", async () => {
+test("a session without writes lists the reads, remember and reminder", async () => {
   const report = await measureToolBudget({ allowWrite: false });
-  assert.equal(report.tools, 14);
+  assert.equal(report.tools, 15);
+  assert.ok(report.raw.some((tool) => tool.name === "reminder"));
   assert.ok(report.raw.some((tool) => tool.name === "remember"));
 });

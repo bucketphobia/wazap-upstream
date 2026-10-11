@@ -73,6 +73,7 @@ import { Identity } from "./identity.js";
 import { Merger } from "./merge.js";
 import { Messages, type ScrubQuote } from "./messages.js";
 import { Search } from "./search.js";
+import { Schedule } from "./schedule.js";
 import { Sends } from "./sends.js";
 import { Transcripts } from "./transcripts.js";
 import type { BulkDeleteResult, Counts, MergeReport } from "./types.js";
@@ -98,6 +99,8 @@ export type { AddressBookEntry, AddressBookInput, AddressBookKey, AddressBookOrd
 export { DIMINUTIVES, INFLECTIONS, RELATIONSHIPS, diminutivesOf, inflectionForms, nameWords, relationOf, relationNameMatch } from "./names.js";
 export type { NewDraft, SendRecord, SendState, Sends } from "./sends.js";
 export { SENT_KEYS_RETENTION_MS } from "./sends.js";
+export { SCHEDULE_KEEP_CLOSED_MS } from "./schedule.js";
+export type { NewReminder, NewScheduled, ReminderCondition, ReminderRecord, ReminderState, Schedule, ScheduledRecord, ScheduledState } from "./schedule.js";
 export { TRANSCRIBE_MAX_ATTEMPTS, TRANSCRIBE_QUEUE_MAX_AGE_MS } from "./transcripts.js";
 export type { ProviderClass, TranscribeItem, TranscribeQueueStats, TranscribeState } from "./transcripts.js";
 export type { EventInput, EventRecord, EventState, EventStats } from "./events.js";
@@ -166,6 +169,8 @@ export class AccountDb {
   readonly search: Search;
   readonly vectors: Vectors;
   readonly sends: Sends;
+  /** Scheduled messages and reminders (v6); see src/schedule.ts for who runs them. */
+  readonly schedule: Schedule;
   readonly transcripts: Transcripts;
   /** The webhook outbox; see src/webhook-outbox.ts for who posts it. */
   readonly events: Events;
@@ -183,6 +188,7 @@ export class AccountDb {
     this.search = new Search(connection, this.identity, this.messages);
     this.vectors = new Vectors(connection, this.identity, this.messages, this.search);
     this.sends = new Sends(connection);
+    this.schedule = new Schedule(connection);
     this.transcripts = new Transcripts(connection, this.messages);
     this.events = new Events(connection);
     this.catchup = new CatchupMarks(connection);

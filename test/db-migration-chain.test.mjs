@@ -278,7 +278,7 @@ const upgrade = (path, options = {}) => AccountDb.open(path, { checkpointDelayMs
 // ------------------------------------------------------- the schema itself
 
 test("every released version is named here, so a new migration cannot ship without a chain test", () => {
-  assert.deepEqual(RELEASED, [1, 2, 3, 4, 5]);
+  assert.deepEqual(RELEASED, [1, 2, 3, 4, 5, 6]);
   assert.equal(SCHEMA_VERSION, RELEASED[RELEASED.length - 1]);
 });
 

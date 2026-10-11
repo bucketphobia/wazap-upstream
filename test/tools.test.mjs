@@ -32,6 +32,7 @@ const READ_TOOLS = [
   "catch_up",
   "wait_for_messages",
   "remember",
+  "reminder",
 ];
 
 const WRITE_TOOLS = [
@@ -42,14 +43,15 @@ const WRITE_TOOLS = [
   "delete_message",
   "manage_chat",
   "manage_group",
+  "scheduled_messages",
 ];
 
-test("the registry is exactly the 21 documented tools, 14 of them in a session without writes", () => {
+test("the registry is exactly the 23 documented tools, 15 of them in a session without writes", () => {
   assert.deepEqual([...TOOL_NAMES].sort(), [...READ_TOOLS, ...WRITE_TOOLS].sort());
-  assert.equal(TOOL_NAMES.length, 21);
-  assert.equal(TOOL_COUNT, 21);
-  assert.equal(READ_TOOLS.length, 14);
-  assert.equal(READ_TOOL_COUNT, 14);
+  assert.equal(TOOL_NAMES.length, 23);
+  assert.equal(TOOL_COUNT, 23);
+  assert.equal(READ_TOOLS.length, 15);
+  assert.equal(READ_TOOL_COUNT, 15);
 });
 
 test("read-only registration exposes no write tool at all", () => {
@@ -538,6 +540,8 @@ test("each tool's annotations are true of its most far-reaching action: get_medi
     react_to_message: "0011",
     manage_chat: "0101",
     manage_group: "0101",
+    scheduled_messages: "0010",
+    reminder: "0000",
   });
 });
 

@@ -4,6 +4,7 @@ import { styleCheckLines, type StyleCheck } from "./draft-style.js";
 import { WazapError } from "./errors.js";
 import { isoWithOffset } from "./messages.js";
 import { captionTravels, mimeOfSource } from "./outgoing-media.js";
+import { describeInstant } from "./schedule-time.js";
 import type { MediaSource, OutgoingTarget, SentMessage } from "./wa-types.js";
 
 export const DRAFT_TTL_MS = 15 * 60_000;
@@ -30,6 +31,8 @@ export type DraftPayload =
       asDocument: boolean;
       asVoice: boolean;
       asGif: boolean;
+      /** A scheduled media draft: the file's SHA-256 when the user approved it; another file at that path is refused. */
+      sha256?: string;
     }
   | { kind: "poll"; chatId: string; question: string; options: string[]; multiSelect: boolean }
   | {
@@ -42,6 +45,16 @@ export type DraftPayload =
     }
   | { kind: "forward"; chatId: string; messageId: string; text?: string };
 
+/**
+ * When a draft is to go, if not at its confirm: the instant, and the zone the
+ * user was shown it in. A draft that carries one is scheduled by confirm_send,
+ * never sent by it.
+ */
+export interface DraftSchedule {
+  at: number;
+  zone: string;
+}
+
 export interface Draft {
   id: string;
   to: OutgoingTarget;
@@ -50,6 +63,7 @@ export interface Draft {
   payload: DraftPayload;
   /** The WhatsApp key the draft goes out under, fixed when it is made. */
   keyId: string;
+  schedule?: DraftSchedule;
 }
 
 export interface DraftView {
@@ -66,6 +80,9 @@ export interface DraftView {
   unnamed_recipient?: boolean;
   expires_at: string;
   kind: DraftKind;
+  /** A scheduled draft: when confirm_send has it sent, ISO in time_zone, and that zone. */
+  send_at?: string;
+  time_zone?: string;
   /**
    * A text draft to a direct chat, against how the user writes there: the
    * mismatches found (none is fine) and what they were measured on. Absent
@@ -78,10 +95,11 @@ export interface DraftView {
 export type Claim = { state: "claimed"; draft: Draft } | { state: "sent"; receipt: SentMessage };
 
 /** What a draft row keeps besides its columns. */
-interface FrozenDraft {
+export interface FrozenDraft {
   to: OutgoingTarget;
   preview: string;
   payload: DraftPayload;
+  schedule?: DraftSchedule;
 }
 
 export function draftNotFound(id: string): WazapError {
@@ -199,18 +217,26 @@ export class DraftStore {
     private readonly accountCap: number = DRAFT_ACCOUNT_CAP
   ) {}
 
-  put(sends: Sends, to: OutgoingTarget, payload: DraftPayload, keyId: string, owner: string | null = null): Draft {
+  put(
+    sends: Sends,
+    to: OutgoingTarget,
+    payload: DraftPayload,
+    keyId: string,
+    owner: string | null = null,
+    schedule?: DraftSchedule
+  ): Draft {
     const now = this.now();
     this.sweep(sends);
     const draft: Draft = {
       id: `d_${randomUUID().replaceAll("-", "").slice(0, 16)}`,
       to,
-      preview: formatDraftPreview(to, payload),
+      preview: formatDraftPreview(to, payload, schedule),
       expiresAt: now + this.ttlMs,
       payload,
       keyId,
+      ...(schedule === undefined ? {} : { schedule }),
     };
-    const frozen: FrozenDraft = { to, preview: draft.preview, payload };
+    const frozen: FrozenDraft = { to, preview: draft.preview, payload, ...(schedule === undefined ? {} : { schedule }) };
     sends.insertDraft(
       {
         draftId: draft.id,
@@ -288,6 +314,10 @@ export class DraftStore {
       expires_at: isoWithOffset(draft.expiresAt),
       kind: draft.payload.kind,
     };
+    if (draft.schedule !== undefined) {
+      view.send_at = describeInstant(draft.schedule.at, draft.schedule.zone).iso;
+      view.time_zone = draft.schedule.zone;
+    }
     if (looksUnnamed(draft.to)) view.unnamed_recipient = true;
     return view;
   }
@@ -314,7 +344,17 @@ function draftOf(row: SendRecord): Draft {
     expiresAt: row.expiresAt,
     payload: frozen.payload,
     keyId: row.keyId,
+    ...(frozen.schedule === undefined ? {} : { schedule: frozen.schedule }),
   };
+}
+
+/** The schedule a stored draft carries, if any: what tells a draft to schedule from one to send. */
+export function frozenSchedule(row: Pick<SendRecord, "payload">): DraftSchedule | undefined {
+  try {
+    return (JSON.parse(row.payload) as Partial<FrozenDraft>).schedule;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -382,8 +422,9 @@ export function withMentionTokens(text: string, jids: readonly string[]): string
   return result;
 }
 
-export function formatDraftPreview(to: OutgoingTarget, payload: DraftPayload): string {
-  return `${formatToLine(to)}\n${formatBody(payload)}`;
+export function formatDraftPreview(to: OutgoingTarget, payload: DraftPayload, schedule?: DraftSchedule): string {
+  const when = schedule === undefined ? "" : `\nScheduled: ${describeInstant(schedule.at, schedule.zone).label}`;
+  return `${formatToLine(to)}${when}\n${formatBody(payload)}`;
 }
 
 export function renderDraft(view: DraftView): string {
@@ -396,7 +437,12 @@ export function renderDraft(view: DraftView): string {
   }
   const style = styleCheckLines(view.style_check);
   if (style.length > 0) lines.push("", ...style);
-  lines.push("", "Show this to the user. After they say yes, call confirm_send with this draft_id.");
+  lines.push(
+    "",
+    view.send_at === undefined
+      ? "Show this to the user. After they say yes, call confirm_send with this draft_id."
+      : "Show this to the user, the time included. After they say yes, call confirm_send with this draft_id: it schedules the message, and nothing is sent before that time."
+  );
   return lines.join("\n");
 }
 

@@ -136,7 +136,7 @@ test("a version 1 file, as 0.22 ships it, upgrades to the schema a new file gets
   const fresh = join(tempDir(), "fresh", "wazap.sqlite");
   AccountDb.open(fresh).close();
   assert.deepEqual(schemaOf(old), schemaOf(fresh));
-  assert.equal(SCHEMA_VERSION, 5);
+  assert.equal(SCHEMA_VERSION, 6);
 
 });
 

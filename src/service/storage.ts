@@ -282,8 +282,14 @@ export class AccountStorage {
       await this.importLateBeta(db);
       if (this.host.stopped() || !db.isOpen) return;
       if (!this.config.persistHistory) {
+        try {
+          db.schedule.settleReplied(Date.now());
+        } catch (err) {
+          logError("reminders", err);
+        }
         await db.messages.purgeLive();
         db.sends.forgetWords();
+        db.schedule.forgetWords();
       }
       this.storageState = "ready";
     } catch (err) {

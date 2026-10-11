@@ -15,7 +15,7 @@
 
 **wazap** is an MCP server for your own WhatsApp account. It links as a device,
 the way WhatsApp Web does, keeps what it sees on your machine, and gives any
-MCP client — Claude, ChatGPT, Gemini, Cursor, Codex — 21 tools over your chats,
+MCP client — Claude, ChatGPT, Gemini, Cursor, Codex — 23 tools over your chats,
 messages, media, contacts and groups.
 
 You stop opening WhatsApp to find things and ask instead:
@@ -99,7 +99,7 @@ the same code, so a Claude Desktop user never needs a terminal.
 Several WhatsApp accounts can live in one wazap (`wazap account add <id>`, then
 `wazap login --account <id>`); see [docs/accounts.md](docs/accounts.md).
 
-## The 21 tools
+## The 23 tools
 
 What every argument means, and every error code, is in
 [docs/tools.md](docs/tools.md). The assistant gets all of it by calling `learn`.
@@ -120,13 +120,24 @@ What every argument means, and every error code, is in
 | `get_media` | read | A voice note as its transcript, a photo as an image, any file saved to disk; served from the copy kept on arrival first. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, with a cursor so nothing is missed between calls. |
 | `remember` | local | A note, tags or details about a person, kept on this machine. Nothing changes on WhatsApp. |
-| `send_message` | write | Draft a message, media, poll, location or forward — and send nothing. |
-| `confirm_send` | write | Send that draft, once, after the user has seen the preview and said yes. |
+| `send_message` | write | Draft a message, media, poll, location or forward — and send nothing. `send_at` drafts it for a later time. |
+| `confirm_send` | write | Send that draft, once, after the user has seen the preview and said yes; a draft for later is scheduled. |
 | `edit_message` | write | Edit your own message, within WhatsApp's 15-minute window. |
 | `react_to_message` | write | Add or remove an emoji reaction. |
 | `delete_message` | write | Delete for everyone (your own message, or anyone's in a group you admin), or only on this account. |
 | `manage_chat` | write | Archive, pin, mute, mark read or unread, star, clear, delete, block. |
 | `manage_group` | write | Create, join, rename, add, remove, promote, invite links, join requests, settings, leave. |
+| `scheduled_messages` | write | List the scheduled messages (sent, missed, failed too) or cancel one before it goes. |
+| `reminder` | local | "Remind me if Ana has not answered in 2 days": set, list or cancel; posted to your webhook when due. |
+
+**Scheduled messages and reminders.** `send_message` with `send_at` ("tomorrow
+at 9" as `2026-10-12T09:00` in `Europe/Bucharest`) drafts a message for later;
+the user's yes to that preview, time included, schedules it, and every send
+check runs again when it goes. One wazap could not send within 15 minutes of
+its time is reported as missed, never sent late. `reminder` keeps "remind me if
+Ana has not answered in 2 days" and posts it to your webhook when due. Both
+survive restarts; see [Scheduling a message](docs/tools.md#scheduling-a-message)
+and [Reminders](docs/tools.md#reminders).
 
 Two features are off by default and can run entirely on your machine:
 **voice transcription** with whisper.cpp ([docs/voice.md](docs/voice.md)) and
@@ -309,7 +320,7 @@ What the 1.x line promises not to break is in [docs/stability.md](docs/stability
 | | |
 | --- | --- |
 | [docs/install.md](docs/install.md) | `setup` step by step, each client, the background service, `expose`, upgrading, skills |
-| [docs/tools.md](docs/tools.md) | The 21 tools in full, the workflows, every error code |
+| [docs/tools.md](docs/tools.md) | The 23 tools in full, the workflows, every error code |
 | [docs/accounts.md](docs/accounts.md) | Several WhatsApp accounts, several MCP clients on one server |
 | [docs/voice.md](docs/voice.md) | Voice notes as text: whisper.cpp locally, or an OpenAI-compatible API |
 | [docs/recall.md](docs/recall.md) | Semantic search with a local embedding model |

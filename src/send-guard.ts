@@ -150,6 +150,8 @@ interface DraftRef {
   at: number;
   /** The identity that created this draft (a credential's on HTTP, an opaque session id otherwise); never supplied by a caller. */
   owner?: string;
+  /** Drafted with send_at: confirm_send schedules it and never sends it at once. */
+  scheduled?: boolean;
 }
 
 /** Drafts no confirm has reached yet, oldest first. */
@@ -170,7 +172,7 @@ function trim(map: Map<string, DraftRef>, ttlMs: number, cap: number, now: numbe
 export function noteDraftTarget(view: DraftView, accountId: string, owner?: string): void {
   const now = Date.now();
   trim(draftTargets, DRAFT_TTL_MS, DRAFT_TARGETS_CAP, now);
-  draftTargets.set(view.draft_id, { accountId, target: view.to, at: now, owner });
+  draftTargets.set(view.draft_id, { accountId, target: view.to, at: now, owner, ...(view.send_at === undefined ? {} : { scheduled: true }) });
 }
 
 /** A confirm reached this draft: its route lasts as long as its send record. */
