@@ -17,7 +17,7 @@ const hour = 3_600_000;
 
 function setup(config = {}) {
   const { svc, sock } = connectedService(WhatsAppService, { prefix: "wazap-daily-", id: ME, name: "Răzvan", config });
-  const { tools, call } = schemaCheckedTools(svc, { allowWrite: false });
+  const { tools, call } = schemaCheckedTools(svc, { allowWrite: false, allowLocalEdits: true });
   let seq = 0;
   const arrive = (chat, text, { fromMe = false, participant, at = Date.now() } = {}) => {
     const id = `M${++seq}`;

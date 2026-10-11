@@ -354,7 +354,7 @@ test("remember is a local tool: registered without writes, off WhatsApp entirely
         };
       },
     }),
-    { allowWrite: false }
+    { allowWrite: false, allowLocalEdits: true }
   );
   const tool = server.tools.get("remember");
   assert.ok(tool, "local tools register in read-only sessions");
@@ -371,6 +371,22 @@ test("remember is a local tool: registered without writes, off WhatsApp entirely
   ]);
   assert.match(result.content[0].text, /#client/);
   assert.match(result.content[0].text, /\*\*role\*\*: contabil/);
+});
+
+test("remember stays registered for a read credential but refuses to file anything", async () => {
+  let touched = 0;
+  const server = fakeServer();
+  registerTools(
+    server,
+    asToolSource({ updateContactDetails: async () => (touched++, {}) }),
+    { allowWrite: false, allowLocalEdits: false }
+  );
+  const tool = server.tools.get("remember");
+  assert.ok(tool, "a read session still sees the tool");
+  const result = await tool.handler({ chat_id: "40700000061@s.whatsapp.net", add_tags: ["#private"] });
+  assert.equal(result.isError, true);
+  assert.equal(JSON.parse(result.content[0].text).error, "READ_ONLY");
+  assert.equal(touched, 0, "nothing reached the account");
 });
 
 test("find_contact asks for a name or a tag, and lists a tag with each person's chat_id", async () => {
