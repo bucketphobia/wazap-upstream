@@ -97,6 +97,11 @@ export interface LinkHost {
 /** `link.json`: the outage still open, and whether the owner was told. Times in ms since the epoch. */
 interface LinkRecord {
   down_since: number | null;
+  /**
+   * The outage is a session's credentials gone from under it: kept through a clean stop and past
+   * the stale window, since it is what keeps the next process from reading the account as unlinked.
+   */
+  credentials_missing?: boolean;
   /** The last time a process watching this outage was alive. */
   seen_at: number | null;
   alerted: "disconnected" | "relink_required" | null;
@@ -137,6 +142,7 @@ export class LinkMonitor {
   private probing = false;
   private disposed = false;
   private lastSeenSave = 0;
+  private credentialsMissing = false;
   /** Alerts the webhook could not queue yet, tried again at each tick. */
   private pending: LinkAlert[] = [];
 
@@ -171,7 +177,7 @@ export class LinkMonitor {
     this.timer = null;
     if (this.disposed) return;
     this.disposed = true;
-    if (clean && this.file !== null && this.alerted === null && this.downSince !== null) {
+    if (clean && this.file !== null && this.alerted === null && this.downSince !== null && !this.credentialsMissing) {
       this.downSince = null;
       this.save();
     }
@@ -186,9 +192,18 @@ export class LinkMonitor {
     return this.file !== null && this.downSince !== null;
   }
 
+  /** This session's credentials could not be read: the outage outlives any restart until they are back. */
+  noteCredentialsMissing(): void {
+    if (this.file === null || this.disposed || this.credentialsMissing) return;
+    this.credentialsMissing = true;
+    this.downSince ??= this.now();
+    this.save();
+  }
+
   /** A new link supersedes whatever the old session's outage was. */
   forgetSession(): void {
     if (this.file === null) return;
+    this.credentialsMissing = false;
     this.downSince = null;
     this.bootClock = false;
     this.alerted = null;
@@ -202,6 +217,7 @@ export class LinkMonitor {
     if (status === "connected") {
       this.probeFailures = 0;
       this.lastProbeAt = now;
+      this.credentialsMissing = false;
       if (this.downSince === null) return;
       // Back from an outage the owner was told about. A link after `relink_required` is a new
       // session (linked again, perhaps offline), not this outage's end.
@@ -446,7 +462,11 @@ export class LinkMonitor {
       this.downSince !== null && (record.alerted === "disconnected" || record.alerted === "relink_required") ? record.alerted : null;
     // Time no wazap was running is not counted, as time asleep is not; an outage already told stays told.
     const seen = finite(record.seen_at);
-    if (this.alerted === null && (seen === null || this.now() - seen > RECORD_STALE_MS)) this.downSince = null;
+    this.credentialsMissing = this.downSince !== null && record.credentials_missing === true;
+    if (this.alerted === null && (seen === null || this.now() - seen > RECORD_STALE_MS)) {
+      // Still open, but its clock starts with this process, as for any time nobody watched.
+      this.downSince = this.credentialsMissing ? this.now() : null;
+    }
     const outage = record.last_outage as { from?: unknown; to?: unknown } | null | undefined;
     const from = finite(outage?.from);
     const to = finite(outage?.to);
@@ -468,6 +488,7 @@ export class LinkMonitor {
       const told = this.pending.some((alert) => alert.alert === this.alerted) ? null : this.alerted;
       const record: LinkRecord = {
         down_since: this.downSince,
+        ...(this.credentialsMissing ? { credentials_missing: true } : {}),
         seen_at: this.downSince === null ? null : now,
         alerted: told,
         last_outage: this.lastOutage,

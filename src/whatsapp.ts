@@ -1652,6 +1652,7 @@ export class WhatsAppService implements WhatsAppApi {
    */
   private credentialsUnreadable(err: CredentialsReadError): void {
     logError("auth state", err);
+    this.linkWatch.noteCredentialsMissing();
     this.lastError = `${err.message} Retrying; ${err.fix}.`;
     this.setStatus("disconnected");
     this.scheduleReconnect(err.message);

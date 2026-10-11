@@ -1,12 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { accountRows, describeAccount, describeStatusAccount, type StatusAccountRow } from "./account-cli.js";
 import { AccountHub } from "./account-hub.js";
 import { AccountRegistry, resolveAccount } from "./accounts.js";
 import { CREDENTIALS_READ_FIX, CredentialsReadError, readLinkedAccount, type LinkedAccount } from "./auth-state.js";
+import { LINK_FILE } from "./service/link.js";
 import { banner } from "./banner.js";
 import { BAILEYS_VERSION, WAZAP_VERSION, paths, type AccountPaths, type Config, type Paths } from "./config.js";
 import { connectNext, whereInstalled, type Install } from "./connect.js";
@@ -860,6 +862,8 @@ export async function linkAndSync(
       throw err;
     }
     selected.registry.setOwner(selected.account.id, account.id);
+    // A new session: the old one's outage record (an alert, a file believed missing) is not about it.
+    rmSync(join(selected.paths.root, LINK_FILE), { force: true });
     if (w) waiting.stop();
     else waiting.stop(ok(`Linked as ${describeAccount(account)}`));
 

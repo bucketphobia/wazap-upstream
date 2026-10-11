@@ -886,3 +886,37 @@ test("missing credentials stay a dropped link across the give-up restart, and a 
   assert.equal(fresh.readAccount(), null);
   assert.equal(fresh.getStatus().status, "not_linked", "now a new link is what it needs");
 });
+
+// The sixth review pass ------------------------------------------------------------
+
+test("a clean stop keeps a credentials-missing outage, and a stale record of one still counts", (t) => {
+  const file = tempFile(t);
+  const host = fakeHost({ statusValue: "connected" });
+  const first = new LinkMonitor(host, file, () => host.now);
+  first.arm();
+  setStatus(first, host, "disconnected");
+  first.noteCredentialsMissing();
+  first.dispose(true); // `wazap service restart` within the first minutes
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).credentials_missing, true);
+
+  const later = fakeHost({ now: host.now + 86_400_000 }); // a reboot that took a day
+  const second = watching(t, later, file);
+  assert.equal(second.outageOpen(), true, "the next process still knows the account had a session");
+  assert.equal(Date.parse(second.info().down_since) >= later.now - 1000, true, "its clock starts with this process");
+
+  setStatus(second, later, "connected");
+  assert.equal(second.outageOpen(), false);
+  assert.equal(existsSync(file), true, "only the last outage is left on record");
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).credentials_missing, undefined);
+});
+
+test("a new link forgets a credentials-missing outage", (t) => {
+  const file = tempFile(t);
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, file);
+  setStatus(watch, host, "disconnected");
+  watch.noteCredentialsMissing();
+  watch.forgetSession();
+  assert.equal(watch.outageOpen(), false);
+  assert.equal(existsSync(file), false);
+});
