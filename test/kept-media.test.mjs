@@ -18,7 +18,7 @@ import { WazapError } from "../dist/errors.js";
 import { accountPaths, settingWarnings } from "../dist/config.js";
 import { mediaKeepSettings } from "../dist/media-keep.js";
 import { WhatsAppService } from "../dist/whatsapp.js";
-import { connectedService, openService, schemaCheckedTools, textError, waitFor } from "./helpers.mjs";
+import { connectedService, openService, schemaCheckedTools, storageRows, textError, waitFor } from "./helpers.mjs";
 
 const ME = "40700000001@s.whatsapp.net";
 const ANA = "40700000002@s.whatsapp.net";
@@ -655,4 +655,35 @@ test("the worker never asks WhatsApp for more than a kept file may hold", async 
   await keptOf(svc, sid);
   assert.deepEqual(caps, [2 * MB]);
   assert.equal(state.downloads, 1);
+});
+
+test("pointing a row at the moved data dir releases nothing", async (t) => {
+  const { svc, arrive } = await setup(t, { env: { WAZAP_MEDIA_KEEP: "off" } });
+  const sid = arrive(ANA, photo(Buffer.from("r")), Buffer.from("r"));
+  // The same file under another spelling, as a case-insensitive disk would see it.
+  const old = join(svc.paths.keptDir.toUpperCase(), "1700000000000-abcdef04.jpeg");
+  svc.db.messages.setMedia(sid, "original", old);
+  assert.equal(svc.db.messages.rehomeMedia("original", old, join(svc.paths.keptDir, "1700000000000-abcdef04.jpeg")), 1);
+  assert.deepEqual(storageRows(svc, "SELECT path FROM pending_unlinks"), [], "a rehome is the same file, never a release");
+});
+
+test("a file bigger than the whole quota is not downloaded again and again", async (t) => {
+  const { svc, arrive, state } = await setup(t, { env: { WAZAP_MEDIA_KEEP_QUOTA_MB: "1", WAZAP_MEDIA_KEEP_MAX_MB: "16" } });
+  const big = Buffer.alloc(2 * MB, 3);
+  const declared = arrive(ANA, photo(big), big);
+  const understated = arrive(ANA, photo(big, { fileLength: 10 }), big);
+  svc.mediaBuffer = async (_sock, sid, _raw, maxBytes) => {
+    state.downloads++;
+    const bytes = state.bytes.get(sid);
+    if (maxBytes !== undefined && bytes.length > maxBytes) throw new WazapError("FILE_TOO_LARGE", "over the cap");
+    return bytes;
+  };
+  await settled(svc);
+  for (let i = 0; i < 3; i++) {
+    svc.keep.connected();
+    await settled(svc);
+  }
+  assert.equal(keptPath(svc, declared), undefined);
+  assert.equal(keptPath(svc, understated), undefined);
+  assert.ok(state.downloads <= 1, `${state.downloads} downloads for media that can never be kept`);
 });

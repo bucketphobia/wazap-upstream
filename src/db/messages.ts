@@ -1180,11 +1180,18 @@ export class Messages {
 
   /**
    * Points `kind` rows at `from` to `to` instead: the same file, reached by a
-   * new path (the data dir moved). `from` is queued for unlinking by the
-   * trigger, and the service unlinks only paths inside its own folders.
+   * new path (the data dir moved). Nothing is released: the trigger's queueing
+   * of `from` is taken back in the same transaction, since on a file system
+   * that ignores case `from` can name the very file `to` does.
    */
   rehomeMedia(kind: string, from: string, to: string): number {
-    return this.c.write(() => this.c.run("UPDATE media SET path = ? WHERE kind = ? AND path = ?", to, kind, from));
+    return this.c.write(() => {
+      const moved = this.c.run("UPDATE media SET path = ? WHERE kind = ? AND path = ?", to, kind, from);
+      if (moved > 0 && this.c.get("SELECT 1 FROM media WHERE path = ?", from) === undefined) {
+        this.c.run("DELETE FROM pending_unlinks WHERE path = ?", from);
+      }
+      return moved;
+    });
   }
 
   /**

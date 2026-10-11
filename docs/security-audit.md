@@ -782,8 +782,8 @@ so it is held to the rules the database already keeps.
   would leave less than the smaller of 1 GB and 5% of the disk free is skipped,
   and is checked before anything is evicted for it. The queue holds at most 200
   downloads, run one at a time; the catch-up scans at most 5,000 messages of
-  the last two days. A transient failure is retried at most three times, an
-  expired (403/404/410) or too-big file never.
+  the last two days. A transient failure gets three attempts in all, an
+  expired (403/404/410), too-big or hash-mismatched file one.
 - **Only its own files.** A row's path is trusted for its file name only, and
   only a name wazap gives (`<ms>-<8 hex>.<ext>`): the file is read from this
   account's `kept/`, so a moved or symlinked data dir keeps its files and no

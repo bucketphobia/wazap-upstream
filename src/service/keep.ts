@@ -190,7 +190,7 @@ export class AccountKeep {
     if (isNoiseJid(message.chatJid)) return false;
     const info = mediaInfo(raw);
     if (info === undefined) return false;
-    if (info.size !== undefined && info.size > settings.maxFileBytes) return false;
+    if (info.size !== undefined && info.size > this.largest()) return false;
     const listed = settings.chats.length > 0 && chatListed(db, settings.chats, message.chatJid);
     if (listed) return true;
     // Channels and broadcast lists are not conversations: kept only when listed.
@@ -207,6 +207,11 @@ export class AccountKeep {
       default:
         return false;
     }
+  }
+
+  /** The biggest file that can be kept: the size limit, or the whole quota when that is smaller. */
+  private largest(): number {
+    return this.settings === undefined ? 0 : Math.min(this.settings.maxFileBytes, this.settings.quotaBytes);
   }
 
   private isKept(db: AccountDb, sid: string): boolean {
@@ -327,7 +332,7 @@ export class AccountKeep {
     let buffer: Buffer;
     try {
       // No more than a kept file may hold: an understated size costs at most that much.
-      buffer = await this.host.mediaBuffer(sock, sid, raw, settings.maxFileBytes);
+      buffer = await this.host.mediaBuffer(sock, sid, raw, this.largest());
     } catch (err) {
       // Expired, too big, or the link dropped: get_media will say which if asked. A dropped link is tried
       // again by a later catch-up, a few times; expired and too big are not.
@@ -341,14 +346,22 @@ export class AccountKeep {
       this.failures.set(sid, TRIES);
       return;
     }
+    if (buffer.length === 0 || buffer.length > this.largest()) {
+      // An understated size: the same bytes would come again.
+      this.failures.set(sid, TRIES);
+      return;
+    }
     this.failures.delete(sid);
-    await this.store(sid, raw, buffer);
+    if (!(await this.store(sid, raw, buffer))) {
+      // Refused after all (no room on the disk, or deleted meanwhile): a later catch-up may try it, a few times.
+      this.failures.set(sid, (this.failures.get(sid) ?? 0) + 1);
+    }
   }
 
   /** get_media downloaded this from WhatsApp: kept too when the settings keep it. */
-  offer(sid: string, raw: WAMessage, buffer: Buffer): Promise<void> {
-    if (!this.active || this.stopping) return Promise.resolve();
-    return this.store(sid, raw, buffer);
+  async offer(sid: string, raw: WAMessage, buffer: Buffer): Promise<void> {
+    if (!this.active || this.stopping) return;
+    await this.store(sid, raw, buffer);
   }
 
   // Storing ------------------------------------------------------------------
@@ -362,22 +375,23 @@ export class AccountKeep {
     return run;
   }
 
-  private store(sid: string, raw: WAMessage, buffer: Buffer): Promise<void> {
-    return this.serial(async () => {
+  /** Writes and records the file; false when anything refused it. */
+  private store(sid: string, raw: WAMessage, buffer: Buffer): Promise<boolean> {
+    return this.serial(async (): Promise<boolean> => {
       const settings = this.settings;
       const db = this.storage.readyDb();
-      if (settings === undefined || db === null || this.stopping || this.host.stopped()) return;
+      if (settings === undefined || db === null || this.stopping || this.host.stopped()) return false;
       const message = db.messages.get(sid);
-      if (message === null || !this.wants(db, message, raw) || this.isKept(db, sid)) return;
-      if (buffer.length === 0 || buffer.length > settings.maxFileBytes || buffer.length > settings.quotaBytes) return;
+      if (message === null || !this.wants(db, message, raw) || this.isKept(db, sid)) return false;
+      if (buffer.length === 0 || buffer.length > settings.maxFileBytes || buffer.length > settings.quotaBytes) return false;
       const expected = mediaSha256(raw);
-      if (expected !== undefined && !createHash("sha256").update(buffer).digest().equals(expected)) return;
+      if (expected !== undefined && !createHash("sha256").update(buffer).digest().equals(expected)) return false;
 
       // Everything that can refuse the file is asked before anything kept is evicted for it.
-      if (!(await this.roomFor(buffer.length))) return;
-      if (!this.host.hasMessage(sid)) return;
+      if (!(await this.roomFor(buffer.length))) return false;
+      if (!this.host.hasMessage(sid)) return false;
       await this.enforce(db, buffer.length);
-      if (!this.host.hasMessage(sid) || !db.isOpen || this.stopping) return;
+      if (!this.host.hasMessage(sid) || !db.isOpen || this.stopping) return false;
 
       const info = mediaInfo(raw);
       const final = join(this.paths.keptDir, mediaFilename(info ?? { mime: "application/octet-stream" }));
@@ -394,11 +408,12 @@ export class AccountKeep {
       const recorded = this.host.hasMessage(sid) && db.isOpen ? db.messages.setMedia(sid, KEPT_KIND, final) : { stored: false, replaced: null };
       if (!recorded.stored) {
         await rm(final, { force: true });
-        return;
+        return false;
       }
       this.sizes.set(final, buffer.length);
       this.diskWarned = false;
       if (recorded.replaced !== null) void this.host.scheduleFileCleanup().catch(() => {});
+      return true;
     });
   }
 

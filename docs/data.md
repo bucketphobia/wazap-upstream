@@ -116,7 +116,7 @@ settings want it.
   the server connects, and whenever the queue of 200 downloads was full, what
   arrived in the last two days that the settings want and nothing kept yet is
   fetched as well. A download cut short (the link dropped) is tried again at
-  the next of those, up to three times; one WhatsApp no longer has, or that is
+  the next of those, three attempts in all; one WhatsApp no longer has, or that is
   too big, is not.
 - **Bounded.** No file over `WAZAP_MEDIA_KEEP_MAX_MB` (16 MB). All kept files
   of an account together stay under `WAZAP_MEDIA_KEEP_QUOTA_MB` (1 GB): the
