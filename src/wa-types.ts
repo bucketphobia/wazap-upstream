@@ -824,6 +824,8 @@ export interface WhatsAppApi {
   getMessage(messageId: string): Promise<MessageView>;
   searchContacts(query: string, limit: number, opts?: { tag?: string }): Promise<ContactSummary[]>;
   getContact(contactId: string): Promise<ContactDetails>;
+  /** Profile photo links by chat id; optional, so a stand-in need not have it. */
+  profilePictures?(chatIds: readonly string[]): Promise<Record<string, string | null>>;
   syncContacts(): Promise<ContactSyncResult>;
   // find_contact and the draft context (F2-3); optional, so a stand-in need not have them.
   /** Who a name, nickname or relationship means on this account; asks WhatsApp for an empty address book once per boot first. */

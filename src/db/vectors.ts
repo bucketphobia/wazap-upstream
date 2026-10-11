@@ -28,9 +28,8 @@ const DEFAULT_CANDIDATES = 100;
 /**
  * The least a match's age leaves of its similarity when recency weighs it: a
  * fresh match counts whole, one a half-life old halfway down to this, and none
- * less. Recency orders close matches and holds an old borderline one to a
- * slightly higher bar; it never buries a clearly closer old match under weaker
- * fresh ones.
+ * less. Recency only orders: whether a match counts at all is its own
+ * similarity against the floor, so an old message is as findable as a new one.
  */
 const RECENCY_MIN_WEIGHT = 0.7;
 const DEFAULT_BACKLOG_SCAN = 20_000;
@@ -44,6 +43,13 @@ const MAX_TOKENS = 8;
  */
 const LEXICAL_PAIR_FROM = 3;
 const LEXICAL_MIN_MATCHES = 2;
+/**
+ * A hit carrying one content word of a two-word query still answers it ("când
+ * ne vedem mâine" → "ne vedem la șapte"), but only with some of its meaning: at
+ * least this share of the floor. Measured with EmbeddingGemma, such answers sit
+ * at 0.42-0.50 and long messages that merely contain the word at 0.11-0.21.
+ */
+const LOOSE_FLOOR_SHARE = 0.7;
 /**
  * Function words of English and Romanian — articles, pronouns, auxiliaries,
  * prepositions, conjunctions, question words — folded the way the trigram
@@ -528,7 +534,7 @@ export class Vectors {
     halfLifeMs: number | undefined
   ): Array<{ id: number; similarity: number; score: number }> {
     const now = this.c.now();
-    // Kept by raw similarity, so fresh weak matches never crowd out an old close one; age only raises the floor and reorders.
+    // Kept and admitted by raw similarity, so fresh weak matches never crowd out an old close one; age only reorders.
     const top = new TopK(limit);
     // A scan of embeddings alone cannot see a clear barrier whose purge has not
     // run yet; while one is pending, the scan goes through messages and chats.
@@ -543,7 +549,6 @@ export class Vectors {
       if (bytes.byteLength !== unit.length) continue;
       const similarity = int8Similarity(unit, new Int8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
       if (similarity <= 0 || similarity < floor || similarity <= top.floor) continue;
-      if (halfLifeMs !== undefined && similarity * recencyWeight(id, now, halfLifeMs) < floor) continue;
       if (!joined && (secondOfId(id) === edgeLow || secondOfId(id) === edgeHigh) && !this.inTimeRange(id, filter)) continue;
       top.push(similarity, id);
     }
@@ -616,7 +621,7 @@ export class Vectors {
 
     const unit = semantic ? unitVector(input.vector!) : null;
     const lexical = this.lexicalCandidates(input.query, filter, input.lexicalCandidates ?? DEFAULT_CANDIDATES, input.scanCap);
-    // Only a meaning at the floor ranks: a word hit whose weighed meaning falls under it fuses as a word hit alone.
+    // Only a meaning at the floor ranks: a word hit whose meaning falls under it fuses as a word hit alone.
     const semanticRanked =
       unit === null
         ? []
@@ -638,14 +643,22 @@ export class Vectors {
       }
     });
     if (lexical.weak.length > 0) {
-      // A weak lexical hit stays only on its meaning, held to a meaning-only hit's bar: a positive weighed cosine at the
+      // A weak lexical hit stays only on its meaning, held to a meaning-only hit's bar: a positive cosine at the
       // floor, which a ranked one has already cleared and an unranked one may clear outside the candidate count.
       const unranked = lexical.weak.filter((id) => fused.get(id)!.semanticRank === null);
       const cosines = unit === null ? new Map<number, number>() : this.similarities(unranked, input.model, unit);
-      const now = this.c.now();
       for (const id of unranked) {
         const similarity = cosines.get(id) ?? 0;
-        if (similarity <= 0 || similarity * recencyWeight(id, now, input.recencyHalfLifeMs) < input.minSimilarity) fused.delete(id);
+        if (similarity <= 0 || similarity < input.minSimilarity) fused.delete(id);
+      }
+    }
+    if (lexical.loose.length > 0 && unit !== null) {
+      // A loose hit needs part of a meaning; without a query vector its word is all there is to go on, and it stays.
+      const unranked = lexical.loose.filter((id) => fused.get(id)!.semanticRank === null);
+      const cosines = this.similarities(unranked, input.model, unit);
+      for (const id of unranked) {
+        const similarity = cosines.get(id);
+        if (similarity !== undefined && similarity < input.minSimilarity * LOOSE_FLOOR_SHARE) fused.delete(id);
       }
     }
     const best = [...fused.entries()].sort((a, b) => b[1].score - a[1].score || b[0] - a[0]).slice(0, limit);
@@ -670,7 +683,9 @@ export class Vectors {
    * words alone do not vouch for, unless they hold the query verbatim: those
    * carrying fewer than LEXICAL_MIN_MATCHES distinct content words of a query
    * of LEXICAL_PAIR_FROM content words or more, and every one of a query whose
-   * words are all QUERY_STOPWORDS. A function word still counts toward the
+   * words are all QUERY_STOPWORDS. `loose` lists those carrying only some of
+   * a shorter query's content words, which keep their place only with part of
+   * a meaning (LOOSE_FLOOR_SHARE). A function word still counts toward the
    * score, never toward those matches.
    */
   private lexicalCandidates(
@@ -678,10 +693,10 @@ export class Vectors {
     filter: ResolvedFilter,
     want: number,
     scanCap: number | undefined
-  ): { ids: number[]; weak: number[]; capped: boolean } {
+  ): { ids: number[]; weak: number[]; loose: number[]; capped: boolean } {
     const { trigram, short } = hybridWords(query);
     const tokens = [...trigram, ...short];
-    if (tokens.length === 0) return { ids: [], weak: [], capped: false };
+    if (tokens.length === 0) return { ids: [], weak: [], loose: [], capped: false };
     const perWordCap = Math.max(1, Math.floor((scanCap ?? DEFAULT_TRIGRAM_CAP) / (trigram.length + 1)));
     const perShortCap = Math.max(1, Math.floor(Math.min(scanCap ?? DEFAULT_SCAN_CAP, DEFAULT_SCAN_CAP) / Math.max(1, short.length)));
     const candidates = new Set<number>();
@@ -702,13 +717,14 @@ export class Vectors {
       const everyWord = trigram.map(ftsPhrase).join(" AND ");
       take(this.search.trigramIds(query, filter, filter.upper, want + 1, perWordCap, everyWord));
     }
-    if (candidates.size === 0) return { ids: [], weak: [], capped };
+    if (candidates.size === 0) return { ids: [], weak: [], loose: [], capped };
     const phrase = foldText(query).replace(/\s+/g, " ").trim();
     const scores = new Map<number, number>();
     const content = tokens.filter((token) => !QUERY_STOPWORDS.has(token)).length;
     // Content words a hit must carry: two of a long question, one of a query of function words alone, else none.
     const required = content === 0 ? 1 : content >= LEXICAL_PAIR_FROM ? LEXICAL_MIN_MATCHES : 0;
     const weak = new Set<number>();
+    const loose = new Set<number>();
     for (const row of this.c.all<{ id: number; text: string | null; transcript: string | null }>(
       "SELECT id, text, transcript FROM messages WHERE id IN (SELECT value FROM json_each(?))",
       JSON.stringify([...candidates])
@@ -725,9 +741,10 @@ export class Vectors {
       if (verbatim) score += 1;
       scores.set(row.id, score);
       if (matched < required && !verbatim) weak.add(row.id);
+      else if (content > 1 && content < LEXICAL_PAIR_FROM && matched < content && !verbatim) loose.add(row.id);
     }
     const ids = [...candidates].sort((a, b) => (scores.get(b) ?? 0) - (scores.get(a) ?? 0) || b - a).slice(0, want);
-    return { ids, weak: ids.filter((id) => weak.has(id)), capped };
+    return { ids, weak: ids.filter((id) => weak.has(id)), loose: ids.filter((id) => loose.has(id)), capped };
   }
 
   /** Raw cosine of each message's stored vector from `model` against the unit query; a message without one is left out. */

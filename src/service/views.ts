@@ -293,7 +293,7 @@ export class MessageViews {
     const group = isGroupId(chat.jid);
     switch (filter) {
       case "unread":
-        return !chat.archived && chat.unread > 0;
+        return !chat.archived && unreadOf(chat) > 0;
       case "groups":
         return !chat.archived && group;
       case "individual":
@@ -319,7 +319,7 @@ export class MessageViews {
       ...(phone === undefined ? {} : { phone: `+${phone}` }),
       name: this.identity.displayName(jid),
       type: isGroupId(jid) ? "group" : "individual",
-      unread_count: Math.max(0, chat.unread),
+      unread_count: unreadOf(chat),
       last_message: last
         ? {
             text: hidden ? PRIVATE_TEXT : (last.text ?? ""),
@@ -366,4 +366,17 @@ function parseChoice(choice: string): string[] | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * What is still unread in a chat. WhatsApp's own count stays where it was when
+ * the user reads on the phone, so it gives way to what this account knows: a
+ * chat where the user had the last word, or where the phone's read receipts
+ * reached the last message, has nothing unread.
+ */
+export function unreadOf(chat: ChatRecord): number {
+  if (chat.unread <= 0 || chat.lastFromMe === true) return 0;
+  const through = Math.max(chat.lastOwnId ?? 0, chat.readThroughId ?? 0);
+  if (chat.lastMessageId !== null && through >= chat.lastMessageId) return 0;
+  return chat.unread;
 }

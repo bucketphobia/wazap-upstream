@@ -59,13 +59,37 @@ test("readTranscribeSettings defaults to transcription off", () => {
     provider: null,
     language: "auto",
     auto: false,
+    autoOwn: false,
     model: "turbo",
     whisperBin: null,
     apiKey: null,
+    allowApi: false,
     baseUrl: "https://api.openai.com/v1",
     apiModel: "gpt-4o-mini-transcribe",
     modelsDir: join(dir, "models"),
   });
+});
+
+test("API permission is explicit, defaults off, and does not enable the provider", () => {
+  const dir = scratch("api-permission");
+  assert.equal(readTranscribeSettings({}, dir).allowApi, false);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE_ALLOW_API: "1" }, dir).provider, null);
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE_ALLOW_API: "maybe" }, dir).allowApi, false);
+  const enabled = readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1" }, dir);
+  assert.equal(enabled.allowApi, true);
+  assert.equal(enabled.auto, false, "uploads allowed only by ALLOW_API wait to be asked");
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" }, dir).auto, true);
+});
+
+test("AUTO all takes the user's own notes too; on and 1 keep their old meaning", () => {
+  const dir = scratch("auto-modes");
+  for (const [value, automatic, own] of [["off", false, false], ["0", false, false], ["1", true, false], ["on", true, false], ["all", true, true], [" ALL ", true, true]]) {
+    const settings = readTranscribeSettings({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: value }, dir);
+    assert.equal(settings.auto, automatic, value);
+    assert.equal(settings.autoOwn, own, value);
+  }
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTO: "all" }, dir).auto, false, "no provider, nothing automatic");
+  assert.equal(readTranscribeSettings({ WAZAP_TRANSCRIBE: "local" }, dir).auto, true);
 });
 
 test("readTranscribeSettings accepts both provider names", () => {

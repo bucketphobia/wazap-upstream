@@ -13,6 +13,8 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_READ_TOKEN` / `WAZAP_WRITE_TOKEN` | unset | Static bearer tokens for your own code; see [Building on wazap](api-and-webhooks.md#building-on-wazap-http-api-for-products). |
 | `WAZAP_TRANSCRIBE` | `off` | `local`, `openai` or `off`. `wazap config transcribe` sets it. |
 | `WAZAP_TRANSCRIBE_API_KEY` | unset | The key for `openai`; `OPENAI_API_KEY` is the fallback. Never a flag. |
+| `WAZAP_TRANSCRIBE_ALLOW_API` | unset (`0`) | `1` lets a read-only account upload audio to `openai` (and be billed for it); WhatsApp writes stay off. Notes are then transcribed when asked, unless `WAZAP_TRANSCRIBE_AUTO` says otherwise. |
+| `WAZAP_TRANSCRIBE_AUTO` | `1` | `0` stops background transcription. `all` takes the user's own new live notes to `openai` too, with `WAZAP_TRANSCRIBE_ALLOW_API=1`; never history or stored notes. |
 | `WAZAP_RECALL` | `off` | `local` turns on [semantic recall](recall.md#semantic-recall). `wazap config recall` sets it. |
 | `WAZAP_WEBHOOK` | `off` | `on` posts the enabled events to the webhook URL. `wazap config webhook` sets it with the next two. |
 | `WAZAP_WEBHOOK_URL` / `WAZAP_WEBHOOK_SECRET` | unset | HTTPS endpoint (`http://` only on loopback) and the shared secret for `X-Wazap-Signature`. The secret is never a flag. An account's `webhook_url` and `webhook_secret` win. |

@@ -1,7 +1,7 @@
 /** The shapes semantic recall is built from. No logic lives here. */
 
 /** The embedding model aliases wazap knows how to fetch and run. */
-export type EmbedModelAlias = "embeddinggemma-300m" | "e5-base-multilingual";
+export type EmbedModelAlias = "embeddinggemma-300m" | "e5-base-multilingual" | "bge-m3";
 
 export type RecallState = "off" | "indexing" | "ready" | "degraded";
 

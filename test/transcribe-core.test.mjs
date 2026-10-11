@@ -23,6 +23,7 @@ const TRANSCRIBE_ENV = [
   "WAZAP_TRANSCRIBE_AUTO",
   "WAZAP_TRANSCRIBE_MODEL",
   "WAZAP_TRANSCRIBE_URL",
+  "WAZAP_TRANSCRIBE_ALLOW_API",
   "WAZAP_WHISPER_BIN",
   "WAZAP_WHISPER_MODEL",
   "OPENAI_API_KEY",
@@ -456,7 +457,7 @@ test("read-only refuses the API provider and nothing else", async () => {
     () => svc.transcribeAudio(sidOf("R1")),
     (err) => {
       assert.equal(err.code, "READ_ONLY", "uploading the user's audio and spending their money is not a read");
-      assert.match(err.fix, /wazap config writes on/);
+      assert.match(err.fix, /WAZAP_TRANSCRIBE_ALLOW_API=1/);
       assert.match(err.fix, /transcribe local/);
       return true;
     }
@@ -475,4 +476,50 @@ test("read-only refuses the API provider and nothing else", async () => {
     }
   );
   await local.svc.stop();
+});
+
+test("explicit API transcription permission preserves WhatsApp read-only tools and caches the result", async () => {
+  const { svc, sock } = serviceWith({ ...MANUAL, WAZAP_TRANSCRIBE_ALLOW_API: "1" }, { readOnly: true });
+  const provider = stub(svc, mockProvider({ text: "synthetic Arabic transcript" }));
+  try {
+    deliver(sock, [voiceNote("OPT1", { seconds: 6 })]);
+    const first = await svc.transcribeAudio(sidOf("OPT1"), "ar");
+    const second = await svc.transcribeAudio(sidOf("OPT1"), "ar");
+    assert.equal(first.text, "synthetic Arabic transcript");
+    assert.equal(second.cached, true);
+    assert.equal(provider.state.calls, 1);
+    assert.deepEqual(provider.state.languages, ["ar"]);
+    const server = fakeServer();
+    registerTools(server, asToolSource(svc), { allowWrite: false });
+    for (const name of ["send_message", "confirm_send", "edit_message", "delete_message", "react_to_message", "manage_chat", "manage_group"]) {
+      assert.equal(server.tools.has(name), false, name);
+    }
+  } finally {
+    await svc.stop();
+  }
+});
+
+test("API opt-in defaults to on-request and automatic mode requires an explicit switch", async () => {
+  const manual = serviceWith({ ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1" }, { readOnly: true });
+  const provider = stub(manual.svc, mockProvider());
+  try {
+    deliver(manual.sock, [voiceNote("OPT2", { seconds: 6 })]);
+    await manual.svc.transcribeIdle();
+    assert.equal(provider.state.calls, 0);
+    assert.equal(manual.svc.voice.autoTranscribe, false);
+    await manual.svc.transcribeAudio(sidOf("OPT2"));
+    assert.equal(provider.state.calls, 1);
+  } finally {
+    await manual.svc.stop();
+  }
+  const automatic = serviceWith({ ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" }, { readOnly: true });
+  const autoProvider = stub(automatic.svc, mockProvider());
+  try {
+    deliver(automatic.sock, [voiceNote("OPT3", { seconds: 6 })]);
+    await automatic.svc.transcribeIdle();
+    assert.equal(autoProvider.state.calls, 1);
+    assert.equal(automatic.svc.voice.autoTranscribe, true);
+  } finally {
+    await automatic.svc.stop();
+  }
 });

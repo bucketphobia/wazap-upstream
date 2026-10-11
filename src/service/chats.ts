@@ -140,6 +140,8 @@ export class AccountChats {
           break;
         case "mark_read":
           if (last) await sock.readMessages([last.key]);
+          // WhatsApp sends this device no echo of its own read, so the count is cleared here, or the chat stays unread.
+          this.storage.db.identity.upsertChat({ jid, unread: 0 });
           break;
         case "mark_unread":
           await sock.chatModify({ markRead: false, lastMessages }, jid);

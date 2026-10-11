@@ -102,6 +102,48 @@ jobs:
           ./mcp-publisher login github-oidc
           ./mcp-publisher publish
 
+  # The Docker image for self-hosters (Unraid, Synology, any compose host), so
+  # they pull a release instead of building one. After npm, so a tag that
+  # fails there publishes no image either. Only this job can write packages.
+  image:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # arm64 for a Raspberry Pi or an Apple-silicon host, built under QEMU.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # 1.3.7, 1.3 and latest. The source label links the package to this
+      # repository, so it shows on the repository page.
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
   # Its own job so that only these steps hold a token that can write to the
   # repository: the publish job installs and runs npm packages with the OIDC
   # token, and does not need to be able to push as well.

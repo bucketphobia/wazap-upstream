@@ -43,11 +43,15 @@ export interface TranscribeSettings {
   /** "auto" or an ISO code. */
   language: string;
   auto: boolean;
+  /** AUTO=all: the user's own new live notes go to the API too; still needs allowApi. */
+  autoOwn: boolean;
   /** local only. */
   model: ModelAlias;
   /** local only: WAZAP_WHISPER_BIN override. */
   whisperBin: string | null;
   apiKey: string | null;
+  /** WAZAP_TRANSCRIBE_ALLOW_API: uploading audio is allowed while WhatsApp writes stay off. */
+  allowApi: boolean;
   /** openai only, already validated https-or-loopback, no trailing slash. */
   baseUrl: string;
   /** openai only. */

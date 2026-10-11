@@ -1,7 +1,6 @@
 services:
   wazap:
-    build: .
-    image: wazap
+    image: ghcr.io/razvangirgiz/wazap:latest
     restart: unless-stopped
     env_file: .env
     environment:

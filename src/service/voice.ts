@@ -16,7 +16,7 @@ import type { AccountDb, StoredMessage, UpsertResult } from "../db/index.js";
 import { asWazapError, WazapError } from "../errors.js";
 import { isStatusJid } from "../ids.js";
 import { logError } from "../logger.js";
-import { isoWithOffset, mediaInfo, messageTimestampMs, messageType, voiceSeconds } from "../messages.js";
+import { isoWithOffset, mediaInfo, messageTimestampMs, messageType, protoNumber, voiceSeconds } from "../messages.js";
 import { mediaFilename } from "../outgoing-media.js";
 import type { EmbedFeed } from "../recall/index.js";
 import {
@@ -46,6 +46,13 @@ const AUTO_TRANSCRIBE_MAX_SECONDS = 600;
 const HISTORY_TRANSCRIBE_WINDOW_MS = 24 * 60 * 60_000;
 
 /**
+ * Voice notes without a transcript that one connection queues when the
+ * provider runs on this machine, newest first: free, one at a time, and a
+ * history a few hundred notes deep is done within the hour.
+ */
+const BACKFILL_LIMIT = 500;
+
+/**
  * A wrong WAZAP_TRANSCRIBE_* value must not take a running server down with it.
  * Everything else still works, so the complaint is logged once and kept, and the
  * tool that needs it reports it instead of transcribing.
@@ -61,12 +68,13 @@ function readTranscribeConfig(dataDir: string): TranscribeSettings | WazapError 
 }
 
 /**
- * A voice note the service transcribes without being asked: incoming, not a
- * story, recorded as a voice note rather than attached as an audio file, and
- * of a length WhatsApp stated and kept to ten minutes.
+ * A voice note the service transcribes without being asked: not a story,
+ * recorded as a voice note rather than attached as an audio file, and of a
+ * length WhatsApp stated and kept to ten minutes. The user's own notes too when
+ * transcription is free (`own`) or the owner explicitly opts in to new outgoing API notes.
  */
-function transcribable(raw: WAMessage): boolean {
-  if (raw.key.fromMe || isStatusJid(raw.key.remoteJid ?? "") || messageType(raw) !== "voice") return false;
+function transcribable(raw: WAMessage, own: boolean): boolean {
+  if ((raw.key.fromMe && !own) || isStatusJid(raw.key.remoteJid ?? "") || messageType(raw) !== "voice") return false;
   const seconds = voiceSeconds(raw);
   return seconds !== undefined && seconds <= AUTO_TRANSCRIBE_MAX_SECONDS;
 }
@@ -113,6 +121,10 @@ export class AccountVoice {
   readonly autoTranscribe: boolean;
   /** Where the configured provider sends the audio, recorded with each note queued; null with no provider. */
   private readonly transcribeClass: "local" | "api" | null;
+  /** Paid outgoing notes require both explicit API consent and their own opt-in. */
+  private readonly autoOwn: boolean;
+  /** Only notes created since this process enabled the opt-in can join the paid queue. */
+  private readonly ownAutoSince = Math.floor(Date.now() / 1000) * 1000;
   /** This account as the process's transcription worker sees it. */
   readonly transcribeSource: TranscribeSource;
   /** The worker every account shares; a seam for tests. */
@@ -131,12 +143,13 @@ export class AccountVoice {
   ) {
     this.transcribe = readTranscribeConfig(config.dataDir);
     const settings = this.transcribe;
-    // Read-only refuses uploading audio to an API, so notes it would refuse are not queued.
+    // Audio processing permission is independent from WhatsApp writes, and defaults off.
     this.autoTranscribe =
       !(settings instanceof WazapError) &&
       settings.provider !== null &&
       settings.auto &&
-      !(this.effectiveReadOnly && settings.provider === "openai");
+      !(this.effectiveReadOnly && settings.provider === "openai" && !settings.allowApi);
+    this.autoOwn = !(settings instanceof WazapError) && settings.autoOwn && settings.allowApi;
     this.transcribeClass = settings instanceof WazapError || settings.provider === null ? null : PROVIDERS[settings.provider].kind;
     this.transcribeSource = {
       name: account.id,
@@ -172,14 +185,13 @@ export class AccountVoice {
       }
 
       const settings = this.transcribeSettings();
-      // Read-only has always meant no side effect anyone outside can see. The
-      // local provider keeps that promise; uploading the user's audio to a
-      // third party and spending their money does not.
-      if (this.effectiveReadOnly && settings.provider === "openai") {
+      // WhatsApp writes and paid audio processing are separate permissions.
+      // Read-only still refuses API uploads unless the owner explicitly opts in.
+      if (this.effectiveReadOnly && settings.provider === "openai" && !settings.allowApi) {
         throw new WazapError(
           "READ_ONLY",
           "wazap runs read-only, so it will not upload audio to the transcription API.",
-          "Run `wazap config writes on` and restart the server, or run `wazap config transcribe local`"
+          "Approve audio uploads and charges, set WAZAP_TRANSCRIBE_ALLOW_API=1 and restart, or run `wazap config transcribe local`"
         );
       }
       const readiness = await this.host.transcribeReadiness(settings);
@@ -335,6 +347,28 @@ export class AccountVoice {
   }
 
   /**
+   * With transcription on this machine, the voice notes already stored that
+   * have no transcript join the queue too — the user's own, and those a
+   * history sync brought — newest first, up to BACKFILL_LIMIT a connection.
+   * The worker takes new arrivals ahead of them. A billed provider queues none.
+   */
+  backfillTranscripts(): void {
+    if (!this.autoTranscribe || this.transcribeClass !== "local") return;
+    try {
+      const db = this.host.readyDb();
+      if (db === null) return;
+      let queued = 0;
+      for (const sid of db.transcripts.untranscribedVoice(BACKFILL_LIMIT)) {
+        const raw = this.views.rawOf(this.views.storedOrThrow(sid));
+        if (raw !== null && transcribable(raw, true) && db.transcripts.enqueue(sid, "local")) queued++;
+      }
+      if (queued > 0) this.transcribeWorker.kick();
+    } catch (err) {
+      logError("transcribe", err);
+    }
+  }
+
+  /**
    * In the transaction that stores it, an incoming voice note joins the
    * durable queue: every one that arrives live, however old its stamp (a note
    * WhatsApp delivers only now is still an arrival), and one a history sync
@@ -346,7 +380,13 @@ export class AccountVoice {
    * queue a turn later, once the transaction has committed.
    */
   queueTranscript(raw: WAMessage, result: UpsertResult, live: boolean): void {
-    if (!this.autoTranscribe || result.sid === null || !transcribable(raw)) return;
+    if (!this.autoTranscribe || result.sid === null || !transcribable(raw, this.transcribeClass === "local" || this.autoOwn)) return;
+    // Outgoing API opt-in applies only to new live notes, never history/import or a stored replay.
+    if (this.transcribeClass === "api" && raw.key.fromMe) {
+      const seconds = protoNumber(raw.messageTimestamp);
+      if (!live || result.outcome !== "inserted" || seconds === undefined ||
+        !Number.isFinite(seconds) || seconds * 1000 < this.ownAutoSince) return;
+    }
     if (result.outcome !== "inserted" && !(live && result.outcome === "updated")) return;
     if (!live && messageTimestampMs(raw) <= Date.now() - HISTORY_TRANSCRIBE_WINDOW_MS) return;
     if (this.transcribeClass === null) return;
@@ -361,14 +401,14 @@ export class AccountVoice {
   /**
    * One note off the queue, as the worker runs it: a message deleted, expired
    * or transcribed meanwhile is done with, and so is one that is no longer a
-   * short incoming voice note. The rest is get_media's own path, so a
+   * short voice note this provider may take. The rest is get_media's own path, so a
    * tool call asking for the same note at the same moment shares the upload.
    */
   private async transcribeQueued(sid: string): Promise<void> {
     const message = this.views.storedOrThrow(sid);
     if (message.transcript !== null) return;
-    if (!transcribable(this.views.messageOrThrow(sid))) {
-      throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short incoming voice note."), "gone", "not a voice note to transcribe");
+    if (!transcribable(this.views.messageOrThrow(sid), this.transcribeClass === "local" || this.autoOwn)) {
+      throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short voice note to transcribe."), "gone", "not a voice note to transcribe");
     }
     await this.host.transcribeAudio(sid);
   }

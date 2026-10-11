@@ -98,13 +98,18 @@ function orNull(raw: string | undefined): string | null {
 export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string): TranscribeSettings {
   const provider = parseProvider(env.WAZAP_TRANSCRIBE);
   const url = orNull(env.WAZAP_TRANSCRIBE_URL) ?? DEFAULT_URL;
+  const allowApi = asBool(env.WAZAP_TRANSCRIBE_ALLOW_API, false);
+  // Uploads allowed only by ALLOW_API wait to be asked, unless AUTO says otherwise.
+  const all = stripPasted(env.WAZAP_TRANSCRIBE_AUTO ?? "").toLowerCase() === "all";
   return {
     provider,
     language: "auto",
-    auto: provider !== null && asBool(env.WAZAP_TRANSCRIBE_AUTO, true),
+    auto: provider !== null && (all || asBool(env.WAZAP_TRANSCRIBE_AUTO, !(provider === "openai" && allowApi))),
+    autoOwn: all,
     model: parseModel(env.WAZAP_WHISPER_MODEL),
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),
+    allowApi,
     baseUrl: requireSafeUrl(url.replace(/\/+$/, "")),
     apiModel: orNull(env.WAZAP_TRANSCRIBE_MODEL) ?? DEFAULT_API_MODEL,
     modelsDir: join(dataDir, "models"),

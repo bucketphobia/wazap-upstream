@@ -89,6 +89,24 @@ export const EMBED_MODELS: Record<EmbedModelAlias, EmbedModelSpec> = {
     defaultMinSimilarity: 0.85,
     floorCalibrated: true,
   },
+  "bge-m3": {
+    alias: "bge-m3",
+    file: "bge-m3-Q8_0.gguf",
+    bytes: 634553760,
+    sha256: "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+    dims: 1024,
+    url: "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gguf",
+    // bge-m3 takes no task prefix; the GGUF names its own CLS pooling.
+    prompts: { query: "", document: "" },
+    maxChars: RECALL_TEXT_CAP,
+    // Measured 2026-10-10 on 3,000 real Romanian and English messages: a
+    // question with no answer in them tops out at 0.44-0.64, real answers sit
+    // at 0.58-0.77, across languages too ("where is my package" → "A ajuns
+    // coletul?" 0.63, gemma 0.31). Twice gemma's size and embed time; the
+    // model for a history written in more than one language.
+    defaultMinSimilarity: 0.55,
+    floorCalibrated: true,
+  },
 };
 
 export function embedModelSpec(name: string): EmbedModelSpec {

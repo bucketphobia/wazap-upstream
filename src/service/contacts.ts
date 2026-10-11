@@ -18,6 +18,11 @@ import { IMPORT_META } from "../legacy-import/index.js";
 import { log, logError } from "../logger.js";
 import { realName } from "./identity.js";
 import { orNullAfter, PROFILE_LOOKUP_MS } from "./util.js";
+
+/** How long a profile photo link is reused before WhatsApp is asked again. */
+const PICTURE_TTL_MS = 6 * 3_600_000;
+/** Profile photo lookups at once: a chat list asks for many, WhatsApp is asked for few at a time. */
+const PICTURE_LOOKUPS = 4;
 import type {
   ConnectionStatus,
   ContactDetails,
@@ -121,6 +126,8 @@ export class AccountContacts {
   /** find_contact's one ask this boot for an address book that looked empty, shared by every find waiting on it (F2-3). */
   private addressBookAsk: Promise<void> | null = null;
   readonly blocked = new Set<string>();
+  /** Profile photo links already asked for, so a chat list does not ask WhatsApp again for hours. */
+  private readonly pictures = new Map<string, { url: string | null; at: number }>();
 
   constructor(
     private readonly host: ContactsHost,
@@ -204,6 +211,33 @@ export class AccountContacts {
         if (matches.length >= limit) break;
       }
       return matches;
+    });
+  }
+
+  /**
+   * Profile photo links for chats, a few lookups at a time, each remembered for
+   * PICTURE_TTL_MS. A chat without a photo, or one WhatsApp does not answer for
+   * in time, gets null.
+   */
+  profilePictures(chatIds: readonly string[]): Promise<Record<string, string | null>> {
+    return this.host.guarded(async () => {
+      const sock = this.host.ensureConnected();
+      const out: Record<string, string | null> = {};
+      const queue = [...new Set(chatIds)];
+      const worker = async (): Promise<void> => {
+        for (let jid = queue.shift(); jid !== undefined; jid = queue.shift()) {
+          const known = this.pictures.get(jid);
+          if (known && Date.now() - known.at < PICTURE_TTL_MS) {
+            out[jid] = known.url;
+            continue;
+          }
+          const url = (await orNullAfter(sock.profilePictureUrl(jid, "image"), PROFILE_LOOKUP_MS).catch(() => null)) ?? null;
+          this.pictures.set(jid, { url, at: Date.now() });
+          out[jid] = url;
+        }
+      };
+      await Promise.all(Array.from({ length: PICTURE_LOOKUPS }, worker));
+      return out;
     });
   }
 

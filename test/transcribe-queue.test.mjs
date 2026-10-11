@@ -32,6 +32,7 @@ const TRANSCRIBE_ENV = [
   "WAZAP_TRANSCRIBE_AUTO",
   "WAZAP_TRANSCRIBE_MODEL",
   "WAZAP_TRANSCRIBE_URL",
+  "WAZAP_TRANSCRIBE_ALLOW_API",
   "WAZAP_WHISPER_BIN",
   "WAZAP_WHISPER_MODEL",
   "OPENAI_API_KEY",
@@ -629,7 +630,19 @@ test("wazap status warns that a read-only account's queue never runs with an API
   assert.equal(checks.length, 1);
   assert.equal(checks[0].state, "warn");
   assert.match(checks[0].detail, /read-only/);
-  assert.match(checks[0].fix, /wazap config writes on/);
+  assert.match(checks[0].fix, /WAZAP_TRANSCRIBE_ALLOW_API=1/);
+});
+
+test("status recognizes separately approved API processing on a read-only account", async () => {
+  const queued = serviceWith(CONFIGURED);
+  queued.svc.status = "disconnected";
+  deliver(queued.sock, [voiceNote("OPT_STATUS")]);
+  await queued.svc.stop();
+  const checks = withEnv({ ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" },
+    () => checkTranscribeQueue({ dataDir: queued.svc.config.dataDir, readOnly: true, rateLimitPerMinute: 20 }));
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].state, "info");
+  assert.doesNotMatch(checks[0].detail, /read-only|never runs|waits/);
 });
 
 test("a note waiting for its account runs as soon as the connection opens, not at the next poll", async () => {
@@ -837,4 +850,180 @@ test("a service on a v2 database upgraded to v3 transcribes nothing stored befor
   assert.deepEqual(provider.started, ["NEW"], "a note that arrives after it is");
   assert.equal(svc.db.messages.get(sidOf("NEW")).transcript, "am uitat umbrela acasă");
   await svc.stop();
+});
+
+test("with transcription on this machine the user's own voice notes are queued too", async () => {
+  const { svc, sock } = serviceWith({ WAZAP_TRANSCRIBE: "local" });
+  svc.status = "disconnected";
+  deliver(sock, [voiceNote("THEIRS"), { ...voiceNote("MINE"), key: { remoteJid: PEER, fromMe: true, id: "MINE" } }]);
+  assert.deepEqual(
+    storageRows(svc, "SELECT m.key_id FROM transcribe_queue q JOIN messages m ON m.id = q.message_id ORDER BY m.key_id").map((row) => row.key_id),
+    ["MINE", "THEIRS"],
+    "free to run, so no reason to leave the user's own words out"
+  );
+  await svc.stop();
+});
+
+test("with transcription on this machine, notes stored without a transcript are queued once the account connects", async () => {
+  const { svc, sock } = serviceWith({ WAZAP_TRANSCRIBE: "local" });
+  svc.transcribeReadiness = async () => ({ ok: true, detail: "whisper.cpp, stubbed" });
+  svc.status = "disconnected";
+  const provider = stub(svc);
+  // A history sync brings notes older than a day: on arrival they are stored, not queued.
+  const old = Date.now() - 30 * 86_400_000;
+  sock.ev.emit("messaging-history.set", {
+    chats: [],
+    contacts: [],
+    messages: [voiceNote("OLD1", { at: old }), { ...voiceNote("OLD2", { at: old + 60_000 }), key: { remoteJid: PEER, fromMe: true, id: "OLD2" } }],
+    isLatest: true,
+  });
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")) !== null);
+  assert.equal(storageRows(svc, "SELECT count(*) AS n FROM transcribe_queue")[0].n, 0);
+
+  svc.setStatus("connected");
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")).transcript !== null, 2_000);
+  assert.deepEqual(provider.started, ["OLD2", "OLD1"], "newest first, the user's own among them");
+  assert.equal(svc.db.messages.get(sidOf("OLD1")).transcript, "am uitat umbrela acasă");
+  svc.setStatus("disconnected");
+  svc.setStatus("connected");
+  await svc.transcribeIdle();
+  assert.equal(provider.calls, 2, "a note with its transcript is not queued again");
+  await svc.stop();
+});
+
+test("with a billed provider, notes stored without a transcript stay off the queue when the account connects", async () => {
+  const { svc, sock } = serviceWith(CONFIGURED);
+  svc.status = "disconnected";
+  const provider = stub(svc);
+  sock.ev.emit("messaging-history.set", { chats: [], contacts: [], messages: [voiceNote("OLD1", { at: Date.now() - 30 * 86_400_000 })], isLatest: true });
+  await waitUntil(() => svc.db.messages.get(sidOf("OLD1")) !== null);
+  svc.setStatus("connected");
+  await svc.transcribeIdle();
+  assert.equal(provider.calls, 0);
+  await svc.stop();
+});
+
+
+const OWN_AUTO = { ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "all" };
+const ownVoice = (id, options = {}, peer = PEER) => ({ ...voiceNote(id, options), key: { remoteJid: peer, fromMe: true, id } });
+
+test("explicit own API AUTO transcribes new outgoing and self-chat notes once with incoming notes", async () => {
+  const { svc, sock } = serviceWith(OWN_AUTO, { readOnly: true });
+  const provider = stub(svc);
+  try {
+    const mine = ownVoice("OWN_NEW");
+    deliver(sock, [voiceNote("IN_NEW"), mine, ownVoice("SELF_NEW", {}, ME)]);
+    deliver(sock, [mine]);
+    await svc.transcribeIdle();
+    assert.equal(provider.calls, 3);
+    assert.equal(svc.db.messages.get(sid(true, PEER, "OWN_NEW")).transcript, "am uitat umbrela acasă");
+    assert.equal(svc.db.messages.get(sid(true, ME, "SELF_NEW")).transcript, "am uitat umbrela acasă");
+    deliver(sock, [mine]);
+    await svc.transcribeIdle();
+    assert.equal(provider.calls, 3, "replayed notes with a transcript are not uploaded again");
+    assert.equal(svc.config.readOnly, true);
+  } finally { await svc.stop(); }
+});
+
+test("own API AUTO remains off by default and does not override AUTO or API permission", async () => {
+  for (const env of [
+    { ...CONFIGURED, WAZAP_TRANSCRIBE_ALLOW_API: "1", WAZAP_TRANSCRIBE_AUTO: "1" },
+    { ...OWN_AUTO, WAZAP_TRANSCRIBE_AUTO: "0" },
+    { ...OWN_AUTO, WAZAP_TRANSCRIBE_ALLOW_API: "0" },
+  ]) {
+    const { svc, sock } = serviceWith(env, { readOnly: true });
+    const provider = stub(svc);
+    try {
+      deliver(sock, [ownVoice("OWN_GATED")]);
+      await svc.transcribeIdle();
+      assert.equal(provider.calls, 0);
+      assert.equal(svc.db.transcripts.state(sid(true, PEER, "OWN_GATED")), null);
+    } finally { await svc.stop(); }
+  }
+});
+
+test("own API AUTO preserves duration guards and never enrolls history, old live replays or backfill", async () => {
+  const { svc, sock } = serviceWith(OWN_AUTO, { readOnly: true });
+  svc.status = "disconnected";
+  const provider = stub(svc);
+  try {
+    const unknown = ownVoice("OWN_UNKNOWN");
+    delete unknown.message.audioMessage.seconds;
+    deliver(sock, [ownVoice("OWN_LONG", { seconds: 601 }), ownVoice("OWN_AUDIO", { ptt: false }), unknown,
+      ownVoice("OWN_OLD_LIVE", { at: Date.now() - 60_000 }), ownVoice("OWN_BOUNDARY", { seconds: 600 })]);
+    svc.ingest.ingestMessages([ownVoice("OWN_RECENT_HISTORY"), ownVoice("OWN_ARCHIVE", { at: Date.now() - 30 * 86_400_000 })], false);
+    svc.voice.backfillTranscripts();
+    const queued = storageRows(svc, "SELECT m.key_id FROM transcribe_queue q JOIN messages m ON m.id = q.message_id").map(r => r.key_id);
+    assert.deepEqual(queued, ["OWN_BOUNDARY"]);
+    svc.status = "connected";
+    svc.voice.transcribeWorker.kick();
+    await svc.transcribeIdle();
+    assert.equal(provider.calls, 1);
+  } finally { await svc.stop(); }
+});
+
+test("a stored outgoing note delivered again live does not become a new paid AUTO upload", async () => {
+  const { svc, sock } = serviceWith(OWN_AUTO, { readOnly: true });
+  const provider = stub(svc);
+  try {
+    const replay = ownVoice("OWN_STORED");
+    svc.ingest.ingestMessages([replay], false);
+    replay.message.audioMessage.seconds = 7;
+    deliver(sock, [replay]);
+    await svc.transcribeIdle();
+    assert.equal(provider.calls, 0);
+    assert.equal(svc.db.transcripts.state(sid(true, PEER, "OWN_STORED")), null);
+  } finally { await svc.stop(); }
+});
+
+
+test("own API AUTO refuses unknown creation times and honors the startup-second boundary", async () => {
+  const { svc } = serviceWith(OWN_AUTO, { readOnly: true });
+  svc.status = "disconnected";
+  try {
+    for (const [id, timestamp] of [["OWN_MISSING_STAMP", undefined], ["OWN_NAN_STAMP", NaN]]) {
+      const raw = ownVoice(id);
+      svc.ingest.ingestMessages([raw], false);
+      raw.messageTimestamp = timestamp;
+      const messageId = sid(true, PEER, id);
+      svc.voice.queueTranscript(raw, { sid: messageId, outcome: "inserted" }, true);
+      assert.equal(svc.db.transcripts.state(messageId), null, "unknown timestamp must not authorize a paid upload");
+    }
+    const boundary = ownVoice("OWN_START_BOUNDARY", { at: svc.voice.ownAutoSince });
+    svc.ingest.ingestMessages([boundary], true);
+    assert.equal(svc.db.transcripts.state(sid(true, PEER, "OWN_START_BOUNDARY"))?.state, "queued");
+  } finally { await svc.stop(); }
+});
+
+test("own API permission is still mandatory in writable mode", async () => {
+  const { svc, sock } = serviceWith({ ...OWN_AUTO, WAZAP_TRANSCRIBE_ALLOW_API: "0" });
+  const provider = stub(svc);
+  try {
+    deliver(sock, [ownVoice("OWN_WRITABLE_DENIED")]);
+    await svc.transcribeIdle();
+    assert.equal(provider.calls, 0);
+  } finally { await svc.stop(); }
+});
+
+test("approved own API queue resumes after restart but revoked permission and local queues never upload", async () => {
+  for (const variant of ["resume", "revoked", "local_to_api"]) {
+    const initial = serviceWith(variant === "local_to_api" ? { WAZAP_TRANSCRIBE: "local" } : OWN_AUTO, { readOnly: true });
+    initial.svc.status = "disconnected";
+    deliver(initial.sock, [ownVoice("OWN_RESTART")]);
+    const noteId = sid(true, PEER, "OWN_RESTART");
+    assert.equal(initial.svc.db.transcripts.state(noteId)?.state, "queued");
+    await initial.svc.stop();
+    if (variant === "resume") await sleep(1100);
+    const next = serviceWith(variant === "revoked" ? { ...OWN_AUTO, WAZAP_TRANSCRIBE_AUTO: "1" } : OWN_AUTO,
+      { readOnly: true, dataDir: initial.svc.config.dataDir });
+    const provider = stub(next.svc);
+    try {
+      await next.svc.transcribeIdle();
+      assert.equal(provider.calls, variant === "resume" ? 1 : 0);
+      if (variant === "resume") assert.ok(next.svc.db.messages.get(noteId).transcript);
+      else if (variant === "revoked") assert.equal(next.svc.db.transcripts.state(noteId), null);
+      else assert.equal(next.svc.db.transcripts.state(noteId)?.state, "failed");
+      if (variant === "local_to_api") assert.equal(next.svc.db.transcripts.state(noteId)?.error, "provider_changed");
+    } finally { await next.svc.stop(); }
+  }
 });
