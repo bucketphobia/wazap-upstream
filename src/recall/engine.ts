@@ -13,6 +13,7 @@
  * spawning one; that seam exists for the test stub, not as a supported option.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { access } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -86,6 +87,12 @@ async function freePort(): Promise<number> {
 interface EmbeddingTarget {
   /** Texts go to `${base}${EMBED_PATH}`. */
   base: string;
+  /**
+   * Headers every request to `base` needs. The spawned sidecar's api key, so
+   * anything else on this machine cannot ride the loopback endpoint; an
+   * external backend answers to its own auth, so the map is empty there.
+   */
+  authHeaders(): Record<string, string>;
   /** Resolves once the server answers /health, or immediately for an external URL. */
   waitReady(): Promise<void>;
   stop(): Promise<void>;
@@ -94,6 +101,8 @@ interface EmbeddingTarget {
 /** The spawned sidecar: owns a child, restarts it with backoff until stopped. */
 class LlamaSidecar implements EmbeddingTarget {
   base = "";
+  /** One key per sidecar, minted at spawn: restarts keep it, other processes never learn it. */
+  private readonly apiKey = randomBytes(24).toString("base64url");
   private child: ChildProcess | null = null;
   private stopping = false;
   private backoff = BACKOFF_INIT_MS;
@@ -122,7 +131,7 @@ class LlamaSidecar implements EmbeddingTarget {
       this.bin,
       // -b/-ub at the context size: the default 512-token physical batch
       // rejects any single text over ~512 tokens, and capped texts run longer.
-      ["-m", this.model, "--host", "127.0.0.1", "--port", port, "--embedding", "-c", "8192", "-b", "8192", "-ub", "8192"],
+      ["-m", this.model, "--host", "127.0.0.1", "--port", port, "--embedding", "--api-key", this.apiKey, "-c", "8192", "-b", "8192", "-ub", "8192"],
       { stdio: ["ignore", "ignore", "pipe"], windowsHide: true }
     );
     this.child = child;
@@ -171,6 +180,10 @@ class LlamaSidecar implements EmbeddingTarget {
     this.readyReject?.(new WazapError("RECALL_FAILED", "llama-server could not start."));
   }
 
+  authHeaders(): Record<string, string> {
+    return { authorization: `Bearer ${this.apiKey}` };
+  }
+
   async waitReady(): Promise<void> {
     if (this.readyPromise === null) {
       throw new WazapError("RECALL_FAILED", "embedding backend is not running");
@@ -179,6 +192,7 @@ class LlamaSidecar implements EmbeddingTarget {
     for (;;) {
       try {
         const response = await fetch(`${this.base}${HEALTH_PATH}`, {
+          headers: this.authHeaders(),
           signal: AbortSignal.timeout(2_000),
           redirect: "error",
         });
@@ -231,6 +245,9 @@ class LlamaSidecar implements EmbeddingTarget {
 /** A backend the tests bring up themselves: no child, no health gate. */
 class UrlBackend implements EmbeddingTarget {
   constructor(public readonly base: string) {}
+  authHeaders(): Record<string, string> {
+    return {};
+  }
   waitReady(): Promise<void> {
     return Promise.resolve();
   }
@@ -356,8 +373,14 @@ class SharedSidecar implements EmbeddingTarget {
     return this.entry.started;
   }
 
+  /** The live claim's address — a respawn after an idle reap owns a new port. */
   get base(): string {
-    return this.entry.sidecar.base;
+    return this.liveEntry().sidecar.base;
+  }
+
+  /** The live claim's key — a respawn after an idle reap has a fresh one. */
+  authHeaders(): Record<string, string> {
+    return this.liveEntry().sidecar.authHeaders();
   }
 
   /**
@@ -451,7 +474,7 @@ export class EmbedEngine {
     try {
       response = await fetch(`${this.target.base}${EMBED_PATH}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...this.target.authHeaders() },
         body: JSON.stringify({ content: input.length === 1 ? input[0] : input }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         redirect: "error",
