@@ -79,6 +79,7 @@ Options:
   --host <host>       HTTP bind address (default 127.0.0.1)
   --port <port>       HTTP port (default 8766)
   --code              Log in with an 8-character pairing code instead of the QR
+  --qr                Log in with the QR, without asking which way (it is the default)
   --phone <number>    Your number in international format; implies --code
   --agent             With setup: print the procedure for an AI agent on stdout, then exit
   --client <name>     With setup: connect this client instead of the detected ones (repeatable)
