@@ -345,6 +345,11 @@ export class AccountKeep {
       this.failed(sid, permanent(err));
       return;
     }
+    if (buffer.length === 0) {
+      // An empty stream is a glitch, not the file: a later catch-up may try it, a few times.
+      this.failed(sid, false);
+      return;
+    }
     const expected = mediaSha256(raw);
     if (expected !== undefined && !createHash("sha256").update(buffer).digest().equals(expected)) {
       // Not the file the sender stated: asking again brings the same bytes.
@@ -358,12 +363,12 @@ export class AccountKeep {
     }
     let stored = false;
     try {
-      stored = buffer.length > 0 && (await this.store(sid, raw, buffer));
-    } catch (err) {
-      logError("kept media", err);
+      stored = await this.store(sid, raw, buffer);
+    } catch {
+      // Logged by the serial chain.
     }
     if (stored) this.failures.delete(sid);
-    // Empty, refused after all (no room, deleted meanwhile) or not writable: a later catch-up may try it, a few times.
+    // Refused after all (no room, deleted meanwhile) or not writable: a later catch-up may try it, a few times.
     else this.failed(sid, false);
   }
 
