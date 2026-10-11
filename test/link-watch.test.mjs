@@ -920,3 +920,24 @@ test("a new link forgets a credentials-missing outage", (t) => {
   assert.equal(watch.outageOpen(), false);
   assert.equal(existsSync(file), false);
 });
+
+// The seventh review pass ----------------------------------------------------------
+
+test("a credentials-missing outage leaves the way out to last_error, even past its alert and the give-up", (t) => {
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, tempFile(t));
+  setStatus(watch, host, "disconnected");
+  watch.noteCredentialsMissing();
+  awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
+  assert.equal(watch.info().alerted, "disconnected");
+  assert.equal(watch.hint(), null, "no 'do not link again' beside a fix that may need a new link");
+});
+
+test("the give-up line keeps the missing-credentials fix", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { svc } = serviceWatch(t);
+  svc.reconnectAttempts = 10;
+  svc.readAccount();
+  assert.match(svc.getStatus().last_error, /could not be reached after 10 attempts/);
+  assert.match(svc.getStatus().last_error, /run `wazap logout`, then link again/);
+});

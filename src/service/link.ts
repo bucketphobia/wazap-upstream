@@ -441,6 +441,8 @@ export class LinkMonitor {
     if (this.alerted !== "disconnected" || this.downSince === null) return null;
     const status = this.host.status();
     if ((status !== "disconnected" && status !== "connecting") || !this.host.canStart()) return null;
+    // Credentials gone missing have their own way out (last_error says it), which may be a new link.
+    if (this.credentialsMissing) return null;
     const minutes = Math.max(1, Math.round((this.now() - this.downSince) / 60_000));
     return (
       `The WhatsApp link has been down for ${minutes} min (since ${isoWithOffset(this.downSince)}). ` +

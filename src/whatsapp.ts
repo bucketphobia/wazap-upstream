@@ -1655,7 +1655,8 @@ export class WhatsAppService implements WhatsAppApi {
     this.linkWatch.noteCredentialsMissing();
     this.lastError = `${err.message} Retrying; ${err.fix}.`;
     this.setStatus("disconnected");
-    this.scheduleReconnect(err.message);
+    // The whole line, fix included: past the give-up it is what last_error keeps saying.
+    this.scheduleReconnect(this.lastError);
   }
 
   private markCorrupt(err: unknown): void {
