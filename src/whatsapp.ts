@@ -48,7 +48,7 @@ import { AccountGroups } from "./service/groups.js";
 import { AccountHealth, classifyClose, TEMP_BAN_RETRY_MAX_MS, type NewChatCapReport, type ReachoutLock } from "./service/health.js";
 import { AccountIdentity } from "./service/identity.js";
 import { AccountIngest, type MessageRef } from "./service/ingest.js";
-import { LinkMonitor, type ProbeResult } from "./service/link.js";
+import { LINK_FILE, LinkMonitor, type ProbeResult } from "./service/link.js";
 import { AccountMedia } from "./service/media.js";
 import { AccountRecall } from "./service/recall.js";
 import { AccountReads } from "./service/reads.js";
@@ -525,7 +525,7 @@ export class WhatsAppService implements WhatsAppApi {
         retryNow: (reason) => this.retryNow(reason),
         alert: (alert) => this.webhooks.queueAlert(alert),
       },
-      config.command === "serve" ? join(paths.root, "link.json") : null
+      config.command === "serve" ? join(paths.root, LINK_FILE) : null
     );
     this.storage.openDatabase();
     // Only the server transcribes: a short-lived command (status --live, contacts resync, the sync after a
@@ -1617,10 +1617,11 @@ export class WhatsAppService implements WhatsAppApi {
       this.markCorrupt(err);
       return "corrupt";
     }
-    // This service had a session: credentials gone from under it (a volume not mounted yet after a
-    // wake) are a dropped link, retried, not an invitation to link again over them. A logout stops
-    // the service before it deletes them, so it never comes here.
-    if (!linked && this.account !== null) {
+    // This service, or the process before it, had a session: credentials gone from under it (a volume
+    // not mounted yet after a wake) are a dropped link, retried, not an invitation to link again over
+    // them. A logout stops the service and deletes the outage record with the credentials, so it
+    // never comes here; a new link forgets the record too.
+    if (!linked && (this.account !== null || this.linkWatch.outageOpen())) {
       this.credentialsUnreadable(new CredentialsReadError("ENOENT"));
       return "unreadable";
     }

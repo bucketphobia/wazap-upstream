@@ -2198,7 +2198,8 @@ test("with WAZAP_PERSIST_HISTORY=0 a message event still waiting at a stop is ca
     const second = openService(WhatsAppService, config);
     try {
       await second.bootStorage();
-      await waitFor(() => outboxRows(second).every((row) => row.state !== "pending"), 3_000, "the outbox to settle");
+      // Settled means delivered, failed or cancelled: a POST still `sending` has not settled yet.
+      await waitFor(() => outboxRows(second).every((row) => row.state !== "pending" && row.state !== "sending"), 3_000, "the outbox to settle");
       assert.deepEqual(
         outboxRows(second).map((row) => [row.kind, row.state]),
         [

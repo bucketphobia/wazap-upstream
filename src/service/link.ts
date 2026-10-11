@@ -55,6 +55,9 @@ export const SEEN_EVERY_MS = 60_000;
  */
 export const RECORD_STALE_MS = 3 * 60_000;
 
+/** The record's name in the account folder. A logout removes it with the session it was about. */
+export const LINK_FILE = "link.json";
+
 export type LinkAlertKind = "disconnected" | "recovered" | "relink_required";
 
 export interface LinkAlert {
@@ -172,6 +175,15 @@ export class LinkMonitor {
       this.downSince = null;
       this.save();
     }
+  }
+
+  /**
+   * Whether an outage of a session is open, from this process or the one before it: what tells a
+   * credentials file gone missing (a disk not mounted yet) from an account never linked, across the
+   * restart the supervisor makes after a give-up.
+   */
+  outageOpen(): boolean {
+    return this.file !== null && this.downSince !== null;
   }
 
   /** A new link supersedes whatever the old session's outage was. */
@@ -335,6 +347,8 @@ export class LinkMonitor {
 
   private checkAlert(now: number): void {
     if (this.downSince === null || this.alerted !== null) return;
+    // A start that cannot succeed (the database failed) is not a link outage; get_status says why.
+    if (!this.host.canStart()) return;
     const status = this.host.status();
     if (status === "connected" || NO_SESSION.has(status)) return;
     if (now - this.downSince < ALERT_AFTER_MS) return;
@@ -410,7 +424,7 @@ export class LinkMonitor {
   hint(): string | null {
     if (this.alerted !== "disconnected" || this.downSince === null) return null;
     const status = this.host.status();
-    if (status !== "disconnected" && status !== "connecting") return null;
+    if ((status !== "disconnected" && status !== "connecting") || !this.host.canStart()) return null;
     const minutes = Math.max(1, Math.round((this.now() - this.downSince) / 60_000));
     return (
       `The WhatsApp link has been down for ${minutes} min (since ${isoWithOffset(this.downSince)}). ` +

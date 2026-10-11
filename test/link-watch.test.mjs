@@ -851,12 +851,38 @@ test("unreadable credentials are a WazapError with a fix that never says log out
 test("a start that cannot succeed (the database failed) is not dressed up as a WhatsApp outage", (t) => {
   const host = fakeHost({ statusValue: "connecting", startable: false });
   const watch = watching(t, host, tempFile(t));
-  awake(watch, host, STALLED_DOWN_MS * 5);
+  awake(watch, host, ALERT_AFTER_MS * 3);
   assert.deepEqual(host.forced, []);
+  assert.deepEqual(host.alerts, [], "nor told as one");
+  assert.equal(watch.hint(), null);
 });
 
 test("a credentials file gone from under a session says so, and how out if it is gone for good", () => {
   const err = new CredentialsReadError("ENOENT");
   assert.equal(err.message, "The stored credentials file is missing.");
   assert.match(err.fix, /wazap logout`, then link again/);
+});
+
+// The fifth review pass ------------------------------------------------------------
+
+test("missing credentials stay a dropped link across the give-up restart, and a logout ends it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { svc, dataDir } = serviceWatch(t);
+  assert.equal(svc.readAccount(), "unreadable");
+  const record = join(dataDir, "accounts", "default", "link.json");
+  assert.equal(existsSync(record), true, "the open outage is on disk");
+  // The process the supervisor starts after the give-up exit knows no account, only the record.
+  const next = openService(WhatsAppService, offlineConfig("wazap-link-next-", { dataDir }));
+  t.after(() => next.stop());
+  assert.equal(next.readAccount(), "unreadable", "still retried, not not_linked");
+  assert.equal(next.getStatus().status, "disconnected");
+
+  const { logoutAccount } = await import("../dist/logout.js");
+  t.mock.timers.reset();
+  assert.equal(await logoutAccount(dataDir, "default"), "not_linked");
+  assert.equal(existsSync(record), false, "the logout takes the record with the session");
+  const fresh = openService(WhatsAppService, offlineConfig("wazap-link-fresh-", { dataDir }));
+  t.after(() => fresh.stop());
+  assert.equal(fresh.readAccount(), null);
+  assert.equal(fresh.getStatus().status, "not_linked", "now a new link is what it needs");
 });

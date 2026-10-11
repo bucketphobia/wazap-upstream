@@ -474,7 +474,7 @@ URL removed.
   "down_since": "2026-09-08T14:10:00.000Z",
   "down_for_seconds": 300,
   "reason": "WebSocket Error (getaddrinfo ENOTFOUND web.whatsapp.com)",
-  "fix": "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. Check the machine's network, and that it is awake",
+  "fix": "Nothing to re-link: wazap keeps reconnecting and its supervisor restarts it if that fails. `reason` says what fails: usually the machine's network, or that it is asleep; for credentials that cannot be read, their folder's ownership and permissions",
   "account_id": "default",
   "account_name": "default"
 }
