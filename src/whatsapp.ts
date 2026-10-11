@@ -480,7 +480,7 @@ export class WhatsAppService implements WhatsAppApi {
         status: () => this.status,
         sock: () => this.sockClient,
         hasMessage: (id) => this.hasMessage(id),
-        mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        mediaBuffer: (sock, messageId, raw, maxBytes) => this.mediaBuffer(sock, messageId, raw, maxBytes),
         scheduleFileCleanup: () => this.storage.scheduleFileCleanup(),
       },
       this.identity,
@@ -1741,12 +1741,13 @@ export class WhatsAppService implements WhatsAppApi {
    * the declared length before the download starts, and the stream itself
    * while it lands — a sender can understate the first, not the second.
    */
-  private async mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage): Promise<Buffer> {
+  private async mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage, maxBytes = MEDIA_DOWNLOAD_MAX_BYTES): Promise<Buffer> {
+    const cap = Math.min(maxBytes, MEDIA_DOWNLOAD_MAX_BYTES);
     const declared = mediaInfo(raw)?.size;
-    if (declared !== undefined && declared > MEDIA_DOWNLOAD_MAX_BYTES) {
+    if (declared !== undefined && declared > cap) {
       throw new WazapError(
         "FILE_TOO_LARGE",
-        `The media of ${messageId} is ${Math.ceil(declared / 1_000_000)} MB; downloads are capped at ${MEDIA_DOWNLOAD_MAX_BYTES / 1_000_000} MB.`
+        `The media of ${messageId} is ${Math.ceil(declared / 1_000_000)} MB; downloads are capped at ${cap / 1_000_000} MB.`
       );
     }
     try {
@@ -1759,11 +1760,11 @@ export class WhatsAppService implements WhatsAppApi {
       for await (const chunk of stream) {
         this.views.messageOrThrow(messageId);
         bytes += (chunk as Buffer).length;
-        if (bytes > MEDIA_DOWNLOAD_MAX_BYTES) {
+        if (bytes > cap) {
           stream.destroy();
           throw new WazapError(
             "FILE_TOO_LARGE",
-            `The media of ${messageId} exceeds the ${MEDIA_DOWNLOAD_MAX_BYTES / 1_000_000} MB download cap.`
+            `The media of ${messageId} exceeds the ${cap / 1_000_000} MB download cap.`
           );
         }
         chunks.push(chunk as Buffer);

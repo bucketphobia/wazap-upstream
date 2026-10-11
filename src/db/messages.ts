@@ -1179,19 +1179,30 @@ export class Messages {
   }
 
   /**
-   * Visible messages of these types from `since` on, newest first, that carry
+   * Points `kind` rows at `from` to `to` instead: the same file, reached by a
+   * new path (the data dir moved). `from` is queued for unlinking by the
+   * trigger, and the service unlinks only paths inside its own folders.
+   */
+  rehomeMedia(kind: string, from: string, to: string): number {
+    return this.c.write(() => this.c.run("UPDATE media SET path = ? WHERE kind = ? AND path = ?", to, kind, from));
+  }
+
+  /**
+   * Visible messages of these types from `since` on (and below the id
+   * `before`, for the next page), newest first, that carry
    * no file of `kind` yet: what arrived while nothing was there to keep it.
    */
-  withoutMedia(kind: string, types: readonly string[], since: number, limit: number): StoredMessage[] {
+  withoutMedia(kind: string, types: readonly string[], since: number, limit: number, before = NO_UPPER_BOUND): StoredMessage[] {
     if (types.length === 0) return [];
     const floor = Math.max(1, since);
     return this.c
       .all<MessageRow>(
         `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
-         WHERE m.id >= ? AND m.ts >= ? AND m.type IN (SELECT value FROM json_each(?)) AND ${VISIBLE}
+         WHERE m.id >= ? AND m.id < ? AND m.ts >= ? AND m.type IN (SELECT value FROM json_each(?)) AND ${VISIBLE}
            AND NOT EXISTS (SELECT 1 FROM media k WHERE k.message_id = m.id AND k.kind = ?)
          ORDER BY m.id DESC LIMIT ?`,
         idLowerBound(floor),
+        before,
         floor,
         JSON.stringify(types),
         this.c.now(),

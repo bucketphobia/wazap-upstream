@@ -405,6 +405,7 @@ interface MediaNode {
   fileName?: string | null;
   jpegThumbnail?: Uint8Array | null;
   fileSha256?: Uint8Array | null;
+  viewOnce?: boolean | null;
 }
 
 /** Media whose WhatsApp envelope carries a JPEG preview of a few KB. */
@@ -1215,6 +1216,15 @@ export function mediaSha256(raw: WAMessage): Buffer | undefined {
     return hash && hash.length === 32 ? Buffer.from(hash) : undefined;
   }
   return undefined;
+}
+
+/** Whether the media is view-once: wrapped as one, or flagged on its own node. */
+export function mediaViewOnce(raw: WAMessage): boolean {
+  const a = analyze(raw);
+  if (a.type === "view_once" || (a.content !== undefined && viewOnceInner(a.content) !== undefined)) return true;
+  const inner = a.inner;
+  if (!inner) return false;
+  return MEDIA_KEYS.some((mediaKey) => (inner[mediaKey] as MediaNode | null | undefined)?.viewOnce === true);
 }
 
 /**

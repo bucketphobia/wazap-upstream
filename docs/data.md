@@ -100,17 +100,24 @@ cannot be downloaded: `get_media` says `MEDIA_UNAVAILABLE`. So the server
 (`wazap serve`) downloads the media of the chats you choose the moment it
 arrives, and keeps it in `accounts/<id>/kept/` (`0600` files in a `0700`
 folder). `get_media` serves that copy first, with or without a link to
-WhatsApp, and says so with `source: "kept"`; a voice note's transcript and a
-photo's preview are made from it too. Without a copy it downloads from WhatsApp
+WhatsApp, and says so with `source: "kept"`; a voice note's transcript is made
+from it too, even with the link down, and so is a photo's preview while linked. Without a copy it downloads from WhatsApp
 as before (`source: "whatsapp"`), and keeps what it downloaded when the
 settings want it.
 
 - **Which media.** By default the photos, voice notes, audio and documents of
-  every chat that is not muted (`WAZAP_MEDIA_KEEP=unmuted`); `all` takes muted
-  chats too, `chats` only the ones in `WAZAP_MEDIA_KEEP_CHATS`, and
-  `WAZAP_MEDIA_KEEP_TYPES` adds video or stickers. Stories and view-once media
-  are never kept. What arrives live is downloaded; when the server connects, what
-  arrived in the last two days while nothing was keeping it is fetched as well.
+  every direct or group chat that is not muted (`WAZAP_MEDIA_KEEP=unmuted`);
+  `all` takes muted chats too, `chats` only the ones in
+  `WAZAP_MEDIA_KEEP_CHATS`, and `WAZAP_MEDIA_KEEP_TYPES` adds video or
+  stickers. Channels and broadcast lists are kept only when listed in
+  `WAZAP_MEDIA_KEEP_CHATS`, which also keeps a listed chat while it is muted.
+  Stories and view-once media are never kept.
+- **When.** What arrives live is downloaded at once, one file at a time. When
+  the server connects, and whenever the queue of 200 downloads was full, what
+  arrived in the last two days that the settings want and nothing kept yet is
+  fetched as well. A download cut short (the link dropped) is tried again at
+  the next of those, up to three times; one WhatsApp no longer has, or that is
+  too big, is not.
 - **Bounded.** No file over `WAZAP_MEDIA_KEEP_MAX_MB` (16 MB). All kept files
   of an account together stay under `WAZAP_MEDIA_KEEP_QUOTA_MB` (1 GB): the
   oldest are removed first to make room. A file kept longer than
@@ -122,10 +129,13 @@ settings want it.
   `WAZAP_RETENTION=1`, a cleared or deleted chat and `WAZAP_PERSIST_HISTORY=0`
   remove it through the same crash-safe queue as previews. Nothing is kept with
   `WAZAP_PERSIST_HISTORY=0`.
-- **Across restarts.** The files and their records survive a restart. A file
-  is written under a temporary name and recorded only once it is whole, so a
-  crash leaves at most a file nobody recorded, which the next start removes; a
-  record whose file has gone is forgotten. A kept file that no longer matches
+- **Across restarts.** The files and their records survive a restart, and a
+  move of the data dir: a record is matched by its file's name in the kept
+  folder, wherever the data dir is now. A file is written under a temporary
+  name and recorded only once it is whole, so a crash leaves at most a file
+  nobody recorded, which the next start removes; a record whose file has gone
+  is forgotten. That start-up sweep removes only files named the way wazap
+  names kept files, so anything else you put in `kept/` stays. A kept file that no longer matches
   the hash the sender stated is not served: WhatsApp is asked instead.
 - **Turning it off.** `WAZAP_MEDIA_KEEP=off` keeps nothing new and removes the
   copies kept earlier at the next start. A value that does not parse keeps
@@ -138,8 +148,10 @@ kept chat can push older files out by sending a lot of it; the chats that
 matter most are safest under `WAZAP_MEDIA_KEEP=chats`.
 
 Kept files are copies of what people sent you, unencrypted on your disk like
-the database. `wazap backup` copies the database only; a restored database
-forgets the kept files it no longer finds.
+the database. `wazap backup` copies the database only. A restored database
+forgets the kept files it no longer finds, and the files kept after the backup
+was taken are removed at the next start, since no record names them; the same
+goes for a different number linking, whose fresh database records none.
 
 ## Upgrading to 0.22
 

@@ -476,3 +476,183 @@ test("openService builds a keeper even with no kept-media config", () => {
   assert.equal(svc.keep.active, false);
   return svc.stop();
 });
+
+// --- review findings ----------------------------------------------------------
+
+test("a data dir that moved, or is reached through a symlink, keeps its kept files", async (t) => {
+  const { renameSync, symlinkSync } = await import("node:fs");
+  const parent = mkdtempSync(join(tmpdir(), "wazap-kept-move-"));
+  const before = join(parent, "a");
+  (await import("node:fs")).mkdirSync(before);
+  const first = await setup(t, { dataDir: before });
+  const bytes = Buffer.from("survives the move");
+  const sid = first.arrive(ANA, photo(bytes), bytes);
+  await keptOf(first.svc, sid);
+  await first.svc.stop();
+
+  const after = join(parent, "b");
+  renameSync(before, after);
+  const moved = await setup(t, { dataDir: after });
+  moved.state.expired = true;
+  const out = (await moved.call("get_media", { message_id: sid, save_to: moved.saveTo })).structuredContent;
+  assert.equal(out.source, "kept", "found in the kept folder where the data dir is now");
+  assert.deepEqual(readFileSync(out.path), bytes);
+  assert.ok(keptPath(moved.svc, sid).startsWith(join(after, "accounts")), "and the record follows it");
+  await moved.svc.stop();
+
+  const link = join(parent, "link");
+  symlinkSync(after, link);
+  const linked = await setup(t, { dataDir: link });
+  linked.state.expired = true;
+  assert.equal((await linked.call("get_media", { message_id: sid, save_to: linked.saveTo })).structuredContent.source, "kept");
+  assert.equal(readdirSync(join(after, "accounts", "default", "kept")).length, 1, "nothing was swept");
+});
+
+test("the start-up sweep removes only files named the way wazap names them", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wazap-kept-sweep-"));
+  const first = await setup(t, { dataDir });
+  const sid = first.arrive(ANA, photo(Buffer.from("k")), Buffer.from("k"));
+  await keptOf(first.svc, sid);
+  await first.svc.stop();
+  const keptDir = accountPaths(dataDir, "default").keptDir;
+  const { mkdirSync } = await import("node:fs");
+  writeFileSync(join(keptDir, "my-notes.txt"), "the user's own file");
+  mkdirSync(join(keptDir, "1700000000000-abcdef01.jpeg"));
+  writeFileSync(join(keptDir, "1700000000000-abcdef02.jpeg"), "orphan");
+  await setup(t, { dataDir });
+  const left = readdirSync(keptDir).sort();
+  assert.ok(left.includes("my-notes.txt"), "a file wazap does not name is left alone");
+  assert.ok(left.includes("1700000000000-abcdef01.jpeg"), "so is a directory");
+  assert.ok(!left.includes("1700000000000-abcdef02.jpeg"), "an unrecorded kept file goes");
+});
+
+test("a short-lived command with keeping off neither removes nor sweeps", async (t) => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wazap-kept-cli-"));
+  const first = await setup(t, { dataDir });
+  const sid = first.arrive(ANA, photo(Buffer.from("cli")), Buffer.from("cli"));
+  const path = await keptOf(first.svc, sid);
+  await first.svc.stop();
+  const keptDir = accountPaths(dataDir, "default").keptDir;
+  writeFileSync(join(keptDir, "1700000000000-abcdef03.jpeg"), "orphan");
+  const cli = await setup(t, { dataDir, env: { WAZAP_MEDIA_KEEP: "off" }, config: { command: "status" } });
+  await cli.svc.storage.fileWork;
+  assert.ok(existsSync(path));
+  assert.ok(existsSync(join(keptDir, "1700000000000-abcdef03.jpeg")));
+  assert.ok(keptPath(cli.svc, sid));
+});
+
+test("the catch-up pages past media it does not want", async (t) => {
+  const { svc, arrive, state } = await setup(t, { env: { WAZAP_MEDIA_KEEP: "chats", WAZAP_MEDIA_KEEP_CHATS: ANA } });
+  svc.status = "disconnected";
+  const wanted = arrive(ANA, photo(Buffer.from("wanted")), Buffer.from("wanted"));
+  for (let i = 0; i < 210; i++) arrive(BOB, photo(Buffer.from(`n${i}`)), Buffer.from(`n${i}`));
+  svc.keep.queue.length = 0;
+  svc.keep.queued.clear();
+  svc.status = "connected";
+  svc.keep.connected();
+  await keptOf(svc, wanted);
+  await settled(svc);
+  assert.equal(state.downloads, 1, "only the wanted photo was downloaded");
+});
+
+test("what a full queue turned away is caught up once the queue drains", async (t) => {
+  const { svc, arrive } = await setup(t);
+  svc.status = "disconnected";
+  const sids = [];
+  for (let i = 0; i < 205; i++) sids.push(arrive(ANA, photo(Buffer.from(`q${i}`)), Buffer.from(`q${i}`)));
+  assert.equal(svc.keep.queue.length, 200);
+  svc.status = "connected";
+  svc.keep.kick();
+  await waitFor(() => sids.every((sid) => keptPath(svc, sid)), 20000, "all 205 kept");
+});
+
+test("a download that failed on the way is tried again; one WhatsApp no longer has is not", async (t) => {
+  const { svc, arrive, state } = await setup(t);
+  const bytes = Buffer.from("flaky");
+  let failNext = true;
+  const real = svc.mediaBuffer;
+  svc.mediaBuffer = async (...args) => {
+    if (failNext) {
+      failNext = false;
+      state.downloads++;
+      throw new WazapError("MEDIA_UNAVAILABLE", "Could not download: socket hang up");
+    }
+    return real(...args);
+  };
+  const flaky = arrive(ANA, photo(bytes), bytes);
+  await settled(svc);
+  assert.equal(keptPath(svc, flaky), undefined);
+  svc.keep.connected();
+  await keptOf(svc, flaky);
+
+  const goneBytes = Buffer.from("gone");
+  svc.mediaBuffer = async () => {
+    state.downloads++;
+    const err = new WazapError("MEDIA_UNAVAILABLE", "Could not download: 410");
+    Object.defineProperty(err, "cause", { value: { output: { statusCode: 410 } } });
+    throw err;
+  };
+  const gone = arrive(ANA, photo(goneBytes), goneBytes);
+  await settled(svc);
+  const tries = state.downloads;
+  svc.keep.connected();
+  await settled(svc);
+  assert.equal(state.downloads, tries, "expired media is not asked for again");
+  assert.equal(keptPath(svc, gone), undefined);
+});
+
+test("nothing kept is evicted for a file that is then not written", async (t) => {
+  const { svc, arrive } = await setup(t, { env: { WAZAP_MEDIA_KEEP_QUOTA_MB: "1" } });
+  const old = Buffer.alloc(700 * 1024, 1);
+  const first = arrive(ANA, photo(old), old);
+  await keptOf(svc, first);
+  svc.keep.host.diskSpace = async () => ({ free: 1 * MB, total: 100 * MB });
+  const next = Buffer.alloc(700 * 1024, 2);
+  const second = arrive(ANA, photo(next), next);
+  await settled(svc);
+  assert.equal(keptPath(svc, second), undefined);
+  assert.ok(keptPath(svc, first), "the older file was not given up for nothing");
+});
+
+test("channels are kept only when listed, and media flagged view-once never", async (t) => {
+  const CHANNEL = "120363000000000099@newsletter";
+  const plain = await setup(t, { env: { WAZAP_MEDIA_KEEP: "all" } });
+  const fromChannel = plain.arrive(CHANNEL, photo(Buffer.from("ch")), Buffer.from("ch"));
+  const flagged = plain.arrive(ANA, photo(Buffer.from("vo"), { viewOnce: true }), Buffer.from("vo"));
+  const normal = plain.arrive(ANA, photo(Buffer.from("ok")), Buffer.from("ok"));
+  await keptOf(plain.svc, normal);
+  await settled(plain.svc);
+  assert.ok(plain.svc.hasMessage(fromChannel));
+  assert.equal(keptPath(plain.svc, fromChannel), undefined, "all keeps conversations, not channels");
+  assert.equal(keptPath(plain.svc, flagged), undefined);
+
+  const listed = await setup(t, { env: { WAZAP_MEDIA_KEEP_CHATS: CHANNEL } });
+  const kept = listed.arrive(CHANNEL, photo(Buffer.from("ch2")), Buffer.from("ch2"));
+  assert.ok(listed.svc.hasMessage(kept), "a channel post is stored");
+  await keptOf(listed.svc, kept);
+});
+
+test("the hourly sweep applies the age limit while the server runs", async (t) => {
+  const { svc, arrive } = await setup(t, { config: { mediaKeep: { ...mediaKeepSettings({}), maxAgeMs: 200 } } });
+  const sid = arrive(ANA, photo(Buffer.from("aging")), Buffer.from("aging"));
+  const path = await keptOf(svc, sid);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await svc.keep.sweep();
+  await svc.storage.fileWork;
+  assert.equal(keptPath(svc, sid), undefined);
+  assert.equal(existsSync(path), false);
+});
+
+test("the worker never asks WhatsApp for more than a kept file may hold", async (t) => {
+  const { svc, arrive, state } = await setup(t, { env: { WAZAP_MEDIA_KEEP_MAX_MB: "2" } });
+  const caps = [];
+  const real = svc.mediaBuffer;
+  svc.mediaBuffer = async (sock, sid, raw, maxBytes) => {
+    caps.push(maxBytes);
+    return real(sock, sid, raw, maxBytes);
+  };
+  const sid = arrive(ANA, photo(Buffer.from("c")), Buffer.from("c"));
+  await keptOf(svc, sid);
+  assert.deepEqual(caps, [2 * MB]);
+  assert.equal(state.downloads, 1);
+});

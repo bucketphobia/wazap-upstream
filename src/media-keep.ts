@@ -35,7 +35,7 @@ export type MediaKeepType = (typeof MEDIA_KEEP_TYPES)[number];
 
 export interface MediaKeepSettings {
   policy: MediaKeepPolicy;
-  /** Chat ids and phone numbers: the only chats under `chats`, and kept even while muted under `unmuted`. */
+  /** Chat ids and phone numbers: the only chats under `chats`; under the others kept even while muted, channels included. */
   chats: string[];
   types: ReadonlySet<MediaKeepType>;
   /** A file bigger than this is not kept. */

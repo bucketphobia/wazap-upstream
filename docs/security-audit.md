@@ -772,18 +772,25 @@ so it is held to the rules the database already keeps.
   under `WAZAP_PERSIST_HISTORY=0` release it through
   `pending_unlinks` in the same transaction. A message deleted while its file
   was being written refuses the record and the file is removed at once. Nothing
-  is kept with history off, from stories, or from view-once messages.
+  is kept with history off, from stories, from view-once messages (wrapped,
+  or flagged on the media node), or from channels and broadcast lists unless
+  listed.
 - **Bounded.** A declared size over `WAZAP_MEDIA_KEEP_MAX_MB` is never
-  downloaded and an understated one is dropped after download (get_media's own
-  100 MB stream cap still applies); all files stay under the quota, oldest
-  first, and are removed past their age. A write that would leave less than the
-  smaller of 1 GB and 5% of the disk free is skipped. The queue holds at most
-  200 downloads, run one at a time; a failed download is not retried by the
-  same process.
-- **Only its own files.** A kept file is read back, and unlinked, only when the
-  row's path is inside `kept/` (or `previews/`), whatever the database says. A
-  file is written under a temporary name and recorded after the rename; files
-  in `kept/` no row records are removed at the next start. A kept file that no
+  downloaded, and the download stream itself stops at that size, so an
+  understated one costs at most that much memory and bandwidth. All files stay
+  under the quota, oldest first, and are removed past their age. A write that
+  would leave less than the smaller of 1 GB and 5% of the disk free is skipped,
+  and is checked before anything is evicted for it. The queue holds at most 200
+  downloads, run one at a time; the catch-up scans at most 5,000 messages of
+  the last two days. A transient failure is retried at most three times, an
+  expired (403/404/410) or too-big file never.
+- **Only its own files.** A row's path is trusted for its file name only, and
+  only a name wazap gives (`<ms>-<8 hex>.<ext>`): the file is read from this
+  account's `kept/`, so a moved or symlinked data dir keeps its files and no
+  row can point a read elsewhere. Unlinks happen only inside `kept/` (or
+  `previews/`). A file is written under a temporary name and recorded after
+  the rename; regular files in `kept/` with a kept-file name that no row
+  records are removed at the next start, and nothing else there is touched. A kept file that no
   longer matches the sender's `fileSha256` is not served.
 - **A typo never deletes.** `WAZAP_MEDIA_KEEP=off` removes the kept copies at
   the next start; a value that does not parse keeps nothing new and removes
@@ -795,9 +802,10 @@ Not covered: the files are unencrypted copies on the user's disk, outside
 shared, so a sender in a kept chat can push older files out by flooding it with
 media (bandwidth and eviction, not disk: the bounds hold); `chats` narrows who
 can. Ages are measured by the system clock, so a clock jumping forward removes
-files early. A different number
-linking sets the database aside but not its kept files: the next start removes
-them as unrecorded, so a number linking back finds its history without them.
+files early. A different number linking, or a restored backup, leaves kept
+files no record names: the next start removes them, so a number linking back
+finds its history without them. SHA-256 checks run on the event loop, on files
+of at most `WAZAP_MEDIA_KEEP_MAX_MB`.
 Tests: `test/kept-media.test.mjs`.
 
 ## Pre-release review
