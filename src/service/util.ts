@@ -1,5 +1,6 @@
 /** Small helpers more than one part of WhatsAppService (src/whatsapp.ts, src/service/) reaches for. */
 
+import { isAbsolute, relative, sep } from "node:path";
 import { proto } from "baileys";
 
 /** How long a profile photo lookup may take before the answer goes without it. */
@@ -22,6 +23,12 @@ export function statusCodeOf(err: unknown): number | undefined {
 /** What the service writes: directories and files only the user can read. */
 export const DIR_MODE = 0o700;
 export const FILE_MODE = 0o600;
+
+/** A path inside `dir`: not `dir` itself and not outside it. Only such files does the service unlink or read back. */
+export function insideDir(dir: string, path: string): boolean {
+  const inside = relative(dir, path);
+  return inside !== "" && inside !== ".." && !inside.startsWith(`..${sep}`) && !isAbsolute(inside);
+}
 
 /** A result limit a caller left out or spelled wrong reads as the tools' own default. */
 export function pageLimit(limit: number): number {

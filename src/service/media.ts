@@ -49,8 +49,12 @@ export interface MediaHost {
   guarded<T>(work: () => Promise<T>): Promise<T>;
   ensureConnected(): WASocket;
   hasMessage(id: string): boolean;
-  /** The bytes behind a message's media. */
+  /** The bytes behind a message's media, from WhatsApp. */
   mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage): Promise<Buffer>;
+  /** The kept copy of a message's media, or null (src/service/keep.ts). */
+  keptMedia(messageId: string, raw: WAMessage): Promise<Buffer | null>;
+  /** WhatsApp's copy, just downloaded: kept too when the kept-media settings want it. */
+  offerKept(messageId: string, raw: WAMessage, buffer: Buffer): Promise<void>;
 }
 
 export class AccountMedia {
@@ -97,7 +101,7 @@ export class AccountMedia {
         const sock = this.host.sock();
         if (!sock || this.host.status() !== "connected") continue;
         try {
-          const buffer = await this.host.mediaBuffer(sock, sid, raw);
+          const buffer = (await this.host.keptMedia(sid, raw)) ?? (await this.host.mediaBuffer(sock, sid, raw));
           const made = photo ? Buffer.from(makePreview(buffer).base64, "base64") : await videoFrame(buffer);
           if (!made || !this.host.hasMessage(sid)) continue;
           await this.writePreview(sid, made);
@@ -144,13 +148,24 @@ export class AccountMedia {
     if (recorded.replaced !== null && recorded.replaced !== path) await rm(recorded.replaced, { force: true });
   }
 
+  /**
+   * The kept copy first: it answers with no link, and after WhatsApp let the
+   * file go. Only without one is WhatsApp asked, and what it sends is kept
+   * then when the settings want it.
+   */
   downloadMedia(messageId: string, saveTo?: string): Promise<MediaResult> {
     return this.host.guarded(async () => {
-      const sock = this.host.ensureConnected();
       const raw = this.views.messageOrThrow(messageId);
       const info = mediaInfo(raw);
       if (!info) throw new WazapError("MEDIA_UNAVAILABLE", `Message ${messageId} carries no media.`);
-      const buffer = await this.host.mediaBuffer(sock, messageId, raw);
+      let buffer = await this.host.keptMedia(messageId, raw);
+      const source: MediaResult["source"] = buffer === null ? "whatsapp" : "kept";
+      if (buffer === null) {
+        const sock = this.host.ensureConnected();
+        buffer = await this.host.mediaBuffer(sock, messageId, raw);
+        this.views.messageOrThrow(messageId);
+        await this.host.offerKept(messageId, raw, buffer).catch((err: unknown) => logError("kept media", err));
+      }
       this.views.messageOrThrow(messageId);
 
       const dir = saveTo ?? this.paths.mediaDir;
@@ -168,7 +183,7 @@ export class AccountMedia {
 
       const inline =
         info.mime.startsWith("image/") && buffer.length <= INLINE_IMAGE_MAX_BYTES ? buffer.toString("base64") : null;
-      return { path, mime: info.mime, size: buffer.length, filename, inline_base64: inline };
+      return { path, mime: info.mime, size: buffer.length, filename, inline_base64: inline, source };
     });
   }
 }

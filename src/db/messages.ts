@@ -1155,6 +1155,52 @@ export class Messages {
       .map((row) => ({ kind: row.kind, path: row.path, createdAt: row.created_at }));
   }
 
+  /** Every file recorded under `kind`, oldest first: what a quota or an age limit walks. */
+  mediaOfKind(kind: string): Array<{ path: string; createdAt: number }> {
+    return this.c
+      .all<{ path: string; created_at: number }>("SELECT path, created_at FROM media WHERE kind = ? ORDER BY created_at, path", kind)
+      .map((row) => ({ path: row.path, createdAt: row.created_at }));
+  }
+
+  /**
+   * Forgets these files' `kind` rows; a path no row references any more is
+   * queued for unlinking in the same transaction (pending_unlinks). Returns
+   * how many rows went.
+   */
+  dropMedia(kind: string, paths: readonly string[]): number {
+    if (paths.length === 0) return 0;
+    return this.c.write(() => {
+      let dropped = 0;
+      for (const path of new Set(paths)) {
+        dropped += this.c.run("DELETE FROM media WHERE kind = ? AND path = ?", kind, path);
+      }
+      return dropped;
+    });
+  }
+
+  /**
+   * Visible messages of these types from `since` on, newest first, that carry
+   * no file of `kind` yet: what arrived while nothing was there to keep it.
+   */
+  withoutMedia(kind: string, types: readonly string[], since: number, limit: number): StoredMessage[] {
+    if (types.length === 0) return [];
+    const floor = Math.max(1, since);
+    return this.c
+      .all<MessageRow>(
+        `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
+         WHERE m.id >= ? AND m.ts >= ? AND m.type IN (SELECT value FROM json_each(?)) AND ${VISIBLE}
+           AND NOT EXISTS (SELECT 1 FROM media k WHERE k.message_id = m.id AND k.kind = ?)
+         ORDER BY m.id DESC LIMIT ?`,
+        idLowerBound(floor),
+        floor,
+        JSON.stringify(types),
+        this.c.now(),
+        kind,
+        Math.max(1, Math.floor(limit))
+      )
+      .map(messageFromRow);
+  }
+
   /** A message by any sid spelling; tombstones and expired rows only when asked for. */
   get(sid: string, options: { includeHidden?: boolean } = {}): StoredMessage | null {
     const key = this.identity.findMessage(sid);

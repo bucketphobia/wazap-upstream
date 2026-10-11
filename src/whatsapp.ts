@@ -47,6 +47,7 @@ import { AccountGroups } from "./service/groups.js";
 import { AccountHealth, classifyClose, TEMP_BAN_RETRY_MAX_MS, type NewChatCapReport, type ReachoutLock } from "./service/health.js";
 import { AccountIdentity } from "./service/identity.js";
 import { AccountIngest, type MessageRef } from "./service/ingest.js";
+import { AccountKeep } from "./service/keep.js";
 import { AccountMedia } from "./service/media.js";
 import { AccountRecall } from "./service/recall.js";
 import { AccountReads } from "./service/reads.js";
@@ -219,6 +220,8 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly reads: AccountReads;
   /** get_media's download and the previews reads show (src/service/media.ts). */
   private readonly media: AccountMedia;
+  /** Media downloaded as it arrives and kept, within limits (src/service/keep.ts). */
+  private readonly keep: AccountKeep;
   /** manage_chat and delete_message, and the forgetting each asks for (src/service/chats.ts). */
   private readonly chats: AccountChats;
   /** What the account posts to the webhook, and its status (src/service/webhooks.ts). */
@@ -276,6 +279,7 @@ export class WhatsAppService implements WhatsAppApi {
         startOutbox: () => this.outbox.start(),
         scheduleFlagsBackfill: (db) => this.ingest.scheduleFlagsBackfill(db),
         embedFeed: () => this.recallIndex.embedFeed,
+        bootKeep: () => this.keep.boot(),
       },
       this.identity,
       config,
@@ -350,6 +354,7 @@ export class WhatsAppService implements WhatsAppApi {
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
         mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
         transcriber: (...args) => this.transcriber(...args),
         transcribeReadiness: (...args) => this.transcribeReadiness(...args),
         transcribeAudio: (messageId) => this.transcribeAudio(messageId),
@@ -410,6 +415,7 @@ export class WhatsAppService implements WhatsAppApi {
         announced: (stored, type) => this.webhooks.announced(stored, type),
         nudgeOutbox: () => this.outbox.nudge(),
         embedFeed: () => this.recallIndex.embedFeed,
+        keepMedia: (stored) => this.keep.noteArrivals(stored),
       },
       this.identity,
       this.views,
@@ -461,10 +467,29 @@ export class WhatsAppService implements WhatsAppApi {
         ensureConnected: () => this.ensureConnected(),
         hasMessage: (id) => this.hasMessage(id),
         mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
+        offerKept: (messageId, raw, buffer) => this.keep.offer(messageId, raw, buffer),
       },
       this.views,
       this.storage,
       paths
+    );
+    this.keep = new AccountKeep(
+      {
+        stopped: () => this.stopped,
+        status: () => this.status,
+        sock: () => this.sockClient,
+        hasMessage: (id) => this.hasMessage(id),
+        mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        scheduleFileCleanup: () => this.storage.scheduleFileCleanup(),
+      },
+      this.identity,
+      this.views,
+      this.storage,
+      paths,
+      config.mediaKeep,
+      // Only the server keeps, and only an account that keeps its history: a file outliving its message is not kept.
+      config.command === "serve" && config.persistHistory
     );
     this.chats = new AccountChats(
       {
@@ -586,6 +611,7 @@ export class WhatsAppService implements WhatsAppApi {
     await this.voice.transcribeWorker.finish(this.voice.transcribeSource, STOP_TRANSCRIBE_WAIT_MS);
     this.voice.transcribeWorker.unregister(this.voice.transcribeSource);
     await this.recallIndex.stopRecall();
+    await this.keep.stop();
     const db = this.storage.accountDb;
     if (db !== null && db.isOpen) {
       await Promise.allSettled([this.storage.expirySweep, ...this.folds]);
@@ -1298,6 +1324,7 @@ export class WhatsAppService implements WhatsAppApi {
         void this.healContacts(sock, generation);
         void this.loadBlocklist(sock, generation);
         void this.checkReachout(sock, generation);
+        this.keep.connected();
       } else if (connection === "close") {
         const verdict = classifyClose(lastDisconnect?.error);
         if (verdict.kind === "logged_out") {

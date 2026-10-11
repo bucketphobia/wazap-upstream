@@ -30,7 +30,7 @@ export function webhookAllowsMessage(db: AccountDb, filter: WebhookFilter | null
   return false;
 }
 
-function chatListed(db: AccountDb, chats: readonly string[], chatJid: string): boolean {
+export function chatListed(db: AccountDb, chats: readonly string[], chatJid: string): boolean {
   const number = phoneDigits(db, chatJid);
   const target: SendTarget = number === undefined ? { chat_id: chatJid } : { chat_id: chatJid, number };
   return chats.some((entry) => addressMatches(entry, target));
