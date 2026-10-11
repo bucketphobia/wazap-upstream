@@ -9,7 +9,7 @@
 
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { join } from "node:path";
 import type { AccountRecord } from "../accounts.js";
 import type { AccountPaths, Config } from "../config.js";
 import { AccountDb, purgePreMigrationBackups, StorageError } from "../db/index.js";
@@ -37,7 +37,7 @@ import type { EmbedFeed } from "../recall/index.js";
 import { IMPORT_UNVERIFIED_META, importProgress } from "../storage-status.js";
 import type { StorageInfo } from "../wa-types.js";
 import type { AccountIdentity } from "./identity.js";
-import { leftGroup } from "./util.js";
+import { insideDir, leftGroup } from "./util.js";
 
 /** The account database's file, beside the account's credentials. */
 const DB_FILE = "wazap.sqlite";
@@ -79,6 +79,8 @@ export interface StorageHost {
   startOutbox(): void;
   scheduleFlagsBackfill(db: AccountDb): void;
   embedFeed(): EmbedFeed | null;
+  /** Kept media settles what a crash left and applies its limits, once the database is ready. */
+  bootKeep(): Promise<void>;
 }
 
 export class AccountStorage {
@@ -296,6 +298,7 @@ export class AccountStorage {
       throw this.storageFault!;
     }
     await this.reconcilePreviews(db).catch((err: unknown) => logError("preview reconcile", err));
+    await this.host.bootKeep().catch((err: unknown) => logError("kept media", err));
     await this.scheduleFileCleanup().catch(() => {});
     this.retireLegacy();
     if (this.legacyTimer === null && !this.host.stopped()) {
@@ -494,8 +497,9 @@ export class AccountStorage {
   }
 
   /**
-   * Unlinks the files the database released — previews of deleted, cleared or
-   * expired messages — one pass at a time. A failure is kept for the next
+   * Unlinks the files the database released — previews and kept media of
+   * deleted, cleared or expired messages, and kept media past its limits —
+   * one pass at a time. A failure is kept for the next
    * caller that waits on cleanup, and the paths stay queued in the database.
    */
   scheduleFileCleanup(): Promise<void> {
@@ -532,8 +536,7 @@ export class AccountStorage {
   }
 
   private ownsFile(path: string): boolean {
-    const inside = relative(this.paths.previewsDir, path);
-    return inside !== "" && !inside.startsWith(`..${sep}`) && inside !== ".." && !isAbsolute(inside);
+    return insideDir(this.paths.previewsDir, path) || insideDir(this.paths.keptDir, path);
   }
 
   /**

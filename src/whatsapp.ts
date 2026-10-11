@@ -48,6 +48,7 @@ import { AccountGroups } from "./service/groups.js";
 import { AccountHealth, classifyClose, TEMP_BAN_RETRY_MAX_MS, type NewChatCapReport, type ReachoutLock } from "./service/health.js";
 import { AccountIdentity } from "./service/identity.js";
 import { AccountIngest, type MessageRef } from "./service/ingest.js";
+import { AccountKeep } from "./service/keep.js";
 import { LINK_FILE, LinkMonitor, type ProbeResult } from "./service/link.js";
 import { AccountMedia } from "./service/media.js";
 import { AccountRecall } from "./service/recall.js";
@@ -237,6 +238,8 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly reads: AccountReads;
   /** get_media's download and the previews reads show (src/service/media.ts). */
   private readonly media: AccountMedia;
+  /** Media downloaded as it arrives and kept, within limits (src/service/keep.ts). */
+  private readonly keep: AccountKeep;
   /** manage_chat and delete_message, and the forgetting each asks for (src/service/chats.ts). */
   private readonly chats: AccountChats;
   /** What the account posts to the webhook, and its status (src/service/webhooks.ts). */
@@ -298,6 +301,7 @@ export class WhatsAppService implements WhatsAppApi {
         startOutbox: () => this.outbox.start(),
         scheduleFlagsBackfill: (db) => this.ingest.scheduleFlagsBackfill(db),
         embedFeed: () => this.recallIndex.embedFeed,
+        bootKeep: () => this.keep.boot(),
       },
       this.identity,
       config,
@@ -373,6 +377,7 @@ export class WhatsAppService implements WhatsAppApi {
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
         mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
         transcriber: (...args) => this.transcriber(...args),
         transcribeReadiness: (...args) => this.transcribeReadiness(...args),
         transcribeAudio: (messageId) => this.transcribeAudio(messageId),
@@ -433,6 +438,7 @@ export class WhatsAppService implements WhatsAppApi {
         announced: (stored, type) => this.webhooks.announced(stored, type),
         nudgeOutbox: () => this.outbox.nudge(),
         embedFeed: () => this.recallIndex.embedFeed,
+        keepMedia: (stored) => this.keep.noteArrivals(stored),
       },
       this.identity,
       this.views,
@@ -484,10 +490,29 @@ export class WhatsAppService implements WhatsAppApi {
         ensureConnected: () => this.ensureConnected(),
         hasMessage: (id) => this.hasMessage(id),
         mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
+        offerKept: (messageId, raw, buffer) => this.keep.offer(messageId, raw, buffer),
       },
       this.views,
       this.storage,
       paths
+    );
+    this.keep = new AccountKeep(
+      {
+        stopped: () => this.stopped,
+        status: () => this.status,
+        sock: () => this.sockClient,
+        hasMessage: (id) => this.hasMessage(id),
+        mediaBuffer: (sock, messageId, raw, maxBytes) => this.mediaBuffer(sock, messageId, raw, maxBytes),
+        scheduleFileCleanup: () => this.storage.scheduleFileCleanup(),
+      },
+      this.identity,
+      this.views,
+      this.storage,
+      paths,
+      config.mediaKeep,
+      // Only the server keeps, and only an account that keeps its history: a file outliving its message is not kept.
+      config.command === "serve" && config.persistHistory
     );
     this.chats = new AccountChats(
       {
@@ -656,6 +681,7 @@ export class WhatsAppService implements WhatsAppApi {
     await this.voice.transcribeWorker.finish(this.voice.transcribeSource, STOP_TRANSCRIBE_WAIT_MS);
     this.voice.transcribeWorker.unregister(this.voice.transcribeSource);
     await this.recallIndex.stopRecall();
+    await this.keep.stop();
     const db = this.storage.accountDb;
     if (db !== null && db.isOpen) {
       await Promise.allSettled([this.storage.expirySweep, ...this.folds]);
@@ -1488,6 +1514,7 @@ export class WhatsAppService implements WhatsAppApi {
         void this.healContacts(sock, generation);
         void this.loadBlocklist(sock, generation);
         void this.checkReachout(sock, generation);
+        this.keep.connected();
       } else if (connection === "close") {
         const verdict = classifyClose(lastDisconnect?.error);
         if (verdict.kind === "logged_out") {
@@ -1938,12 +1965,13 @@ export class WhatsAppService implements WhatsAppApi {
    * the declared length before the download starts, and the stream itself
    * while it lands — a sender can understate the first, not the second.
    */
-  private async mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage): Promise<Buffer> {
+  private async mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage, maxBytes = MEDIA_DOWNLOAD_MAX_BYTES): Promise<Buffer> {
+    const cap = Math.min(maxBytes, MEDIA_DOWNLOAD_MAX_BYTES);
     const declared = mediaInfo(raw)?.size;
-    if (declared !== undefined && declared > MEDIA_DOWNLOAD_MAX_BYTES) {
+    if (declared !== undefined && declared > cap) {
       throw new WazapError(
         "FILE_TOO_LARGE",
-        `The media of ${messageId} is ${Math.ceil(declared / 1_000_000)} MB; downloads are capped at ${MEDIA_DOWNLOAD_MAX_BYTES / 1_000_000} MB.`
+        `The media of ${messageId} is ${Math.ceil(declared / 1_000_000)} MB; downloads are capped at ${cap / 1_000_000} MB.`
       );
     }
     try {
@@ -1956,11 +1984,11 @@ export class WhatsAppService implements WhatsAppApi {
       for await (const chunk of stream) {
         this.views.messageOrThrow(messageId);
         bytes += (chunk as Buffer).length;
-        if (bytes > MEDIA_DOWNLOAD_MAX_BYTES) {
+        if (bytes > cap) {
           stream.destroy();
           throw new WazapError(
             "FILE_TOO_LARGE",
-            `The media of ${messageId} exceeds the ${MEDIA_DOWNLOAD_MAX_BYTES / 1_000_000} MB download cap.`
+            `The media of ${messageId} exceeds the ${cap / 1_000_000} MB download cap.`
           );
         }
         chunks.push(chunk as Buffer);

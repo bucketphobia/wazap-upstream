@@ -404,6 +404,8 @@ interface MediaNode {
   fileLength?: ProtoLong;
   fileName?: string | null;
   jpegThumbnail?: Uint8Array | null;
+  fileSha256?: Uint8Array | null;
+  viewOnce?: boolean | null;
 }
 
 /** Media whose WhatsApp envelope carries a JPEG preview of a few KB. */
@@ -1197,6 +1199,32 @@ export function messageSecretOf(raw: WAMessage): Uint8Array | undefined {
 
 export function mediaInfo(raw: WAMessage): { mime: string; size?: number; filename?: string } | undefined {
   return analyze(raw).media;
+}
+
+/**
+ * The SHA-256 the sender stated for the decrypted file, when the envelope
+ * carries one: what a kept copy is checked against before it stands in for
+ * WhatsApp's.
+ */
+export function mediaSha256(raw: WAMessage): Buffer | undefined {
+  const inner = analyze(raw).inner;
+  if (!inner) return undefined;
+  for (const mediaKey of MEDIA_KEYS) {
+    const node = inner[mediaKey] as MediaNode | null | undefined;
+    if (!node) continue;
+    const hash = node.fileSha256;
+    return hash && hash.length === 32 ? Buffer.from(hash) : undefined;
+  }
+  return undefined;
+}
+
+/** Whether the media is view-once: wrapped as one, or flagged on its own node. */
+export function mediaViewOnce(raw: WAMessage): boolean {
+  const a = analyze(raw);
+  if (a.type === "view_once" || (a.content !== undefined && viewOnceInner(a.content) !== undefined)) return true;
+  const inner = a.inner;
+  if (!inner) return false;
+  return MEDIA_KEYS.some((mediaKey) => (inner[mediaKey] as MediaNode | null | undefined)?.viewOnce === true);
 }
 
 /**

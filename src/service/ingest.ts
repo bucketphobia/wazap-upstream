@@ -127,6 +127,8 @@ export interface IngestHost {
   announced(stored: WAMessage[], type: string): WAMessage[];
   nudgeOutbox(): void;
   embedFeed(): EmbedFeed | null;
+  /** Stored live messages whose media the kept-media settings may want (src/service/keep.ts). */
+  keepMedia(stored: readonly WAMessage[]): void;
 }
 
 export class AccountIngest {
@@ -374,6 +376,7 @@ export class AccountIngest {
       // What announced() queued goes out now, and retries a receiver back up may take.
       this.host.nudgeOutbox();
       this.waits.noteArrivals(stored);
+      this.host.keepMedia(stored);
     }
   }
 

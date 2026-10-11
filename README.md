@@ -117,7 +117,7 @@ What every argument means, and every error code, is in
 | `find_contact` | read | Who "mama", a nickname, a group name or a number means, before anything is drafted. |
 | `list_contacts` | read | The phone's address book a page at a time: saved name, number, when you last talked. |
 | `get_group_info` | read | Participants, admins, group settings, the invite link for an admin. |
-| `get_media` | read | A voice note as its transcript, a photo as an image, any file saved to disk. |
+| `get_media` | read | A voice note as its transcript, a photo as an image, any file saved to disk; served from the copy kept on arrival first. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, with a cursor so nothing is missed between calls. |
 | `remember` | local | A note, tags or details about a person, kept on this machine. Nothing changes on WhatsApp. |
 | `send_message` | write | Draft a message, media, poll, location or forward — and send nothing. `send_at` drafts it for a later time. |
@@ -242,8 +242,9 @@ settings and changes one.
 | `WAZAP_TRANSCRIBE` | `off` | `local` (whisper.cpp) or `openai` (an OpenAI-compatible API). |
 | `WAZAP_RECALL` | `off` | `local` turns on semantic search with a local embedding model. |
 | `WAZAP_WEBHOOK` | `off` | `on` posts incoming messages to `WAZAP_WEBHOOK_URL`, signed with `WAZAP_WEBHOOK_SECRET`. |
+| `WAZAP_MEDIA_KEEP` | `unmuted` | Which chats' media is downloaded on arrival and kept, so `get_media` outlives WhatsApp's copy: `unmuted`, `all`, `chats` or `off`. Limits: `WAZAP_MEDIA_KEEP_MAX_MB`, `WAZAP_MEDIA_KEEP_QUOTA_MB`, `WAZAP_MEDIA_KEEP_DAYS`. |
 
-The full list, including the webhook filters, retention and proxy trust, is in
+The full list, including the webhook filters, kept-media limits, retention and proxy trust, is in
 [docs/settings.md](docs/settings.md); [`.env.example`](.env.example) is the
 same list as a commented file.
 
@@ -297,7 +298,11 @@ Threat model, findings and the limits of each of these:
   archive. `read_messages` with `before` asks the phone for more, within what
   WhatsApp still keeps.
 - **Old media expires.** WhatsApp drops old attachments from its servers;
-  `get_media` then returns `MEDIA_UNAVAILABLE`.
+  `get_media` then returns `MEDIA_UNAVAILABLE`, unless wazap
+  [kept a copy](docs/data.md#kept-media) when it arrived. By default it keeps
+  the photos, voice notes, audio and documents of unmuted chats, up to 16 MB
+  each, 1 GB in all and 90 days, while `wazap serve` runs; media that arrived
+  and expired while nothing was keeping it cannot be brought back.
 - **Names come from the phone's address book**, which WhatsApp only sends to a
   fresh connection. If contacts read as numbers (`contacts_named: 0` in
   `get_status`), `wazap contacts resync` asks again while no server runs.
