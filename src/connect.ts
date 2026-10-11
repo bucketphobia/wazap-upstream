@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { WAZAP_VERSION, defaultDataDir, writesHints, type Config } from "./config.js";
@@ -447,7 +447,11 @@ function apply(
     copyFileSync(file, `${file}.bak`);
     backup = `  (backup: ${basename(file)}.bak)`;
   }
-  writeFileSync(file, content);
+  // The config is replaced atomically, like everything else wazap writes: a
+  // killed run must not hand the client a half-written file.
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, content);
+  renameSync(tmp, file);
   say(ok(`${spec.describe} \u00b7 wrote ${where}${backup}`));
   for (const line of entry) say(line);
 }
