@@ -1,9 +1,9 @@
 # The tools
 
-What each of the 21 tools answers, the workflows behind them, and every error
-code. The [README](../README.md#the-21-tools) has the one-line table.
+What each of the 23 tools answers, the workflows behind them, and every error
+code. The [README](../README.md#the-23-tools) has the one-line table.
 
-## The 21 tools
+## The 23 tools
 
 | Tool | Kind | What it does |
 | --- | --- | --- |
@@ -21,13 +21,15 @@ code. The [README](../README.md#the-21-tools) has the one-line table.
 | `get_media` | read | A message's media: a voice note or audio as its transcript, a photo attached as an image, any file saved to disk (`save_to` picks the directory). Transcription runs on the local or the API provider; with `save_to` a recording comes as its file, with a transcript only if one was already made, and when no transcript can be made the file comes instead, with `transcript_unavailable` saying why. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, then return it with a cursor for the next call. `addressed_to_me` wakes only for direct messages, @-mentions and replies. |
 | `remember` | local | Keep what the user says about a person, on this machine only: a note, tags, details (`relatie`, `nickname`, "role": "contabil") that `find_contact` matches, and `handled: true` to take an ask off `catch_up`'s waiting list until they write again. `#private` keeps their words out of what the assistant did not ask about them by name ([Keeping someone private](#keeping-someone-private)). Nothing changes on WhatsApp. |
-| `send_message` | write | Draft a message: text (a reply, @-mentions), media from a path or URL (`as`: document, voice note or GIF), a poll (`options`), a location (`latitude`, `longitude`) or a forward (`forward`). Does not send. A text draft to someone you write to often carries `style_check`: where it does not read like you. |
-| `confirm_send` | write | Send a draft after the user has seen the preview and said yes. A draft is sent at most once; see [Sending once](#sending-once). |
+| `send_message` | write | Draft a message: text (a reply, @-mentions), media from a path or URL (`as`: document, voice note or GIF), a poll (`options`), a location (`latitude`, `longitude`) or a forward (`forward`). Does not send. A text draft to someone you write to often carries `style_check`: where it does not read like you. `send_at` (with `time_zone`) drafts it for later; see [Scheduling a message](#scheduling-a-message). |
+| `confirm_send` | write | Send a draft after the user has seen the preview and said yes. A draft is sent at most once; see [Sending once](#sending-once). A draft with `send_at` is scheduled instead. |
 | `edit_message` | write | Edit your own message, within WhatsApp's 15-minute window. |
 | `react_to_message` | write | Add or remove an emoji reaction. |
 | `delete_message` | write | `for_everyone: true` retracts your own message, within WhatsApp's 2-day window, and in a group where you are admin someone else's message too. `for_everyone: false` deletes any message for the linked account only, at any age. |
 | `manage_chat` | write | Archive, pin, mute (8h by default), mark read/unread; pin a message for everyone (24h, 7 days or 30 days) or star it; clear or delete the chat for the linked account; block or unblock a person. |
 | `manage_group` | write | Create a group; join one from an invite link or message (without `confirm: true` it only shows the group); add, remove, promote, demote, leave, rename, set or remove the group photo, invite links, list, approve or reject join requests, and change the settings. Every member sees a change at once. |
+| `scheduled_messages` | write | The account's scheduled messages: `list` (waiting ones soonest first, then the week's sent, missed, failed and cancelled ones) or `cancel` one by `schedule_id` before it goes. Not registered in a session without writes. See [Scheduling a message](#scheduling-a-message). |
+| `reminder` | local | A reminder about a chat, kept on this machine and posted to the user's webhook when due: `create` (`chat_id`, `note`, `after_hours` or `due_at`, `condition` `always` or `no_reply`), `list`, `cancel`. Nothing is sent on WhatsApp. See [Reminders](#reminders). |
 
 ### Sending once
 
@@ -51,6 +53,101 @@ bridges and the daemon's own channel drafts stay per-session. Drafts do not surv
 session can confirm a draft made before it, sent or not, though a send the
 restart interrupted is still recorded as unknown and still settles when its id
 is echoed.
+
+### Scheduling a message
+
+`send_message` with `send_at` drafts a message for later; everything else about
+the draft is the same, the recipient's send rules included. `send_at` is a
+date and a time: a wall-clock time like `2026-10-12T09:00` is read in
+`time_zone` (an IANA zone such as `Europe/Bucharest`; the server's own zone
+when left out), and one with an offset (`2026-10-12T09:00:00+03:00`, `…Z`) is
+that instant. It must be at least a minute and at most 365 days ahead. A time
+the clocks skip when they spring forward is refused (`INVALID_TIME`); one they
+repeat when they fall back is the first of the two, and the answer says so.
+The preview carries a `Scheduled:` line with the day, the time, the zone and
+its UTC offset, and the draft carries `send_at` (ISO, with that offset) and
+`time_zone`, so the user says yes to the exact time.
+
+What leaves is what was approved. Media for later must be a `file_path`: a
+`url` is refused, since what it serves then may not be what it served at the
+yes. The file is pinned by its SHA-256 when drafted, and a file changed by
+the time it goes is refused (`FILE_NOT_FOUND`) and the message closes as
+failed. A reply (`reply_to`) or a forward goes only while the message it names
+is still stored; on an account with `WAZAP_PERSIST_HISTORY=0`, which forgets
+messages at every restart, a reply or forward for later is refused when
+drafted.
+
+`confirm_send` on that draft is the yes, and schedules it rather than sending
+it: it answers `status: "scheduled"` with a `schedule_id`. The same draft
+confirmed again answers the same schedule with `already_scheduled: true`. A
+time that came or passed while the draft waited for the yes is refused, and
+nothing is scheduled or sent. Nothing but this confirm schedules a draft, and
+no confirm sends a draft made for later at once. An account holds at most 100
+scheduled messages waiting (`SCHEDULE_FULL`).
+
+At its time the message goes through the same send as any confirm, under the
+WhatsApp key it was drafted with, so every check runs again at that moment:
+the account's record on disk (enabled, writes on), the server's read-only
+switch, the send rules, the link, WhatsApp's own restrictions and the
+account's write rate limit. A refusal no retry fixes (`SEND_BLOCKED`,
+`READ_ONLY`, `NOT_ON_WHATSAPP`, …) closes it as `failed`, sending nothing. A
+refusal that may pass waits and tries again: the link being down or the rate
+limit until the window below closes, after the wait the limiter names, without
+counting as attempts; a timeout or another passing error before the message
+left is tried up to ten times, then closes as failed. A message wazap could not send within 15
+minutes of its time — the server was stopped, the link was down — is
+`missed`: it is never sent late, and a restart never sends a backlog in a
+burst. One that reached WhatsApp and then failed is `unknown`, never sent
+again, and becomes `sent` when WhatsApp echoes it, as in
+[Sending once](#sending-once). A send a crash interrupted is settled at the
+next start from its send record: sent again only when it certainly never
+left, within the same 15 minutes.
+
+Missed, failed and unknown messages are reported, not dropped:
+`scheduled_messages` lists them with `error_code` and `error` for a week
+(`error_code` is an error code from the table below, or `NOT_RUNNING` for one
+that came due while wazap was stopped, or `INTERRUPTED` for one a stop or a
+crash cut short),
+`get_status`'s `hint` counts them, and with the `scheduled` webhook event on
+each outcome is posted once (see
+[the webhook](api-and-webhooks.md#reminders-and-scheduled-messages)).
+
+`scheduled_messages` lists and cancels them. It is a write tool, so a session
+without writes, a read-only server and a read-only account never see or use it;
+any write session on the account sees the account's scheduled messages, since
+a session that scheduled one may be gone by the time it is to be cancelled.
+Scheduled messages live in the account database and survive restarts. A
+waiting one keeps its words there until it is sent or closed, also on an
+account with `WAZAP_PERSIST_HISTORY=0`; once sent the record keeps no words,
+and a closed record goes a week later. A different number linking to the
+account sets its database aside, scheduled messages included: they never go
+from another number.
+
+### Reminders
+
+`reminder` keeps a note about a chat for later, on this machine, and posts it
+to the user's webhook as a `reminder` event when it is due. `create` takes
+`chat_id`, `note` and either `after_hours` or `due_at` (read like `send_at`,
+with `time_zone`). `condition` is `always` (the default) or `no_reply`: "remind
+me if Ana has not answered in two days" is `condition: "no_reply"` with
+`after_hours: 48`. A `no_reply` reminder is skipped, not posted, when anyone
+other than the user wrote in that chat after it was set — a message that
+reached the account since, sent no earlier than ten minutes before the
+reminder was set; system notices do not count, and neither does history filed
+late from before; on an account with `WAZAP_PERSIST_HISTORY=0` a reply is
+noted before the messages are purged at a stop or start, so it still counts
+after a restart. It waits while the link is down, and a minute after it comes
+back, so a reply still on its way is not missed. `list` shows waiting reminders
+and the week's fired, skipped and cancelled ones, each with `outcome`
+(`posted`, `webhook_off`, `event_off` or `replied`); `cancel` takes
+`reminder_id`.
+
+A reminder reaches the user only through the webhook with the `reminder` event
+on; without it, `create` says so in `notes`, a due reminder closes as fired with
+`outcome` `webhook_off` or `event_off`, and `reminder list` is the only place it
+shows. Like `remember`, reminders are registered in a session without writes,
+and setting or cancelling one needs a credential that may change local state:
+a read token is refused. An account holds at most 200 waiting.
 
 ### Catching up
 
@@ -357,6 +454,9 @@ trace, so an agent can decide whether to retry, ask the user, or stop.
 | `DRAFT_NOT_FOUND` / `DRAFT_EXPIRED` | The draft is unknown, from another identity (another session on stdio, another credential on HTTP), sent more than 15 minutes ago, or expired unsent. Draft again. |
 | `SEND_OUTCOME_UNKNOWN` | The message reached the socket and then the send failed, so WhatsApp may have it. The draft is never sent again; check the chat before drafting anew. |
 | `SEND_BLOCKED` | The account's send rules refuse this recipient. `wazap config send` changes them; the agent must not route around. |
+| `INVALID_TIME` | `send_at` or `due_at` is unreadable, in the past, under a minute or over 365 days ahead, in a zone that does not exist, or at a time the clocks skip; a scheduled draft's time passed before its yes; or a draft for later names a URL, or replies to or forwards a message on an account that keeps no history. |
+| `SCHEDULE_NOT_FOUND` | No scheduled message or reminder with that id on this account. |
+| `SCHEDULE_FULL` | The account already holds 100 scheduled messages or 200 reminders waiting. |
 | `AMBIGUOUS_ACCOUNT` | More than one account could handle this, or a write named a chat no account knows. Pass `account_id`. |
 | `ACCOUNT_NOT_FOUND` | No account with that id. Run `wazap account add`; `get_status` lists the ids. |
 | `ACCOUNT_DISABLED` | That account is disabled. Run `wazap account enable <id>`; a running server picks it up. |

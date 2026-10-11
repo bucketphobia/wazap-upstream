@@ -57,6 +57,13 @@ Entries are chat ids or numbers in international format, comma-separated:
 
 The send tools check the rules when a message is drafted and again at
 `confirm_send`, so a rule written while a draft waits still applies to it. A
+scheduled message (`send_message` with `send_at`) is checked a third time when
+it is due, against `accounts.json` as it is then: a rule written, writes turned
+off, or the account disabled or removed after the yes refuses it, and it is
+closed as failed with the code, never sent. A server started read-only sends
+none of the scheduled messages a writable run left, and every one still goes
+through the account's write rate limit when it is sent; see
+[Scheduling a message](tools.md#scheduling-a-message). A
 refused send fails `SEND_BLOCKED` naming the rule that fired; the agent is
 told to tell you, not to retry or route around it.
 

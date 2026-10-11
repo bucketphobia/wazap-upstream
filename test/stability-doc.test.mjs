@@ -104,7 +104,7 @@ for (const meta of tools.values()) {
   for (const key of Object.keys(out?.shape ?? out ?? {})) vocabulary.add(key);
 }
 /** The webhook fields the webhook tests read off a delivered body. */
-for (const file of ["test/webhook.test.mjs", "test/webhook-outbox.test.mjs", "test/webhook-filter.test.mjs", "test/integration-contract.test.mjs"]) {
+for (const file of ["test/webhook.test.mjs", "test/webhook-outbox.test.mjs", "test/webhook-filter.test.mjs", "test/integration-contract.test.mjs", "test/schedule.test.mjs"]) {
   for (const [, field] of read(file).matchAll(/\b(?:body|webhook)\.([a-z][a-z0-9_]*)/g)) vocabulary.add(field);
 }
 /** The answer fields the integration contract test reads off the six tools, which declare no output schema. */
@@ -114,7 +114,7 @@ for (const event of WEBHOOK_EVENTS) vocabulary.add(event);
 // ------------------------------------------------------------- 1. the tools
 
 test("the tool list the document prints is the registry, argument for argument", () => {
-  const listing = paragraph("The 21, each with what it requires:");
+  const listing = paragraph("The 23, each with what it requires:");
   const rows = [...listing.matchAll(/`([a-z_]+)`\s*\(([^)]*)\)/g)].map(([, name, args]) => [name, identifiers(args)]);
   assert.deepEqual(
     rows.map(([name]) => name).sort(),

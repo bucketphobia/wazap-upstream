@@ -1,6 +1,7 @@
 /**
- * W1 outbound webhook: three live events (`message_received`, `message_sent`
- * and `connection`), of which only `message_received` is posted unless
+ * W1 outbound webhook: five live events (`message_received`, `message_sent`,
+ * `connection`, and the owner's own `reminder` and `scheduled`), of which only
+ * `message_received` is posted unless
  * `WAZAP_WEBHOOK_EVENTS` asks for more. Global URL, secret, event list, chat
  * allowlist, coalescing window and the optional 401 retry live in `.env`; an
  * account may override any of them. This module is the settings, the payloads
@@ -19,7 +20,7 @@ import { discardResponse } from "./http-response.js";
 import { withCode } from "./error-code.js";
 import type { ConnectionStatus, HealthState, MessageType, MessageView, WebhookDelivery, WebhookInfo } from "./wa-types.js";
 
-export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection"] as const;
+export const WEBHOOK_EVENTS = ["message_received", "message_sent", "connection", "reminder", "scheduled"] as const;
 export type WebhookEvent = (typeof WEBHOOK_EVENTS)[number];
 
 /** What `webhook test` posts when `--event` does not name another one. */
@@ -35,7 +36,13 @@ export const WEBHOOK_URL_FIX = "set WAZAP_WEBHOOK_URL to an https:// URL, or htt
 export const WEBHOOK_TEST_FIX = "run `wazap webhook test`";
 export const WEBHOOK_EVENT_FIX = `pass one of ${WEBHOOK_EVENTS.join(", ")}`;
 export const WEBHOOK_EVENTS_DEFAULT: readonly WebhookEvent[] = ["message_received"] as const;
-export const WEBHOOK_EVENTS_FIX = `set WAZAP_WEBHOOK_EVENTS to all or a comma-separated list of ${WEBHOOK_EVENTS.join(", ")}`;
+/**
+ * What `all` names: the three events of 1.x before reminders. `reminder` and
+ * `scheduled` are named on their own, so a receiver set to `all` is never
+ * handed a reminder about a chat it might answer.
+ */
+export const WEBHOOK_EVENTS_ALL: readonly WebhookEvent[] = ["message_received", "message_sent", "connection"] as const;
+export const WEBHOOK_EVENTS_FIX = `set WAZAP_WEBHOOK_EVENTS to all (the first three) or a comma-separated list of ${WEBHOOK_EVENTS.join(", ")}`;
 export const WEBHOOK_AUTH_FIX =
   "run `wazap config webhook auth` and paste what the receiver expects: `Bearer <token>` for Authorization, or `<Header-Name>: <value>`";
 /** A burst waits at most this long after its first message, however fast the chat keeps going. */
@@ -194,7 +201,43 @@ export interface WebhookConnectionPayload {
   health?: WebhookHealth;
 }
 
-export type WebhookPayload = WebhookMessagePayload | WebhookConnectionPayload;
+/** A reminder the owner set with the `reminder` tool, now due (src/service/schedule.ts). */
+export interface WebhookReminderPayload {
+  event: "reminder";
+  reminder_id: string;
+  chat_id: string;
+  /** Who the chat is, as the account names them when the reminder fires. */
+  chat_name: string;
+  /** The owner's own words, as the reminder was set. */
+  note: string;
+  condition: "always" | "no_reply";
+  /** When it was due, and when it was set: ISO 8601, UTC. */
+  due_at: string;
+  created_at: string;
+  timestamp: string;
+  account_id: string;
+  account_name: string;
+}
+
+/** What became of a scheduled message: sent, unknown, failed or missed. Never its words. */
+export interface WebhookScheduledPayload {
+  event: "scheduled";
+  schedule_id: string;
+  state: "sent" | "unknown" | "failed" | "missed";
+  chat_id: string;
+  chat_name: string;
+  /** When it was to go, ISO 8601, UTC. */
+  send_at: string;
+  /** The sent message, when it went. */
+  message_id: string | null;
+  error_code: string | null;
+  error: string | null;
+  timestamp: string;
+  account_id: string;
+  account_name: string;
+}
+
+export type WebhookPayload = WebhookMessagePayload | WebhookConnectionPayload | WebhookReminderPayload | WebhookScheduledPayload;
 
 /** The preview and whether it had to be cut, so the payload never decides twice. */
 export interface WebhookText {
@@ -533,7 +576,7 @@ export function parseWebhookEvents(raw: string): readonly WebhookEvent[] {
   for (const token of tokens) {
     const value = token.toLowerCase();
     if (value === "all") {
-      for (const event of WEBHOOK_EVENTS) wanted.add(event);
+      for (const event of WEBHOOK_EVENTS_ALL) wanted.add(event);
       continue;
     }
     const known = WEBHOOK_EVENTS.find((event) => event === value);
@@ -551,6 +594,8 @@ export function describeWebhookEvents(events: readonly WebhookEvent[]): string {
     message_received: "messages you receive",
     message_sent: "messages you send from your phone or another device",
     connection: "link changes",
+    reminder: "your reminders when they are due",
+    scheduled: "what became of your scheduled messages",
   };
   const list = events.map((event) => phrases[event]);
   if (list.length <= 1) return list[0] ?? "nothing";
@@ -621,7 +666,9 @@ export function asWebhookPayload({ event, view, account, isSelfChat }: WebhookMe
  */
 export function coalescePayloads(payloads: readonly WebhookPayload[]): WebhookPayload {
   if (payloads.length <= 1) return payloads[0]!;
-  const messages = payloads.filter((payload): payload is WebhookMessagePayload => payload.event !== "connection");
+  const messages = payloads.filter(
+    (payload): payload is WebhookMessagePayload => payload.event === "message_received" || payload.event === "message_sent"
+  );
   if (messages.length !== payloads.length) return payloads[payloads.length - 1]!;
   const first = messages[0]!;
   const last = messages[messages.length - 1]!;
@@ -811,14 +858,45 @@ export class WebhookSink {
 /** A list is set whole, so enabling one event means naming the ones already on. */
 function enableEventFix(active: readonly WebhookEvent[], event: WebhookEvent, account?: WebhookAccount): string {
   const both = WEBHOOK_EVENTS.filter((known) => active.includes(known) || known === event).join(",");
-  if (account?.webhook_events === undefined) return `set WAZAP_WEBHOOK_EVENTS=${both}, or all`;
-  return `set webhook_events for "${account.id}" in accounts.json to ${both}, or all`;
+  // `all` does not name reminder or scheduled, so it is offered only for the events it covers.
+  const orAll = WEBHOOK_EVENTS_ALL.includes(event) ? ", or all" : "";
+  if (account?.webhook_events === undefined) return `set WAZAP_WEBHOOK_EVENTS=${both}${orAll}`;
+  return `set webhook_events for "${account.id}" in accounts.json to ${both}${orAll}`;
 }
 
 function testPayload(event: WebhookEvent, account?: Pick<WebhookAccount, "id" | "name">): WebhookPayload {
   const now = new Date().toISOString();
   const named = { account_id: account?.id ?? "default", account_name: account?.name ?? "default" };
   if (event === "connection") return { event, status: "linked", timestamp: now, ...named, health: { state: "ok", until: null, reason: null } };
+  if (event === "reminder") {
+    return {
+      event,
+      reminder_id: "test",
+      chat_id: "test@s.whatsapp.net",
+      chat_name: "wazap",
+      note: "wazap webhook test",
+      condition: "always",
+      due_at: now,
+      created_at: now,
+      timestamp: now,
+      ...named,
+    };
+  }
+  if (event === "scheduled") {
+    return {
+      event,
+      schedule_id: "test",
+      state: "sent",
+      chat_id: "test@s.whatsapp.net",
+      chat_name: "wazap",
+      send_at: now,
+      message_id: "test",
+      error_code: null,
+      error: null,
+      timestamp: now,
+      ...named,
+    };
+  }
   return {
     event,
     from: "wazap",

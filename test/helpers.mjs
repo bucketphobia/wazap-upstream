@@ -281,10 +281,10 @@ export const RETIRED_TOOLS = [
 ];
 
 /** Every tool, as a session that can write lists them. tools.test.mjs holds the registry to it. */
-export const TOOL_COUNT = 21;
+export const TOOL_COUNT = 23;
 
 /** The tools a session without writes lists: the reads, and the local remember. */
-export const READ_TOOL_COUNT = 14;
+export const READ_TOOL_COUNT = 15;
 
 /**
  * The tools of `source` on a stand-in server, called the way an MCP client

@@ -40,6 +40,9 @@ export type ErrorCode =
   | "CURSOR_EXPIRED"
   | "SEND_OUTCOME_UNKNOWN"
   | "SEND_BLOCKED"
+  | "INVALID_TIME"
+  | "SCHEDULE_NOT_FOUND"
+  | "SCHEDULE_FULL"
   | "AMBIGUOUS_ACCOUNT"
   | "ACCOUNT_NOT_FOUND"
   | "ACCOUNT_DISABLED"
@@ -110,6 +113,9 @@ export const ERROR_GUIDE: Record<ErrorCode, string> = {
   SEND_OUTCOME_UNKNOWN:
     "It may or may not have arrived: never confirm or draft it again unasked. read_messages shows it once WhatsApp echoes it; not there yet does not mean it failed.",
   SEND_BLOCKED: "The account's send rules refuse this recipient: tell the user. Do not retry or route around it.",
+  INVALID_TIME: "Bad time: see fix, ask the user.",
+  SCHEDULE_NOT_FOUND: "Unknown id: list again.",
+  SCHEDULE_FULL: "Too many waiting: tell the user.",
   AMBIGUOUS_ACCOUNT: "Several accounts fit, or a write names a chat no account knows: pass account_id.",
   ACCOUNT_NOT_FOUND: "No such account: get_status lists them, and `wazap account add` makes one.",
   ACCOUNT_DISABLED: "The account is disabled: the user runs `wazap account enable <id>`.",

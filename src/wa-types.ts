@@ -2,7 +2,7 @@
 
 import type { SearchCoverage } from "./coverage.js";
 import type { DraftContext, StyleCheck } from "./draft-style.js";
-import type { DraftPayload, DraftView } from "./drafts.js";
+import type { DraftPayload, DraftSchedule, DraftView } from "./drafts.js";
 import type { CatchupQuote, CatchupScan, CatchupScanRequest, CatchupTagJids, CatchupWindow } from "./catchup-scan.js";
 import type { AccountFind, FindContactQuery } from "./find-contact.js";
 import type { RecallStatus } from "./recall/index.js";
@@ -588,6 +588,52 @@ export interface SentMessage {
   already_sent?: true;
 }
 
+/** A scheduled message as the tools show it. */
+export interface ScheduledView {
+  schedule_id: string;
+  state: "pending" | "sending" | "sent" | "unknown" | "failed" | "missed" | "cancelled";
+  to: OutgoingTarget;
+  kind: string;
+  /** What will go, or went: the preview the user said yes to; "" once sent (the message is in the chat). */
+  preview: string;
+  /** When it is to go: ISO 8601 in time_zone, with its offset. */
+  send_at: string;
+  time_zone: string;
+  created_at: string;
+  attempts: number;
+  /** The sent message, once it went. */
+  message_id?: string;
+  /** Why it failed or was missed, or the last attempt's error while it still waits. */
+  error_code?: string;
+  error?: string;
+  /** A repeated confirm_send of the same draft: nothing new was scheduled. */
+  already_scheduled?: true;
+}
+
+export interface NewReminderInput {
+  chatId: string;
+  note: string;
+  condition: "always" | "no_reply";
+  dueAt: number;
+  timeZone: string;
+}
+
+/** A reminder as the tools show it. */
+export interface ReminderView {
+  reminder_id: string;
+  state: "pending" | "fired" | "skipped" | "cancelled";
+  chat_id: string;
+  chat_name: string;
+  note: string;
+  condition: "always" | "no_reply";
+  /** ISO 8601 in time_zone, with its offset. */
+  due_at: string;
+  time_zone: string;
+  created_at: string;
+  /** What became of it: posted, webhook_off, event_off, or replied. */
+  outcome?: string;
+}
+
 /** Who a draft or send is aimed at, after jid resolution. Groups have no number. */
 export interface OutgoingTarget {
   chat_id: string;
@@ -853,8 +899,26 @@ export interface WhatsAppApi {
   markHandled(chatId: string): Promise<HandledResult>;
   previews(messageIds: string[], max: number): Promise<Preview[]>;
   getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number): Promise<Synced<UnansweredChat[]>>;
-  /** `owner` is the MCP session drafting; only the same owner may confirm. */
-  draft(payload: DraftPayload, owner?: string): Promise<DraftView>;
+  /**
+   * `owner` is the MCP session drafting; only the same owner may confirm.
+   * With `schedule`, confirming it schedules it instead (confirmSchedule).
+   */
+  draft(payload: DraftPayload, owner?: string, schedule?: DraftSchedule): Promise<DraftView>;
+  /**
+   * Schedules a draft made with a schedule, once: the owner's yes to it. A
+   * repeated call answers the same scheduled message, with already_scheduled.
+   * Optional, so a stand-in need not have it (nor the calls below).
+   */
+  confirmSchedule?(draftId: string, owner?: string): Promise<ScheduledView>;
+  /** Scheduled messages: waiting ones the soonest first, then with `includeClosed` the week's closed ones. */
+  listScheduled?(includeClosed: boolean, limit: number): Promise<ScheduledView[]>;
+  /** Cancels a waiting scheduled message; one already under way or closed is answered as it stands. */
+  cancelScheduled?(scheduleId: string): Promise<{ cancelled: boolean; scheduled: ScheduledView }>;
+  /** Whether the webhook would post a reminder and a scheduled message's outcome now, or is off. */
+  scheduleDelivery?(): { webhook: boolean; reminder: boolean; scheduled: boolean };
+  addReminder?(input: NewReminderInput, owner?: string): Promise<ReminderView>;
+  listReminders?(includeClosed: boolean, limit: number): Promise<ReminderView[]>;
+  cancelReminder?(reminderId: string): Promise<{ cancelled: boolean; reminder: ReminderView }>;
   /**
    * Sends a draft once. Confirming it again answers the same receipt; a send
    * that reached WhatsApp and then failed is SEND_OUTCOME_UNKNOWN, and stays so.

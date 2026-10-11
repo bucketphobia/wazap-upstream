@@ -229,7 +229,9 @@ export class Sends {
    */
   forgetWords(): void {
     this.c.write(() => {
-      this.c.run("DELETE FROM sends WHERE state = 'draft'");
+      // A scheduled message's attempt (owner schedule:<id>) stays: its scheduled row keeps the same words
+      // while it waits, and its draft is what tells the next start the key never left.
+      this.c.run("DELETE FROM sends WHERE state = 'draft' AND (owner IS NULL OR owner NOT LIKE 'schedule:%')");
       this.c.run(
         `UPDATE sends SET payload = '{}', receipt = CASE WHEN receipt IS NULL THEN NULL ELSE json_set(receipt, '$.text', '') END
          WHERE payload <> '{}' OR json_extract(receipt, '$.text') <> ''`

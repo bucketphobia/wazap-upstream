@@ -8,7 +8,8 @@
  * lends them through SendsHost.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import {
   generateMessageIDV2,
   generateWAMessage,
@@ -17,14 +18,18 @@ import {
   type WAMessage,
   type WASocket,
 } from "baileys";
-import { MESSAGE_FLAGS, type AccountDb, type SendRecord, type UpsertResult } from "../db/index.js";
+import { MESSAGE_FLAGS, StorageError, type AccountDb, type ScheduledRecord, type SendRecord, type UpsertResult } from "../db/index.js";
 import {
+  draftExpired,
+  draftNotFound,
   frozenReceiptText,
+  frozenSchedule,
   receiptText,
   sendOutcomeUnknown,
   withMentionTokens,
   type Draft,
   type DraftPayload,
+  type DraftSchedule,
   type DraftStore,
   type DraftView,
 } from "../drafts.js";
@@ -34,6 +39,7 @@ import { logError } from "../logger.js";
 import { isoWithOffset, messageIdFor, messageText, messageTimestampMs } from "../messages.js";
 import { asGifMedia, assertMediaSource, describe, loadMedia, mediaContent } from "../outgoing-media.js";
 import { videoFrame } from "../previews.js";
+import { SCHEDULE_MIN_AHEAD_MS } from "../schedule-time.js";
 import type { EmbedFeed } from "../recall/index.js";
 import { SentIds } from "../sent-ids.js";
 import type { MediaSource, MessageView, OutgoingTarget, SentMessage } from "../wa-types.js";
@@ -42,6 +48,9 @@ import type { AccountIdentity } from "./identity.js";
 import type { MessageViews } from "./views.js";
 
 const MAX_TEXT_CHARS = 65_536;
+
+/** Scheduled messages one account may hold waiting, so a looping agent cannot queue a flood. */
+export const SCHEDULE_MAX_PENDING = 100;
 
 const EDIT_WINDOW_MS = 15 * 60_000;
 
@@ -56,6 +65,8 @@ const SEND_RECOVERY_LIMIT = 500;
 export interface SendAttempt {
   readonly keyId: string;
   dispatched: boolean;
+  /** A scheduled send: nothing is handed to WhatsApp after this (epoch ms), however long building it took. */
+  readonly notAfter?: number;
 }
 
 /** A number whose WhatsApp lookup got no answer: not a verdict on the number, so NOT_CONNECTED, which a caller may retry. */
@@ -85,6 +96,8 @@ export interface SendsHost {
   storeRaw(raw: WAMessage, chatJid: string, live?: boolean): UpsertResult | null;
   kept(result: UpsertResult): boolean;
   embedFeed(): EmbedFeed | null;
+  /** Whether the account keeps its history between runs (WAZAP_PERSIST_HISTORY). */
+  keepsHistory(): boolean;
   /** Throws ACCOUNT_RESTRICTED when WhatsApp forbids this account a first message to `jid` right now. */
   refuseNewChat(jid: string, sock: WASocket): Promise<void>;
 }
@@ -102,9 +115,10 @@ export class AccountSends {
     private readonly groups: AccountGroups
   ) {}
 
-  draft(payload: DraftPayload, owner?: string): Promise<DraftView> {
+  draft(payload: DraftPayload, owner?: string, schedule?: DraftSchedule): Promise<DraftView> {
     return this.host.guarded(async () => {
       if (payload.kind === "media") await assertMediaSource(payload.source);
+      if (schedule !== undefined) payload = await this.schedulable(payload);
       const sock = this.host.ensureConnected();
       const jid = await this.assertOutgoing(payload.chatId, sock);
       let stored: DraftPayload = { ...payload, chatId: jid };
@@ -119,8 +133,36 @@ export class AccountSends {
       }
       // The key is fixed now, so a confirm whose outcome is lost can still be recognised by it.
       const keyId = generateMessageIDV2(this.identity.ownJid());
-      return this.host.drafts().view(this.host.drafts().put(this.host.db().sends, this.outgoingOf(jid), stored, keyId, owner ?? null));
+      return this.host
+        .drafts()
+        .view(this.host.drafts().put(this.host.db().sends, this.outgoingOf(jid), stored, keyId, owner ?? null, schedule));
     });
+  }
+
+  /**
+   * What a draft for later must hold so the message that leaves is the one the
+   * user approved: a URL is refused (its bytes are whoever serves it then), a
+   * file is pinned by its SHA-256, and a reply or a forward needs an account
+   * that keeps the message it names until then.
+   */
+  private async schedulable(payload: DraftPayload): Promise<DraftPayload> {
+    if ((payload.kind === "forward" || (payload.kind === "text" && payload.replyTo !== undefined)) && !this.host.keepsHistory()) {
+      throw new WazapError(
+        "INVALID_TIME",
+        "This account keeps no history between runs, so the message a scheduled reply or forward names would be gone by then.",
+        "Send it now without send_at, or schedule a plain message"
+      );
+    }
+    if (payload.kind !== "media") return payload;
+    if (payload.source.url !== undefined) {
+      throw new WazapError(
+        "INVALID_TIME",
+        "A scheduled message cannot take media from a URL: what the URL serves when it goes may not be what was approved.",
+        "Download it and pass file_path, or send it now without send_at"
+      );
+    }
+    const digest = createHash("sha256").update(await readFile(payload.source.file_path!)).digest("hex");
+    return { ...payload, sha256: digest };
   }
 
   /**
@@ -130,14 +172,23 @@ export class AccountSends {
    * gives the draft back, with the code that failure had; one after it leaves
    * the send unknown (SEND_OUTCOME_UNKNOWN) until WhatsApp echoes the key.
    */
-  confirm(draftId: string, owner?: string): Promise<SentMessage> {
+  confirm(draftId: string, owner?: string, { scheduled = false, notAfter }: { scheduled?: boolean; notAfter?: number } = {}): Promise<SentMessage> {
     return this.host.guarded(async () => {
       const who = owner ?? null;
       const running = this.confirming.get(draftId);
       if (running !== undefined && running.owner === who) return running.work;
+      // A draft the user approved for later never goes now: only the scheduler's own confirm sends one.
+      const row = scheduled ? null : this.host.db().sends.get(draftId);
+      if (row !== null && row.state === "draft" && row.owner === who && frozenSchedule(row) !== undefined) {
+        throw new WazapError(
+          "INVALID_ID",
+          `Draft ${draftId} is scheduled for later; nothing was sent.`,
+          "confirm_send schedules it: call confirm_send with this draft_id through the tool, never a direct send"
+        );
+      }
       const claim = this.host.drafts().claim(this.host.db().sends, draftId, who);
       if (claim.state === "sent") return claim.receipt;
-      const work = this.sendClaimed(claim.draft);
+      const work = this.sendClaimed(claim.draft, notAfter);
       this.confirming.set(draftId, { owner: who, work });
       try {
         return await work;
@@ -147,8 +198,58 @@ export class AccountSends {
     });
   }
 
-  private async sendClaimed(draft: Draft): Promise<SentMessage> {
-    const attempt: SendAttempt = { keyId: draft.keyId, dispatched: false };
+  /**
+   * The owner's yes to a draft made with a schedule: the draft becomes a
+   * scheduled message, at most once. A repeated yes answers the same one; a
+   * draft that is missing, lapsed or another identity's answers as a confirm
+   * would, and one whose time has come or passed meanwhile is refused, not
+   * sent, since the yes was to that time.
+   */
+  scheduleDraft(draftId: string, owner: string | undefined, now: number = Date.now()): Promise<{ record: ScheduledRecord; already: boolean }> {
+    return this.host.guarded(async () => {
+      const who = owner ?? null;
+      const db = this.host.db();
+      const existing = db.schedule.scheduledByDraft(draftId);
+      if (existing !== null) {
+        if (existing.owner !== who) throw draftNotFound(draftId);
+        return { record: existing, already: true };
+      }
+      const row = db.sends.get(draftId);
+      if (row === null || row.owner !== who || row.state !== "draft") throw draftNotFound(draftId);
+      const schedule = frozenSchedule(row);
+      if (schedule === undefined) {
+        throw new WazapError("INVALID_ID", `Draft ${draftId} carries no send_at; nothing was scheduled.`, "Confirm it with confirm_send to send it now");
+      }
+      if (row.expiresAt <= now) {
+        db.sends.removeDraft(draftId);
+        throw draftExpired(draftId);
+      }
+      if (schedule.at < now + SCHEDULE_MIN_AHEAD_MS) {
+        throw new WazapError(
+          "INVALID_TIME",
+          `The time draft ${draftId} was scheduled for has come or passed while it waited for a yes; nothing was scheduled or sent.`,
+          "Ask the user for a new time, draft again with that send_at, show the new preview and wait for a yes"
+        );
+      }
+      let record: ScheduledRecord | null;
+      try {
+        record = db.schedule.adopt(
+          { id: `s_${randomUUID().replaceAll("-", "").slice(0, 16)}`, draftId, owner: who, sendAt: schedule.at, timeZone: schedule.zone, now },
+          SCHEDULE_MAX_PENDING
+        );
+      } catch (err) {
+        if (err instanceof StorageError && err.code === "SCHEDULE_FULL") {
+          throw new WazapError("SCHEDULE_FULL", err.message, "Tell the user; cancel scheduled messages they no longer want, or wait for some to go");
+        }
+        throw err;
+      }
+      if (record === null) throw draftNotFound(draftId);
+      return { record, already: false };
+    });
+  }
+
+  private async sendClaimed(draft: Draft, notAfter?: number): Promise<SentMessage> {
+    const attempt: SendAttempt = { keyId: draft.keyId, dispatched: false, ...(notAfter === undefined ? {} : { notAfter }) };
     let sent: SentMessage;
     try {
       sent = await this.dispatchDraft(draft, attempt);
@@ -261,12 +362,20 @@ export class AccountSends {
   sendMedia(
     chatId: string,
     source: MediaSource,
-    opts: { caption?: string; asDocument: boolean; asVoice: boolean; asGif: boolean },
+    opts: { caption?: string; asDocument: boolean; asVoice: boolean; asGif: boolean; sha256?: string },
     attempt?: SendAttempt
   ): Promise<SentMessage> {
     return this.host.guarded(async () => {
       const { sock, jid } = await this.prepareSend(chatId);
-      const media = await asGifMedia(await loadMedia(source), opts.asGif);
+      const loaded = await loadMedia(source);
+      if (opts.sha256 !== undefined && createHash("sha256").update(loaded.buffer).digest("hex") !== opts.sha256) {
+        throw new WazapError(
+          "FILE_NOT_FOUND",
+          `The file at "${source.file_path ?? ""}" changed since the scheduled message was approved; nothing was sent.`,
+          "Tell the user; schedule it again with the file as it is now if they want it"
+        );
+      }
+      const media = await asGifMedia(loaded, opts.asGif);
       const content = mediaContent(media, opts);
       if ("video" in content) {
         // Do not fall back to Baileys's unrestricted, shell-spawned ffmpeg.
@@ -387,6 +496,7 @@ export class AccountSends {
             asDocument: payload.asDocument,
             asVoice: payload.asVoice,
             asGif: payload.asGif,
+            ...(payload.sha256 === undefined ? {} : { sha256: payload.sha256 }),
           },
           attempt
         );
@@ -426,6 +536,10 @@ export class AccountSends {
       messageId: attempt.keyId,
     });
     if (!built.message) throw new WazapError("WHATSAPP_ERROR", "Baileys built an empty message.");
+    if (attempt.notAfter !== undefined && Date.now() > attempt.notAfter) {
+      // A scheduled message whose window closed while it was being built (a slow upload): not sent late.
+      throw new WazapError("TIMEOUT", "Its time window closed while the message was being prepared; nothing was sent.");
+    }
     attempt.dispatched = true;
     await sock.relayMessage(jid, built.message, {
       messageId: attempt.keyId,

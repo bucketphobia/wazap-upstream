@@ -25,6 +25,14 @@ import { getMessageView, getMessageViewAcross, resolveMessageId, resolveMessageI
 import { clockLabel } from "./messages.js";
 import { RateLimiter } from "./ratelimit.js";
 import {
+  SCHEDULE_MAX_AHEAD_MS,
+  SCHEDULE_MIN_AHEAD_MS,
+  describeInstant,
+  resolveFutureTime,
+  serverTimeZone,
+  type ResolvedTime,
+} from "./schedule-time.js";
+import {
   assertSendable,
   draftTargetOf,
   hasSendRules,
@@ -49,6 +57,8 @@ import type {
   MessageView,
   OutgoingTarget,
   RecallAnswer,
+  ReminderView,
+  ScheduledView,
   SentMessage,
   SearchAnswer,
   Synced,
@@ -231,6 +241,45 @@ const REMEMBER_OUTPUT = {
   account_id: z.string(),
 };
 
+const SCHEDULED_ITEM = z
+  .object({
+    schedule_id: z.string(),
+    state: z.string(),
+    to: OPEN_OBJECT,
+    preview: z.string(),
+    send_at: z.string(),
+    time_zone: z.string(),
+  })
+  .passthrough();
+
+const SCHEDULED_OUTPUT = {
+  action: z.string(),
+  count: z.number(),
+  cancelled: z.boolean().optional(),
+  scheduled: z.array(SCHEDULED_ITEM),
+  account_id: z.string(),
+};
+
+const REMINDER_ITEM = z
+  .object({
+    reminder_id: z.string(),
+    state: z.string(),
+    chat_id: z.string(),
+    note: z.string(),
+    due_at: z.string(),
+    time_zone: z.string(),
+  })
+  .passthrough();
+
+const REMINDER_OUTPUT = {
+  action: z.string(),
+  count: z.number(),
+  cancelled: z.boolean().optional(),
+  reminders: z.array(REMINDER_ITEM),
+  notes: NOTES,
+  account_id: z.string(),
+};
+
 const hint = (readOnlyHint: boolean, destructiveHint: boolean, idempotentHint: boolean, openWorldHint: boolean): ToolHints => ({
   readOnlyHint,
   destructiveHint,
@@ -284,6 +333,10 @@ const HINTS: Record<string, ToolHints> = {
   manage_chat: hint(false, true, false, true),
   // remove, leave, revoke_invite_link.
   manage_group: hint(false, true, false, true),
+  // Lists and cancels what waits in wazap; nothing reaches WhatsApp, and a cancel only stops a send.
+  scheduled_messages: hint(false, false, true, false),
+  // The user's reminders, kept locally like remember's notes and posted to their own webhook.
+  reminder: hint(false, false, false, false),
 };
 
 function tool<S extends z.ZodRawShape>(def: {
@@ -369,30 +422,28 @@ const MAX_PREVIEWS = 12;
 
 const GUIDE = `# wazap: WhatsApp for your AI agent
 
-The user's own WhatsApp account: chats, messages, media, contacts, groups.
-Call get_status when anything fails, and link_account when it says not_linked.
+Call get_status when anything fails; link_account when it says not_linked.
 
 ## Ids and accounts
 - chat_id: \`<digits>@s.whatsapp.net\` for a person, \`<id>@g.us\` for a group, or
   a phone number in international format. Pass ids back exactly as given.
 - message_id: the full id from read_messages, search or catch_up.
-- account_id: the account a call is about (\`default\`, \`work\`); get_status
+- account_id: the account a call is about; get_status
   lists them. Optional everywhere. Without it, a chat or message only one account
   knows picks that account; catch_up and find_contact cover every account; other
   reads use the default; a write to a chat no account knows fails AMBIGUOUS_ACCOUNT.
 
 ## Workflows
-- Catch up: catch_up() gives who waits on a reply, mentions, missed calls,
-  people, groups and stories, every account at once; more.cursor brings the rest.
+- Catch up: catch_up() gives who waits on a reply, mentions, calls, people,
+  groups, stories, every account at once; more.cursor brings the rest.
   An ask the user handled elsewhere: remember(chat_id, handled: true).
 - One chat: read_messages(chat_id), older with before; chat_id "status" reads
   stories. To stay on the line, wait_for_messages with the cursor it returns.
 - Find something said: search(query) matches meaning and words; match: "words"
   for an exact string. get_message shows one message in full; get_media gives its
   file, a photo as an image, a voice note's transcript (its file with save_to).
-- Who someone is: find_contact(name) before drafting ("mama", "Ana de la
-  contabilitate"). resolved gives the chat_id; ambiguous or not_found: ask the
-  user, never guess. remember keeps what the user says about a person (note,
+- Who someone is: find_contact(name) before drafting ("mama"). resolved gives
+  the chat_id; ambiguous or not_found: ask the user, never guess. remember keeps what the user says about a person (note,
   tags, fields such as relatie), on this machine; find_contact(tag) lists a tag.
 - #private: a person's words come only when a call names them: their chat_id,
   a message_id of theirs, search's from; a group's chat_id reads whole. Elsewhere
@@ -996,9 +1047,28 @@ const TOOLS: readonly ToolDef[] = [
       longitude: z.number().min(-180).max(180).optional(),
       address: z.string().max(500).optional().describe("Location: shown under the name"),
       forward: messageId.optional().describe("Forward this message; text \"\""),
+      send_at: z
+        .string()
+        .min(10)
+        .max(40)
+        .optional()
+        .describe('Send later: "2026-10-12T09:00" in time_zone, or with an offset; 1 minute to 365 days ahead'),
+      time_zone: z.string().min(1).max(64).optional().describe('IANA zone for send_at, e.g. "Europe/Bucharest"; the server\'s by default'),
     },
     write: true,
-    handler: async (args, ctx) => draftAndGuard(sendPayload(args), ctx),
+    handler: async (args, ctx) => {
+      if (args.send_at === undefined && args.time_zone !== undefined) {
+        throw new WazapError("INVALID_TIME", "time_zone applies only with send_at.", "Pass send_at too, or leave time_zone out");
+      }
+      const when =
+        args.send_at === undefined
+          ? undefined
+          : resolveFutureTime(args.send_at, args.time_zone, { minAheadMs: SCHEDULE_MIN_AHEAD_MS, maxAheadMs: SCHEDULE_MAX_AHEAD_MS, field: "send_at" });
+      if (when !== undefined && typeof ctx.wa.confirmSchedule !== "function") {
+        throw new WazapError("SERVICE_ERROR", "This account cannot schedule messages.", "Send it now without send_at, or ask the user to send it later");
+      }
+      return draftAndGuard(sendPayload(args), ctx, when);
+    },
   }),
   tool({
     name: "edit_message",
@@ -1038,7 +1108,7 @@ const TOOLS: readonly ToolDef[] = [
     title: "Send a drafted WhatsApp message",
     description: `Send a draft the user approved — this text, this recipient: the only call that sends, once per draft. A yes about something else: show the preview again and ask. Expired, missing or stale: draft again, show the new preview, ask again. SEND_OUTCOME_UNKNOWN: read_messages, never redo it unasked.`,
     schema: {
-      draft_id: z.string().min(1).describe("From send_message"),
+      draft_id: z.string().min(1).describe("From send_message; one with send_at is scheduled, not sent"),
     },
     write: true,
     handler: async ({ draft_id }, { wa, hub, accountId, draftOwner }) => {
@@ -1055,6 +1125,13 @@ const TOOLS: readonly ToolDef[] = [
         assertSendable(policy, ref.target, accountId);
       }
       noteConfirming(draft_id);
+      if (ref?.scheduled === true) {
+        if (typeof wa.confirmSchedule !== "function") {
+          throw new WazapError("SERVICE_ERROR", "This account cannot schedule messages; nothing was sent.", "Draft it again without send_at to send it now, if the user wants that");
+        }
+        const scheduled = await wa.confirmSchedule(draft_id, draftOwner);
+        return ok(scheduledText(scheduled), { status: "scheduled", ...scheduled });
+      }
       const sent = await wa.confirm(draft_id, draftOwner);
       return ok(sentText(sent, ref?.target), sent as unknown as Record<string, unknown>);
     },
@@ -1188,6 +1265,97 @@ const TOOLS: readonly ToolDef[] = [
         ...renderJoinRequests(result.join_requests ?? []),
       ].join("\n");
       return ok(text, result as unknown as Record<string, unknown>);
+    },
+  }),
+
+  tool({
+    name: "scheduled_messages",
+    title: "List or cancel scheduled WhatsApp messages",
+    description: `The account's scheduled messages: list (waiting ones soonest first, then the week's sent, missed, failed and cancelled ones) or cancel one by schedule_id before it goes. To schedule one, send_message with send_at, then confirm_send. Tell the user about every missed or failed one.`,
+    schema: {
+      action: z.enum(["list", "cancel"]).default("list"),
+      schedule_id: z.string().min(1).max(64).optional().describe("cancel: from the list or confirm_send"),
+      include_closed: z.boolean().default(true).describe("list: the week's sent, missed, failed and cancelled ones too"),
+      limit: z.number().int().min(1).max(100).default(50),
+    },
+    outputSchema: SCHEDULED_OUTPUT,
+    write: true,
+    handler: async ({ action, schedule_id, include_closed, limit }, { wa }) => {
+      if (typeof wa.listScheduled !== "function" || typeof wa.cancelScheduled !== "function") {
+        throw new WazapError("SERVICE_ERROR", "This account keeps no scheduled messages.", "Use another account_id");
+      }
+      if (action === "cancel") {
+        if (schedule_id === undefined) throw new WazapError("INVALID_ID", "cancel needs schedule_id.", "List them first and pass the schedule_id of the one to cancel");
+        const { cancelled, scheduled } = await wa.cancelScheduled(schedule_id);
+        const text = cancelled
+          ? `Cancelled ${scheduled.schedule_id}: it will not be sent.\n${scheduled.preview}`
+          : `${scheduled.schedule_id} is ${scheduled.state}, so it could not be cancelled${scheduled.state === "sending" ? ": it is being sent right now" : ""}.`;
+        return ok(text, { action, count: 1, cancelled, scheduled: [scheduled] });
+      }
+      const rows = await wa.listScheduled(include_closed, limit);
+      return ok(renderScheduled(rows), { action, count: rows.length, scheduled: rows });
+    },
+  }),
+
+  tool({
+    name: "reminder",
+    title: "Set, list or cancel a reminder about a chat",
+    description: `The user's reminders about a chat, kept locally and posted to their webhook when due: create (chat_id, note, after_hours or due_at); condition "no_reply" fires only if nobody wrote there since ("if Ana has not answered in 2 days"). list, cancel. Nothing goes to WhatsApp.`,
+    schema: {
+      action: z.enum(["create", "list", "cancel"]).default("list"),
+      chat_id: chatId.optional().describe("create: the chat it is about"),
+      note: z.string().min(1).max(1000).optional().describe("create: what to remind the user of"),
+      after_hours: z.number().min(0.25).max(8760).optional().describe("create: due this many hours from now"),
+      due_at: z.string().min(10).max(40).optional().describe('create: due then, "2026-10-14T09:00" in time_zone, or with an offset'),
+      time_zone: z.string().min(1).max(64).optional().describe("IANA zone for due_at; the server's by default"),
+      condition: z.enum(["always", "no_reply"]).default("always").describe("no_reply: skipped if someone wrote in the chat after it was set"),
+      reminder_id: z.string().min(1).max(64).optional().describe("cancel: from create or list"),
+      include_closed: z.boolean().default(true).describe("list: the week's fired, skipped and cancelled ones too"),
+      limit: z.number().int().min(1).max(100).default(50),
+    },
+    outputSchema: REMINDER_OUTPUT,
+    write: false,
+    handler: async (args, { wa, allowLocalEdits }) => {
+      if (typeof wa.addReminder !== "function" || typeof wa.listReminders !== "function" || typeof wa.cancelReminder !== "function") {
+        throw new WazapError("SERVICE_ERROR", "This account keeps no reminders.", "Use another account_id");
+      }
+      if (args.action === "list") {
+        const rows = await wa.listReminders(args.include_closed, args.limit);
+        return ok(renderReminders(rows), { action: args.action, count: rows.length, reminders: rows });
+      }
+      // Reminders are the user's own notes, posted to their webhook: a read credential may not file or drop them.
+      if (!allowLocalEdits) {
+        throw new WazapError("READ_ONLY", "This connection only reads: it cannot set or cancel reminders.", "Use a connection with write access");
+      }
+      if (args.action === "cancel") {
+        if (args.reminder_id === undefined) throw new WazapError("INVALID_ID", "cancel needs reminder_id.", "List them first and pass the reminder_id of the one to cancel");
+        const { cancelled, reminder } = await wa.cancelReminder(args.reminder_id);
+        const text = cancelled ? `Cancelled reminder ${reminder.reminder_id}.` : `Reminder ${reminder.reminder_id} is ${reminder.state}; nothing to cancel.`;
+        return ok(text, { action: args.action, count: 1, cancelled, reminders: [reminder] });
+      }
+      if (args.chat_id === undefined || args.note === undefined) {
+        throw new WazapError("INVALID_ID", "create needs chat_id and note.", 'reminder({ action: "create", chat_id, note: "Ask Ana about the invoice", after_hours: 48, condition: "no_reply" })');
+      }
+      if ((args.after_hours === undefined) === (args.due_at === undefined)) {
+        throw new WazapError("INVALID_TIME", "create needs exactly one of after_hours and due_at.", "Pass after_hours: 48, or due_at with time_zone");
+      }
+      if (args.due_at === undefined && args.time_zone !== undefined) {
+        throw new WazapError("INVALID_TIME", "time_zone applies only with due_at.", "Pass due_at too, or leave time_zone out");
+      }
+      const now = Date.now();
+      const when: ResolvedTime =
+        args.due_at !== undefined
+          ? resolveFutureTime(args.due_at, args.time_zone, { now, minAheadMs: 60_000, maxAheadMs: SCHEDULE_MAX_AHEAD_MS, field: "due_at" })
+          : describeInstant(now + Math.round(args.after_hours! * 3_600_000), serverTimeZone());
+      const reminder = await wa.addReminder({ chatId: args.chat_id, note: args.note, condition: args.condition, dueAt: when.at, timeZone: when.zone });
+      const delivery = reminderDelivery(wa);
+      const text = [
+        `Reminder ${reminder.reminder_id} set for ${describeInstant(when.at, when.zone).label} about ${reminder.chat_name}${reminder.condition === "no_reply" ? ", unless someone writes there first" : ""}:`,
+        `> ${reminder.note}`,
+        when.ambiguous ? "That wall-clock time happens twice that day (the clocks go back); the first one was taken." : null,
+        delivery,
+      ].filter((line): line is string => line !== null).join("\n");
+      return ok(text, { action: args.action, count: 1, reminders: [reminder], ...notesField([delivery]) });
     },
   }),
 ];
@@ -1573,12 +1741,17 @@ const DRAFT_NEXT =
 const DRAFT_NEXT_LANGUAGE =
   "Draft again before showing anything: this text is not in the language this chat is written in (style_check.basis.language, from whoever basis.from says). Call send_message with the same message in that language, then show the preview it returns and follow its next.";
 
-function drafted(view: DraftView): ToolResult {
+/** The step after a draft for later: the yes covers the time too, and confirm_send schedules rather than sends. */
+const DRAFT_NEXT_SCHEDULED =
+  "Show this preview to the user exactly, the Scheduled time included. Call confirm_send with draft_id only when their words approve this text, this recipient and this time: it schedules the message, which goes at that time. A yes about something else is not approval: show the preview again and ask.";
+
+function drafted(view: DraftView, ambiguous = false): ToolResult {
   const warnings = view.style_check?.warnings ?? [];
   return ok(renderDraft(view), {
     ...view,
-    next: warnings.includes("language_mismatch") ? DRAFT_NEXT_LANGUAGE : DRAFT_NEXT,
+    next: warnings.includes("language_mismatch") ? DRAFT_NEXT_LANGUAGE : view.send_at === undefined ? DRAFT_NEXT : DRAFT_NEXT_SCHEDULED,
     ...notesField([
+      ambiguous ? "That wall-clock time happens twice that day (the clocks go back): the first was taken; say so and show send_at." : null,
       view.unnamed_recipient === true ? "The recipient is not a saved contact: say the name shown is only their public WhatsApp name or their number." : null,
       warnings.some((warning) => warning !== "length_outlier")
         ? "Unless the user dictated these words, draft again to match style_check.warnings, then show that preview."
@@ -1710,18 +1883,18 @@ function sendPayload(args: SendArgs): DraftPayload {
  * the id as typed and again on the resolved recipient, and the draft's target
  * is recorded so confirm_send can re-check rules written after the draft.
  */
-async function draftAndGuard(payload: DraftPayload, ctx: ToolCtx): Promise<ToolResult> {
+async function draftAndGuard(payload: DraftPayload, ctx: ToolCtx, when?: ResolvedTime): Promise<ToolResult> {
   const policy = liveSendPolicy(ctx.hub, ctx.accountId);
   // A bare @lid may still resolve to an allowed phone inside the service; only
   // the deny list can fire on it before that resolution.
   const pre = payload.chatId.trim().endsWith("@lid") ? { allow: null, deny: policy.deny } : policy;
   assertSendable(pre, { chat_id: payload.chatId }, ctx.accountId);
-  const view = await ctx.wa.draft(payload, ctx.draftOwner);
+  const view = await ctx.wa.draft(payload, ctx.draftOwner, when === undefined ? undefined : { at: when.at, zone: when.zone });
   assertSendable(policy, view.to, ctx.accountId);
   noteDraftTarget(view, ctx.accountId, ctx.draftOwner);
   await flagUnnamed(view, ctx.wa);
   if (payload.kind === "text") await checkStyle(view, payload.text, ctx);
-  return drafted(view);
+  return drafted(view, when?.ambiguous === true);
 }
 
 /**
@@ -1741,6 +1914,49 @@ async function checkStyle(view: DraftView, text: string, { wa, hub, accountId }:
   } catch {
     /* the draft stands without it */
   }
+}
+
+function scheduledText(view: ScheduledView): string {
+  const when = `${view.send_at} (${view.time_zone})`;
+  if (view.already_scheduled === true) return `Already scheduled as ${view.schedule_id} for ${when}; nothing new was scheduled. It is ${view.state}.`;
+  return `Scheduled ${view.schedule_id} for ${when}. Nothing was sent yet; it goes then, if the send checks still pass. scheduled_messages lists or cancels it.\n${view.preview}`;
+}
+
+function renderScheduled(rows: ScheduledView[]): string {
+  if (rows.length === 0) return "No scheduled messages.";
+  const lines = [`# Scheduled messages (${rows.length})`, ""];
+  for (const row of rows) {
+    const facts = [
+      row.state,
+      `send_at ${row.send_at} (${row.time_zone})`,
+      row.message_id ? `sent as \`${row.message_id}\`` : null,
+      row.error_code ? `${row.error_code}: ${row.error ?? ""}` : null,
+    ].filter(Boolean);
+    lines.push(`- \`${row.schedule_id}\` → ${describeTarget(row.to)} [${facts.join(" · ")}]`);
+    if (row.preview !== "") lines.push(`  ${truncate(row.preview.replaceAll("\n", " · "), 300)}`);
+  }
+  return lines.join("\n");
+}
+
+function renderReminders(rows: ReminderView[]): string {
+  if (rows.length === 0) return "No reminders.";
+  const lines = [`# Reminders (${rows.length})`, ""];
+  for (const row of rows) {
+    const facts = [row.state, `due ${row.due_at} (${row.time_zone})`, row.condition === "no_reply" ? "unless they reply" : null, row.outcome ?? null].filter(Boolean);
+    lines.push(`- \`${row.reminder_id}\` · ${row.chat_name} \`${row.chat_id}\` [${facts.join(" · ")}]`);
+    lines.push(`  ${truncate(row.note, 300)}`);
+  }
+  return lines.join("\n");
+}
+
+/** Where a reminder will reach the user, as a note when it will not reach them at all. */
+function reminderDelivery(wa: WhatsAppApi): string | null {
+  const delivery = wa.scheduleDelivery?.();
+  if (delivery === undefined || delivery.reminder) return null;
+  const add = "reminder in the webhook's events (WAZAP_WEBHOOK_EVENTS, or the account's webhook_events), then a server restart";
+  return delivery.webhook
+    ? `The webhook does not post the reminder event, so this reminder will only show in reminder list when due: tell the user it needs ${add}.`
+    : `No webhook is set up, so this reminder will only show in reminder list when due: tell the user it needs \`wazap config webhook on\` and ${add}.`;
 }
 
 function sentText(sent: SentMessage, to?: OutgoingTarget): string {

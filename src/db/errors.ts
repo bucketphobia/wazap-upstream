@@ -21,7 +21,9 @@ export type StorageErrorCode =
   /** More than 2^20 messages in one second; the chronological id space for it is full. */
   | "ID_SPACE_EXHAUSTED"
   /** The connection was closed. */
-  | "CLOSED";
+  | "CLOSED"
+  /** The account already keeps as many waiting scheduled messages or reminders as it may. */
+  | "SCHEDULE_FULL";
 
 export class StorageError extends Error {
   readonly code: StorageErrorCode;

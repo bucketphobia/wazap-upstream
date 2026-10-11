@@ -9,7 +9,7 @@ breaking.
 
 | Area | Stable | Additive-only | Not promised |
 | --- | --- | --- | --- |
-| MCP tools | the 21 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
+| MCP tools | the 23 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
 | Safety | draft-then-confirm, send rules, read-only mode, session isolation | new codes for new refusals | the exact error sentences |
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
@@ -18,12 +18,12 @@ breaking.
 
 ## 1. The MCP surface
 
-wazap registers exactly 21 tools — the 20 of 1.0 and `list_contacts`, added in
-1.2 — a session without writes sees 14 of them, and every tool also takes an
-optional `account_id`. Guarded by: `test/tools.test.mjs`,
+wazap registers exactly 23 tools — the 20 of 1.0, `list_contacts`, added in
+1.2, and `scheduled_messages` and `reminder`, added in 1.4 — a session
+without writes sees 15 of them, and every tool also takes an optional `account_id`. Guarded by: `test/tools.test.mjs`,
 `test/tool-names.test.mjs`.
 
-The 21, each with what it requires: `learn` (), `get_status` (),
+The 23, each with what it requires: `learn` (), `get_status` (),
 `list_chats` (), `catch_up` (), `wait_for_messages` (), `find_contact` (),
 `list_contacts` (), `link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
 `confirm_send` (`draft_id`), `manage_group` (`action`),
@@ -31,14 +31,14 @@ The 21, each with what it requires: `learn` (), `get_status` (),
 (`message_id`), `get_media` (`message_id`), `send_message` (`chat_id`, `text`),
 `edit_message` (`message_id`, `text`), `react_to_message` (`message_id`,
 `emoji`), `delete_message` (`message_id`, `for_everyone`), `manage_chat`
-(`chat_id`, `action`).
+(`chat_id`, `action`), `scheduled_messages` (), `reminder` ().
 An empty argument list means the tool requires nothing.
 
-Fourteen declare an output schema and answer in that shape, as an SDK client's
+16 declare an output schema and answer in that shape, as an SDK client's
 own validator checks it; the seven without one are the six of the integration
 contract and `learn` (`test/output-schema.test.mjs`). A refusal is an error result carrying
 `{ error, message, fix }`, with `account_id` added when the tool declares an
-output schema; `error` is one of the 46 codes, and `learn` documents every one
+output schema; `error` is one of the 49 codes, and `learn` documents every one
 of them. Guarded by: `test/tools.test.mjs`.
 
 **What "stable" means here.** A new optional argument, a new value in an enum
@@ -92,6 +92,11 @@ Guarded by: `test/integration-contract.test.mjs`, and for the last one also
 
 - A send is two steps: `send_message` only drafts, and `confirm_send` is the
   only thing that sends. Guarded by: `test/tools.test.mjs`, `test/sends.test.mjs`.
+- A draft with `send_at` is never sent by its confirm: the confirm schedules
+  it, once, and it goes at its time through the same send, with the account's
+  record on disk, the read-only switch, the send rules and the write rate
+  limit checked again then. One not sent within 15 minutes of its time is
+  missed, never sent late. Guarded by: `test/schedule.test.mjs`.
 - A draft belongs to the MCP session that made it; every other session is told
   `DRAFT_NOT_FOUND`, a re-initialized session cannot confirm the old one, and a
   draft the session did something else after is refused with `DRAFT_STALE`
@@ -141,9 +146,10 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
 
 ## 4. The outbound webhook
 
-- The three event names `message_received`, `message_sent` and `connection`; the
-  last two are opt-in through `WAZAP_WEBHOOK_EVENTS`, and unset means
-  `message_received` only.
+- The five event names `message_received`, `message_sent`, `connection`,
+  `reminder` and `scheduled`; all but the first are opt-in through
+  `WAZAP_WEBHOOK_EVENTS`, and unset means `message_received` only. `all`
+  names the first three; `reminder` and `scheduled` are posted only when named.
 - The signature is `x-wazap-signature: sha256=<hex>`, an HMAC-SHA256 over the
   exact raw request body with the configured secret; the body is JSON.
 - With `WAZAP_WEBHOOK_AUTH` set (or an account's own), its header
@@ -165,6 +171,13 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
   change while the link stays up is a connection event too. A connection
   event is not a chat: the allowlist and `#private` do not apply to it,
   because it carries no message content.
+- Reminder-event fields: `event`, `account_id`, `account_name`, `reminder_id`,
+  `chat_id`, `chat_name`, `note`, `condition`, `due_at`, `created_at` and
+  `timestamp`. Scheduled-event fields: `event`, `account_id`, `account_name`,
+  `schedule_id`, `state` (`sent`, `unknown`, `failed` or `missed`), `chat_id`,
+  `chat_name`, `send_at`, `message_id`, `error_code`, `error` and `timestamp`;
+  never the message's words. Neither is filtered by the allowlist or
+  `#private`. Guarded by: `test/schedule.test.mjs`.
 - A message wazap itself sent produces no `message_sent`, and history sync
   produces no events at all.
 
@@ -184,7 +197,7 @@ whenever that event is enabled.
 ## 5. Data on disk
 
 - The account database carries its schema version in `PRAGMA user_version`; it
-  is 5 in this release.
+  is 6 in this release.
 - Migrations run forward only, in order, and every released version has a chain
   test, so a new migration cannot ship without one. A released migration is
   never edited — a new shape is a new migration at the end — and the chain test

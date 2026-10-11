@@ -43,7 +43,7 @@ Only `message_received` is posted unless you ask for more, because a consumer
 that answers every POST without reading `event` would otherwise answer the
 messages its own owner typed on the phone.
 
-The `event` field names one of three. `message_received` is a message another
+The `event` field names one of five. `message_received` is a message another
 person sent. `message_sent` is a message this account sent itself, typed on
 the phone or on another linked device; a message wazap sent through its own
 tools is not announced, so a consumer can never be made to answer itself.
@@ -53,10 +53,14 @@ new_chats_capped, reachout_restricted, temporarily_banned, banned,
 session_replaced or client_outdated, with `until` and WhatsApp's `reason`).
 A restriction that comes or goes while the link stays up is a `connection`
 event too, with the same `status`; the pair of status and state is posted
-once per change.
+once per change. `reminder` is a reminder the user set with the `reminder`
+tool, now due, and `scheduled` says what became of a scheduled message; see
+[Reminders and scheduled messages](#reminders-and-scheduled-messages).
 
-Ask for the other two in `WAZAP_WEBHOOK_EVENTS`, comma-separated
-(`message_received,connection`), or say `all` for the three of them. Case
+Ask for the others in `WAZAP_WEBHOOK_EVENTS`, comma-separated
+(`message_received,connection,reminder`). `all` names the first three, as it
+always has: `reminder` and `scheduled` are posted only when named, so a
+receiver set to `all` is not handed reminders it never asked for. Case
 does not matter and the spaces around a name are ignored. An unknown name
 fails `wazap status`, doctor and setup. An account carries its own list as
 `webhook_events` in `accounts.json`.
@@ -138,6 +142,64 @@ the account does not keep the global chat list. `config webhook off --account
 work` clears them with the account's other webhook fields. The chat list and
 the tag name are read when the server starts, like the URL. Who carries the
 tag is read from the account database at delivery time.
+
+### Reminders and scheduled messages
+
+Both are the owner's own, opt-in like every event but `message_received`,
+and, like `connection`, not chat events: the chat list, the tag and
+`#private` do not filter them, and they never carry a word anyone else wrote.
+Each waits in a lane of its own in the outbox, so it is retried and survives a
+restart like any event. A consumer that answers every POST must read `event`:
+a `reminder` names a `chat_id`, and is for the owner, not for that chat.
+
+`reminder` is posted once, when a reminder is due, in the transaction that
+marks it fired. One with `condition` `no_reply` is not posted when someone
+wrote in that chat after it was set. Its `note` is the owner's own words as the
+reminder was set:
+
+```json
+{
+  "event": "reminder",
+  "reminder_id": "r_3f2a9c0d1e4b5a67",
+  "chat_id": "15550100@s.whatsapp.net",
+  "chat_name": "Ana Pop",
+  "note": "Ask Ana about the invoice",
+  "condition": "no_reply",
+  "due_at": "2026-10-13T06:00:00.000Z",
+  "created_at": "2026-10-11T06:00:00.000Z",
+  "timestamp": "2026-10-13T06:00:01.000Z",
+  "account_id": "default",
+  "account_name": "default"
+}
+```
+
+`scheduled` is posted once per scheduled message that closes other than by a
+cancel: `state` `sent`, `unknown` (it reached WhatsApp and the send failed; a
+later echo posts `sent`), `failed` (a check refused it, `error_code` says
+which) or `missed` (not sent within 15 minutes of its time: wazap was down or
+the link was). It never carries the message's words; `scheduled_messages`
+lists them:
+
+```json
+{
+  "event": "scheduled",
+  "schedule_id": "s_9b1c2d3e4f5a6b7c",
+  "state": "missed",
+  "chat_id": "15550100@s.whatsapp.net",
+  "chat_name": "Ana Pop",
+  "send_at": "2026-10-12T06:00:00.000Z",
+  "message_id": null,
+  "error_code": "NOT_RUNNING",
+  "error": "wazap was not running when it was due, and 15 minutes later it was too late to send it",
+  "timestamp": "2026-10-12T07:12:40.000Z",
+  "account_id": "default",
+  "account_name": "default"
+}
+```
+
+An outcome or a reminder that comes due while its event is off is not queued
+for later: turning the event on does not post a backlog. `reminder list` and
+`scheduled_messages` still show it.
 
 ### Several messages, one POST
 
