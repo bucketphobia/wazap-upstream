@@ -94,6 +94,8 @@ function fakeSidecars(url, { gate, failStart } = {}) {
       base: url,
       starts: 0,
       stops: 0,
+      // The seam's contract: requests carry whatever auth the backend needs; the stub wants none.
+      authHeaders: () => ({}),
       async start() {
         this.starts++;
         if (failStart?.()) throw new Error("llama-server would not start");
