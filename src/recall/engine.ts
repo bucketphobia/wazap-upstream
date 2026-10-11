@@ -373,14 +373,13 @@ class SharedSidecar implements EmbeddingTarget {
     return this.entry.started;
   }
 
-  /** The live claim's address — a respawn after an idle reap owns a new port. */
   get base(): string {
-    return this.liveEntry().sidecar.base;
+    return this.entry.sidecar.base;
   }
 
-  /** The live claim's key — a respawn after an idle reap has a fresh one. */
+  /** The key of the same entry `base` names, so an embed never signs for one sidecar and posts to another. */
   authHeaders(): Record<string, string> {
-    return this.liveEntry().sidecar.authHeaders();
+    return this.entry.sidecar.authHeaders();
   }
 
   /**
