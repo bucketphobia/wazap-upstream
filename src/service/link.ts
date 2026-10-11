@@ -68,6 +68,8 @@ export interface LinkAlert {
   /** How long the link was down, for `recovered`; how long it has been, for `disconnected`. */
   downForMs: number | null;
   reason: string | null;
+  /** The outage is the session's credentials gone missing, whose way out differs from a network's. */
+  credentialsMissing?: boolean;
 }
 
 /** What a ping of the live socket found: an answer, none, or no socket left to ask (replaced, closed). */
@@ -390,7 +392,15 @@ export class LinkMonitor {
           ? `link alert: WhatsApp has been down ${minutes} min (${status}${reason === null ? "" : `: ${reason}`})`
           : `link alert: WhatsApp unlinked this device (${status}); it needs linking again`
     );
-    this.pending.push({ alert, status, at, downSince, downForMs: downSince === null ? null : at - downSince, reason });
+    this.pending.push({
+      alert,
+      status,
+      at,
+      downSince,
+      downForMs: downSince === null ? null : at - downSince,
+      reason,
+      ...(this.credentialsMissing && alert === "disconnected" ? { credentialsMissing: true } : {}),
+    });
     // Bounded: a database that never opens keeps the latest few, not every flap.
     if (this.pending.length > PENDING_MAX) this.pending.splice(0, this.pending.length - PENDING_MAX);
     this.flush();

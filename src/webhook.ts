@@ -688,6 +688,10 @@ export const ALERT_FIX: Record<WebhookAlertPayload["alert"], string> = {
 const ALERT_FIX_REFUSED =
   "WhatsApp refuses this account for now: `reason` says why and get_status → health until when. Linking again does not help";
 
+/** The credentials file of a running session is missing: retried, but a new link if it is gone for good. */
+const ALERT_FIX_CREDENTIALS_MISSING =
+  "The credentials file is missing: wazap retries until it is back (a data disk not mounted yet); if it is gone for good, run `wazap logout`, then link again";
+
 export interface WebhookAlertEvent {
   alert: WebhookAlertPayload["alert"];
   status: ConnectionStatus;
@@ -696,9 +700,10 @@ export interface WebhookAlertEvent {
   downSince: number | null;
   downForMs: number | null;
   reason: string | null;
+  credentialsMissing?: boolean;
 }
 
-export function asAlertPayload({ alert, status, account, at, downSince, downForMs, reason }: WebhookAlertEvent): WebhookAlertPayload {
+export function asAlertPayload({ alert, status, account, at, downSince, downForMs, reason, credentialsMissing }: WebhookAlertEvent): WebhookAlertPayload {
   return {
     event: "alert",
     alert,
@@ -707,7 +712,12 @@ export function asAlertPayload({ alert, status, account, at, downSince, downForM
     down_since: downSince === null ? null : new Date(downSince).toISOString(),
     down_for_seconds: downForMs === null ? null : Math.max(0, Math.round(downForMs / 1000)),
     reason,
-    fix: alert === "disconnected" && status === "auth_failure" ? ALERT_FIX_REFUSED : ALERT_FIX[alert],
+    fix:
+      alert === "disconnected" && credentialsMissing === true
+        ? ALERT_FIX_CREDENTIALS_MISSING
+        : alert === "disconnected" && status === "auth_failure"
+          ? ALERT_FIX_REFUSED
+          : ALERT_FIX[alert],
     account_id: account.id,
     account_name: account.name,
   };

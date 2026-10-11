@@ -454,7 +454,9 @@ outage, where `connection` reports every change. `alert` is one of:
   `link_account` from the agent, or `wazap logout` then `wazap login`.
   Credentials the file system will not read for the moment (a permission, an
   I/O error) are a dropped link instead: retried, and a `disconnected` alert
-  if it lasts, its `reason` naming the error.
+  if it lasts, its `reason` naming the error. So is a running session's
+  credentials file gone missing (a data disk not mounted yet); its `fix` says
+  to run `wazap logout`, then link again, if the file is gone for good.
 
 Each is posted once, also across the restart wazap asks its supervisor for when
 reconnects run out: the outage is kept in `<data-dir>/accounts/<id>/link.json`.

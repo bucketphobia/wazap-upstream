@@ -941,3 +941,18 @@ test("the give-up line keeps the missing-credentials fix", (t) => {
   assert.match(svc.getStatus().last_error, /could not be reached after 10 attempts/);
   assert.match(svc.getStatus().last_error, /run `wazap logout`, then link again/);
 });
+
+// The eighth review pass -----------------------------------------------------------
+
+test("a missing-credentials outage alert says the way out, not 'nothing to re-link'", (t) => {
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, tempFile(t));
+  setStatus(watch, host, "disconnected");
+  watch.noteCredentialsMissing();
+  awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
+  assert.equal(host.alerts[0].credentialsMissing, true);
+  const payload = asAlertPayload({ ...host.alerts[0], account: { id: "a", name: "a" } });
+  assert.match(payload.fix, /credentials file is missing.*wazap logout`, then link again/);
+  assert.doesNotMatch(payload.fix, /Nothing to re-link/);
+  assert.equal("credentialsMissing" in payload, false, "the flag picks the fix; it is not a payload field");
+});
