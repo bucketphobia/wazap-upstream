@@ -22,8 +22,15 @@ export interface LinkedAccount {
 
 const CREDS_FILE = "creds.json";
 
+/**
+ * A key id becomes a filename. `/` and `:` keep their historic escapes, and
+ * `+` and `=` stay as they are — base64 app-state key ids carry them, and the
+ * files already on disk hold those names. Every other byte outside a plain
+ * name — `\` included, a separator on Windows — folds to `_`, so an id read
+ * off the wire can never walk out of `dir`.
+ */
 function fileFor(dir: string, name: string): string {
-  return join(dir, name.replace(/\//g, "__").replace(/:/g, "-"));
+  return join(dir, name.replace(/\//g, "__").replace(/:/g, "-").replace(/[^A-Za-z0-9._@+=-]/g, "_"));
 }
 
 /**

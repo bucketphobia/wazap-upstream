@@ -323,6 +323,17 @@ WantedBy=default.target
   assert.ok(!unit.includes("ProtectHome"), "ProtectHome would hide ~/.wazap from the service");
 });
 
+test("the systemd user unit quotes env values and argv items that hold spaces", () => {
+  const unit = supervisorNamed("systemd").render({
+    ...UNIT,
+    argv: ["/opt/my node/bin/node", "/opt/wazap/dist/index.js", "serve"],
+    env: { WAZAP_DATA_DIR: "/home/u/My Files/wazap", QUOTED: 'say "hi"' },
+  });
+  assert.ok(unit.includes('Environment="WAZAP_DATA_DIR=/home/u/My Files/wazap"'), "a spaced data dir is one value");
+  assert.ok(unit.includes('Environment="QUOTED=say \\"hi\\""'), "an embedded quote is escaped");
+  assert.ok(unit.includes('ExecStart="/opt/my node/bin/node" /opt/wazap/dist/index.js serve'), "a spaced argv item stays one argument");
+});
+
 test("the unit runs the http server on loopback, with whisper and ffmpeg on its PATH", () => {
   const unit = serverUnit({ label: "x", node: NODE, script: SCRIPT, dataDir: "/d", port: 9000, logDir: "/l" });
   assert.deepEqual(unit.argv, [NODE, SCRIPT, "serve", "--http", "--host", "127.0.0.1", "--port", "9000"]);

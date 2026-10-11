@@ -50,6 +50,10 @@ function buildMcpServer(
   const server = new McpServer({ name: "wazap", version: WAZAP_VERSION }, { instructions: skillInstructions(skills, { allowWrite: writes, accounts: namedAccounts(hub) }) });
   registerTools(server, hub, {
     allowWrite: writes,
+    // remember's edits are local state, not WhatsApp writes: they answer to
+    // the credential alone, so a read token cannot change shared notes or a
+    // #private tag — and a write credential on a read-only server still can.
+    allowLocalEdits: allowWrite,
     allowLocalFiles,
     client,
     ...(draftIdentity === undefined ? {} : { draftIdentity }),

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EmbedEngine, embedReady, sidecarFactory } from "../dist/recall/engine.js";
@@ -151,4 +151,44 @@ test("a llama-server that dies while starting logs why, and only while starting"
   const exited = new Promise((resolve) => serving.child.once("exit", resolve));
   try { await exited; } finally { await serving.stop(); }
   assert.ok(ready.every((line) => !line.includes(SECRET)), "output after ready is never retained");
+});
+
+test("the spawned sidecar gates its API on a per-run key the engine sends", { skip: process.platform === "win32" }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "wazap-embedding-auth-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const argvFile = join(dir, "argv.json");
+  const reqFile = join(dir, "requests.log");
+  // A fake llama-server: serves /health and /embedding, and refuses an
+  // embedding request that does not carry the api key it was launched with.
+  const bin = join(dir, "fake-llama.mjs");
+  await writeFile(bin, `#!/usr/bin/env node
+import http from "node:http";
+import fs from "node:fs";
+const argv = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(argv));
+const port = argv[argv.indexOf("--port") + 1];
+const key = argv[argv.indexOf("--api-key") + 1];
+http.createServer((req, res) => {
+  const authed = req.headers.authorization === \`Bearer \${key}\`;
+  fs.appendFileSync(${JSON.stringify(reqFile)}, \`\${req.method} \${req.url} authed=\${authed}\\n\`);
+  if (req.url === "/health") return res.end("ok");
+  if (!authed) { res.writeHead(401); return res.end(); }
+  req.resume();
+  req.on("end", () => res.end(JSON.stringify([{ embedding: [new Array(${spec.dims}).fill(0.5)] }])));
+}).listen(port, "127.0.0.1");
+`, { mode: 0o700 });
+
+  const settings = readRecallSettings({ WAZAP_RECALL: "local", WAZAP_EMBED_BIN: bin }, dir);
+  const engine = await EmbedEngine.start(settings, spec, () => {});
+  t.after(() => engine.stop());
+
+  assert.deepEqual(await engine.embed(["salut"], "document"), [new Array(spec.dims).fill(0.5)]);
+  const argv = JSON.parse(await readFile(argvFile, "utf8"));
+  assert.ok(argv.includes("--api-key"), "the spawn passes the key flag");
+  const key = argv[argv.indexOf("--api-key") + 1];
+  assert.equal(typeof key, "string");
+  assert.ok(key.length >= 24, "the key is long enough to be unguessable");
+  const reqs = await readFile(reqFile, "utf8");
+  assert.ok(reqs.includes("/embedding authed=true"), "the engine authenticates its embed calls");
+  assert.ok(!reqs.includes("authed=false"), "no request went out unauthenticated");
 });

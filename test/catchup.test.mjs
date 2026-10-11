@@ -38,6 +38,8 @@ function toolsOf(source, opts = {}) {
   const tools = new Map();
   registerTools({ registerTool: (name, meta, handler) => tools.set(name, { meta, handler }) }, asToolSource(source), {
     allowWrite: false,
+    // The tests play a client that may file local notes even though nothing it does reaches WhatsApp.
+    allowLocalEdits: true,
     ...opts,
   });
   // Through the schema, so defaults apply the way they do over MCP.

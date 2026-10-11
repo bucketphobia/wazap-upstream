@@ -25,6 +25,13 @@ export interface ToolCtx {
   wa: WhatsAppApi;
   hub: AccountSource;
   allowWrite: boolean;
+  /**
+   * The credential's own right to change local state (remember's notes, tags
+   * and handled marks), independent of whether any account may write to
+   * WhatsApp: a read credential has it false even on a writable server, and a
+   * write credential keeps it true on a read-only one.
+   */
+  allowLocalEdits: boolean;
   accountId: string;
   /**
    * The identity the session's drafts answer to: the credential's stable
@@ -67,6 +74,12 @@ export interface ToolDef {
 
 export interface RegisterOpts {
   allowWrite: boolean;
+  /**
+   * The credential's right to change local state (see ToolCtx.allowLocalEdits).
+   * Falls back to `allowWrite`, which is what every session built before this
+   * flag meant: credential, global read-only and account writes folded together.
+   */
+  allowLocalEdits?: boolean;
   /** Trusted local stdio defaults to true; every HTTP session explicitly sets its capability. */
   allowLocalFiles?: boolean;
   /** Tool calls this session may have running at once. */
@@ -216,6 +229,7 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
               wa: resolved.wa,
               hub,
               allowWrite: opts.allowWrite,
+              allowLocalEdits: opts.allowLocalEdits ?? opts.allowWrite,
               accountId: resolved.id,
               draftOwner,
               client: clientOf(extra),

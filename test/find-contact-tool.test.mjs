@@ -329,7 +329,7 @@ test("a tag listed over two accounts shares the limit between them and counts wh
   connect(home, ME);
   connect(work, WORK_ME);
   const server = fakeServer();
-  registerTools(server, asToolSource(hub), { allowWrite: false });
+  registerTools(server, asToolSource(hub), { allowWrite: false, allowLocalEdits: true });
   const call = async (name, args) => (await server.tools.get(name).handler(args)).structuredContent;
   for (const [svc, account, first] of [
     [home, "default", 40722100000],

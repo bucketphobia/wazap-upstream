@@ -619,7 +619,16 @@ const TOOLS: readonly ToolDef[] = [
     },
     outputSchema: REMEMBER_OUTPUT,
     write: false,
-    handler: async ({ chat_id, note, add_tags, remove_tags, fields, remove_fields, handled }, { wa }) => {
+    handler: async ({ chat_id, note, add_tags, remove_tags, fields, remove_fields, handled }, { wa, allowLocalEdits }) => {
+      // Notes are local, but shared: a tag like #private reshapes what every
+      // session sees and what webhooks deliver, so a read credential may not file them.
+      if (!allowLocalEdits) {
+        throw new WazapError(
+          "READ_ONLY",
+          "This connection only reads: it cannot keep notes, tags or handled marks.",
+          "Use a connection with write access to file them"
+        );
+      }
       const details = add_tags !== undefined || remove_tags !== undefined || fields !== undefined || remove_fields !== undefined;
       if (!details && note === undefined && handled === undefined) {
         throw new WazapError("INVALID_ID", "Nothing to remember.", "Pass note, add_tags, remove_tags, fields, remove_fields or handled: true");

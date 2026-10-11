@@ -161,3 +161,16 @@ test("WAZAP_TRANSPORT set to anything but http is told stdio is the default, not
   }
   assert.equal(settingWarnings(RETIRED_VALUES).length, Object.keys(RETIRED_VALUES).length);
 });
+
+test("the link-method flags land on the config: --qr picks QR, --code and --phone pick the code", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wazap-login-config-"));
+  try {
+    const load = (...flags) => parseCli(["login", ...flags, "--data-dir", dir]).config;
+    assert.deepEqual([load().loginCode, load().loginQr], [false, false]);
+    assert.deepEqual([load("--qr").loginCode, load("--qr").loginQr], [false, true]);
+    assert.deepEqual([load("--code").loginCode, load("--code").loginQr], [true, false]);
+    assert.deepEqual([load("--phone", "+15550100").loginCode, load("--phone", "+15550100").loginQr], [true, false]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

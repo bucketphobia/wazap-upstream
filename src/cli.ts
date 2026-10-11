@@ -1193,12 +1193,12 @@ export function parseLinkChoice(answer: string, qrFits = true): LinkChoice {
 
 /**
  * Whether login/setup should pair with a code. Asked before the wizard so its
- * step count is already right. `--phone` / `--code` skip the question; a pipe
- * or `--yes` keeps the QR.
+ * step count is already right. `--phone` / `--code` answer code, `--qr`
+ * answers QR; a pipe or `--yes` keeps the QR.
  */
 export async function chooseLoginCode(config: Config): Promise<boolean> {
   if (config.loginCode) return true;
-  if (config.assumeYes || process.stdin.isTTY !== true) return false;
+  if (config.loginQr || config.assumeYes || process.stdin.isTTY !== true) return false;
 
   // Asked before there is a QR to measure, so the height is the usual one.
   const rows = terminalRows();
