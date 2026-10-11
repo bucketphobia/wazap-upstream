@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0
 
 ### Added
 
@@ -30,6 +30,23 @@
   `WAZAP_WEBHOOK_EVENTS` (`all` keeps meaning the three it always named, as
   with `alert`: `all,reminder,scheduled`); the second tells what became of
   each scheduled message, without its words.
+- **Kept media: `get_media` outlives WhatsApp's copy.** WhatsApp drops old
+  attachments from its servers, and `get_media` then said `MEDIA_UNAVAILABLE`.
+  `wazap serve` now downloads arriving media at once and keeps it in
+  `accounts/<id>/kept/`; `get_media` serves that copy first, even with the link
+  down, and says which it used in the new `source` field (`kept` or
+  `whatsapp`). On by default for the photos, voice notes, audio and documents
+  of every chat that is not muted, up to 16 MB a file, 1 GB an account and 90
+  days, and never leaving the disk with less than 1 GB, or 5%, free. When the
+  server connects it also fetches what arrived in the last two days while
+  nothing was keeping it. A kept file goes with its message (a delete for
+  everyone, an expiry, a clear), nothing is kept with
+  `WAZAP_PERSIST_HISTORY=0`, and stories and view-once media never are. Six
+  new settings choose and bound it: `WAZAP_MEDIA_KEEP` (`unmuted`, `all`,
+  `chats` or `off`, which also removes what was kept at the next start),
+  `WAZAP_MEDIA_KEEP_CHATS`, `WAZAP_MEDIA_KEEP_TYPES`,
+  `WAZAP_MEDIA_KEEP_MAX_MB`, `WAZAP_MEDIA_KEEP_QUOTA_MB` and
+  `WAZAP_MEDIA_KEEP_DAYS`. See [docs/data.md](docs/data.md#kept-media).
 - Error codes `INVALID_TIME`, `SCHEDULE_NOT_FOUND` and `SCHEDULE_FULL`.
 
 ### Changed

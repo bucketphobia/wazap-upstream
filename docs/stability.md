@@ -147,8 +147,8 @@ under `serve` is guarded by: `test/hygiene.test.mjs`.
 ## 4. The outbound webhook
 
 - The six event names `message_received`, `message_sent`, `connection`,
-  `alert` (added after 1.3.8), `reminder` and `scheduled`; all but the first
-  are opt-in through `WAZAP_WEBHOOK_EVENTS`, and unset means
+  `alert`, `reminder` and `scheduled` (the last three added in 1.4.0); all but
+  the first are opt-in through `WAZAP_WEBHOOK_EVENTS`, and unset means
   `message_received` only. `all` means the first three and never grows: a new
   event is asked for by name.
 - The signature is `x-wazap-signature: sha256=<hex>`, an HMAC-SHA256 over the
