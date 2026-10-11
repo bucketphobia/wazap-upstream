@@ -145,6 +145,11 @@ export class LinkMonitor {
   private disposed = false;
   private lastSeenSave = 0;
   private credentialsMissing = false;
+  /**
+   * The credentials file itself is not there right now (ENOENT), as opposed to unreadable (EACCES,
+   * EIO): only then may an alert suggest a logout, which would throw readable credentials away.
+   */
+  private credentialsGone = false;
   /** Alerts the webhook could not queue yet, tried again at each tick. */
   private pending: LinkAlert[] = [];
 
@@ -194,11 +199,25 @@ export class LinkMonitor {
     return this.file !== null && this.downSince !== null;
   }
 
-  /** This session's credentials could not be read: the outage outlives any restart until they are back. */
-  noteCredentialsMissing(): void {
-    if (this.file === null || this.disposed || this.credentialsMissing) return;
+  /**
+   * This session's credentials could not be read (`errno`): the outage outlives any restart until
+   * they are back. Only a file that is not there (ENOENT) changes what the owner is told to do.
+   */
+  noteCredentialsMissing(errno: string): void {
+    if (this.file === null || this.disposed) return;
+    this.credentialsGone = errno === "ENOENT";
+    if (this.credentialsMissing) return;
     this.credentialsMissing = true;
     this.downSince ??= this.now();
+    this.save();
+  }
+
+  /** The credentials read again: whatever keeps the link down now is not them. */
+  noteCredentialsRead(): void {
+    if (this.file === null || this.disposed) return;
+    this.credentialsGone = false;
+    if (!this.credentialsMissing) return;
+    this.credentialsMissing = false;
     this.save();
   }
 
@@ -206,6 +225,7 @@ export class LinkMonitor {
   forgetSession(): void {
     if (this.file === null) return;
     this.credentialsMissing = false;
+    this.credentialsGone = false;
     this.downSince = null;
     this.bootClock = false;
     this.alerted = null;
@@ -220,6 +240,7 @@ export class LinkMonitor {
       this.probeFailures = 0;
       this.lastProbeAt = now;
       this.credentialsMissing = false;
+      this.credentialsGone = false;
       if (this.downSince === null) return;
       // Back from an outage the owner was told about. A link after `relink_required` is a new
       // session (linked again, perhaps offline), not this outage's end.
@@ -399,7 +420,7 @@ export class LinkMonitor {
       downSince,
       downForMs: downSince === null ? null : at - downSince,
       reason,
-      ...(this.credentialsMissing && alert === "disconnected" ? { credentialsMissing: true } : {}),
+      ...(this.credentialsGone && alert === "disconnected" ? { credentialsMissing: true } : {}),
     });
     // Bounded: a database that never opens keeps the latest few, not every flap.
     if (this.pending.length > PENDING_MAX) this.pending.splice(0, this.pending.length - PENDING_MAX);
@@ -452,7 +473,7 @@ export class LinkMonitor {
     const status = this.host.status();
     if ((status !== "disconnected" && status !== "connecting") || !this.host.canStart()) return null;
     // Credentials gone missing have their own way out (last_error says it), which may be a new link.
-    if (this.credentialsMissing) return null;
+    if (this.credentialsGone) return null;
     const minutes = Math.max(1, Math.round((this.now() - this.downSince) / 60_000));
     return (
       `The WhatsApp link has been down for ${minutes} min (since ${isoWithOffset(this.downSince)}). ` +

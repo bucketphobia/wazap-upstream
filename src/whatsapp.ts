@@ -570,6 +570,8 @@ export class WhatsAppService implements WhatsAppApi {
         else this.markCorrupt(err);
         return;
       }
+      // Read whole: an outage that goes on from here is the link's, not the credentials'.
+      this.linkWatch.noteCredentialsRead();
       if (this.stopped) return;
 
       this.teardownSocket();
@@ -1652,7 +1654,7 @@ export class WhatsAppService implements WhatsAppApi {
    */
   private credentialsUnreadable(err: CredentialsReadError): void {
     logError("auth state", err);
-    this.linkWatch.noteCredentialsMissing();
+    this.linkWatch.noteCredentialsMissing(err.errno);
     this.lastError = `${err.message} Retrying; ${err.fix}.`;
     this.setStatus("disconnected");
     // The whole line, fix included: past the give-up it is what last_error keeps saying.

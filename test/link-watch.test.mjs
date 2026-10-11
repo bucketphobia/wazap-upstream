@@ -895,7 +895,7 @@ test("a clean stop keeps a credentials-missing outage, and a stale record of one
   const first = new LinkMonitor(host, file, () => host.now);
   first.arm();
   setStatus(first, host, "disconnected");
-  first.noteCredentialsMissing();
+  first.noteCredentialsMissing("ENOENT");
   first.dispose(true); // `wazap service restart` within the first minutes
   assert.equal(JSON.parse(readFileSync(file, "utf8")).credentials_missing, true);
 
@@ -915,7 +915,7 @@ test("a new link forgets a credentials-missing outage", (t) => {
   const host = fakeHost({ statusValue: "connected" });
   const watch = watching(t, host, file);
   setStatus(watch, host, "disconnected");
-  watch.noteCredentialsMissing();
+  watch.noteCredentialsMissing("ENOENT");
   watch.forgetSession();
   assert.equal(watch.outageOpen(), false);
   assert.equal(existsSync(file), false);
@@ -927,7 +927,7 @@ test("a credentials-missing outage leaves the way out to last_error, even past i
   const host = fakeHost({ statusValue: "connected" });
   const watch = watching(t, host, tempFile(t));
   setStatus(watch, host, "disconnected");
-  watch.noteCredentialsMissing();
+  watch.noteCredentialsMissing("ENOENT");
   awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
   assert.equal(watch.info().alerted, "disconnected");
   assert.equal(watch.hint(), null, "no 'do not link again' beside a fix that may need a new link");
@@ -948,11 +948,41 @@ test("a missing-credentials outage alert says the way out, not 'nothing to re-li
   const host = fakeHost({ statusValue: "connected" });
   const watch = watching(t, host, tempFile(t));
   setStatus(watch, host, "disconnected");
-  watch.noteCredentialsMissing();
+  watch.noteCredentialsMissing("ENOENT");
   awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
   assert.equal(host.alerts[0].credentialsMissing, true);
   const payload = asAlertPayload({ ...host.alerts[0], account: { id: "a", name: "a" } });
   assert.match(payload.fix, /credentials file is missing.*wazap logout`, then link again/);
   assert.doesNotMatch(payload.fix, /Nothing to re-link/);
   assert.equal("credentialsMissing" in payload, false, "the flag picks the fix; it is not a payload field");
+});
+
+// The ninth review pass ------------------------------------------------------------
+
+test("credentials the file system will not read never get the logout advice", (t) => {
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, tempFile(t));
+  setStatus(watch, host, "disconnected");
+  watch.noteCredentialsMissing("EACCES");
+  awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
+  assert.equal(host.alerts[0].credentialsMissing, undefined);
+  const payload = asAlertPayload({ ...host.alerts[0], account: { id: "a", name: "a" } });
+  assert.doesNotMatch(payload.fix, /logout/, "a logout would delete credentials that are only unreadable");
+  assert.notEqual(watch.hint(), null, "get_status still says not to link again");
+  assert.equal(watch.outageOpen(), true, "and the outage still outlives a restart");
+});
+
+test("credentials that read again stop being the outage's cause", (t) => {
+  const file = tempFile(t);
+  const host = fakeHost({ statusValue: "connected" });
+  const watch = watching(t, host, file);
+  setStatus(watch, host, "disconnected");
+  watch.noteCredentialsMissing("ENOENT"); // the data disk mounted a minute late
+  awake(watch, host, 60_000);
+  watch.noteCredentialsRead(); // it is back; the network is still down
+  awake(watch, host, ALERT_AFTER_MS);
+  assert.equal(host.alerts.length, 1);
+  assert.equal(host.alerts[0].credentialsMissing, undefined, "a network outage is not told as a missing file");
+  assert.notEqual(watch.hint(), null);
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).credentials_missing, undefined);
 });
