@@ -80,6 +80,8 @@ export interface Config {
   loginPhone?: string;
   /** Pair with an 8-character code instead of the QR; implied by --phone. */
   loginCode: boolean;
+  /** Pair with the QR without being asked how; --code/--phone still wins. */
+  loginQr: boolean;
   /** `login` asks about writes unless a flag already answered. */
   writesAnswer: boolean | null;
   /** `setup` only: print the agent procedure and exit. */
@@ -448,6 +450,7 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       json: values.json === true,
       loginPhone: values.phone,
       loginCode: values.code === true || values.phone !== undefined,
+      loginQr: values.qr === true,
       writesAnswer: values.writes === true ? true : values["no-writes"] === true ? false : null,
       agent: values.agent === true,
       clients: values.client ?? [],

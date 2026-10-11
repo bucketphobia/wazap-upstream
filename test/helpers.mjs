@@ -154,6 +154,7 @@ export function offlineConfig(prefix, overrides = {}) {
     rateLimitPerMinute: 20,
     command: "serve",
     loginCode: false,
+    loginQr: false,
     ...overrides,
   };
 }
