@@ -760,6 +760,46 @@ the beta cases in `test/legacy-import.test.mjs`, the logout case in
 `test/account-roster.test.mjs`, the `fs` watch in
 `test/account-database.test.mjs`.
 
+## 21. Kept media — bounded, and gone with its message
+
+`src/service/keep.ts` downloads the media of chosen chats as it arrives and keeps
+it in `accounts/<id>/kept/` (`0700`, files `0600`), so `get_media` still answers
+once WhatsApp's servers drop the file. It is a second copy of what people sent,
+so it is held to the rules the database already keeps.
+
+- **Tied to its message.** Each file is a `media` row of kind `original`, so a
+  delete for everyone, an expiry under `WAZAP_RETENTION=1`, a clear, a purge
+  under `WAZAP_PERSIST_HISTORY=0` release it through
+  `pending_unlinks` in the same transaction. A message deleted while its file
+  was being written refuses the record and the file is removed at once. Nothing
+  is kept with history off, from stories, or from view-once messages.
+- **Bounded.** A declared size over `WAZAP_MEDIA_KEEP_MAX_MB` is never
+  downloaded and an understated one is dropped after download (get_media's own
+  100 MB stream cap still applies); all files stay under the quota, oldest
+  first, and are removed past their age. A write that would leave less than the
+  smaller of 1 GB and 5% of the disk free is skipped. The queue holds at most
+  200 downloads, run one at a time; a failed download is not retried by the
+  same process.
+- **Only its own files.** A kept file is read back, and unlinked, only when the
+  row's path is inside `kept/` (or `previews/`), whatever the database says. A
+  file is written under a temporary name and recorded after the rename; files
+  in `kept/` no row records are removed at the next start. A kept file that no
+  longer matches the sender's `fileSha256` is not served.
+- **A typo never deletes.** `WAZAP_MEDIA_KEEP=off` removes the kept copies at
+  the next start; a value that does not parse keeps nothing new and removes
+  nothing, with a warning. Only `wazap serve` downloads or removes; short-lived
+  commands touch nothing.
+
+Not covered: the files are unencrypted copies on the user's disk, outside
+`wazap backup`, and removal is an unlink, not a secure erase. The quota is
+shared, so a sender in a kept chat can push older files out by flooding it with
+media (bandwidth and eviction, not disk: the bounds hold); `chats` narrows who
+can. Ages are measured by the system clock, so a clock jumping forward removes
+files early. A different number
+linking sets the database aside but not its kept files: the next start removes
+them as unrecorded, so a number linking back finds its history without them.
+Tests: `test/kept-media.test.mjs`.
+
 ## Pre-release review
 
 The owner's review of this pass, before 0.21.0, kept its substance and changed

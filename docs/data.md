@@ -15,6 +15,7 @@ accounts moves into `accounts/default/` the first time a wazap command runs.
                     receipts, transcripts, notes, recall vectors, deletion
                     barriers, the webhook outbox (plus -wal and -shm beside it)
     previews/       one small JPEG per photo or video already previewed
+    kept/           media kept as it arrived, so get_media outlives WhatsApp's copy
     qr.png          last QR, when login showed one
     legacy/         an earlier wazap's store.json, history/, retention.json,
                     notes.json and recall/, once imported; deleted a week later
@@ -92,6 +93,54 @@ only small bounded caches stay in the process.
   legacy files and when they go, set-aside databases, the copy an upgrade left
   and the beta archive. `--json` carries the same as `storage`.
 
+## Kept media
+
+WhatsApp drops old attachments from its servers, and a file it no longer has
+cannot be downloaded: `get_media` says `MEDIA_UNAVAILABLE`. So the server
+(`wazap serve`) downloads the media of the chats you choose the moment it
+arrives, and keeps it in `accounts/<id>/kept/` (`0600` files in a `0700`
+folder). `get_media` serves that copy first, with or without a link to
+WhatsApp, and says so with `source: "kept"`; a voice note's transcript and a
+photo's preview are made from it too. Without a copy it downloads from WhatsApp
+as before (`source: "whatsapp"`), and keeps what it downloaded when the
+settings want it.
+
+- **Which media.** By default the photos, voice notes, audio and documents of
+  every chat that is not muted (`WAZAP_MEDIA_KEEP=unmuted`); `all` takes muted
+  chats too, `chats` only the ones in `WAZAP_MEDIA_KEEP_CHATS`, and
+  `WAZAP_MEDIA_KEEP_TYPES` adds video or stickers. Stories and view-once media
+  are never kept. What arrives live is downloaded; when the server connects, what
+  arrived in the last two days while nothing was keeping it is fetched as well.
+- **Bounded.** No file over `WAZAP_MEDIA_KEEP_MAX_MB` (16 MB). All kept files
+  of an account together stay under `WAZAP_MEDIA_KEEP_QUOTA_MB` (1 GB): the
+  oldest are removed first to make room. A file kept longer than
+  `WAZAP_MEDIA_KEEP_DAYS` (90) is removed at start and hourly. Nothing is
+  written that would leave the disk with less than 1 GB, or 5% of it, free; the
+  log says so once.
+- **A file goes with its message.** Each kept file is recorded against its
+  message in the database, so a delete for everyone, an expiry under
+  `WAZAP_RETENTION=1`, a cleared or deleted chat and `WAZAP_PERSIST_HISTORY=0`
+  remove it through the same crash-safe queue as previews. Nothing is kept with
+  `WAZAP_PERSIST_HISTORY=0`.
+- **Across restarts.** The files and their records survive a restart. A file
+  is written under a temporary name and recorded only once it is whole, so a
+  crash leaves at most a file nobody recorded, which the next start removes; a
+  record whose file has gone is forgotten. A kept file that no longer matches
+  the hash the sender stated is not served: WhatsApp is asked instead.
+- **Turning it off.** `WAZAP_MEDIA_KEEP=off` keeps nothing new and removes the
+  copies kept earlier at the next start. A value that does not parse keeps
+  nothing new and removes nothing, with a warning at startup. A short-lived
+  command (`wazap status --live`, `contacts resync`) neither downloads nor
+  removes.
+
+The quota is shared by every kept chat, so anyone who can send you media in a
+kept chat can push older files out by sending a lot of it; the chats that
+matter most are safest under `WAZAP_MEDIA_KEEP=chats`.
+
+Kept files are copies of what people sent you, unencrypted on your disk like
+the database. `wazap backup` copies the database only; a restored database
+forgets the kept files it no longer finds.
+
 ## Upgrading to 0.22
 
 0.22 moves each account from its files to the account database, once.
@@ -146,9 +195,9 @@ build the account from what is left.
 An observed delete or revoke tombstones the message in the database in one
 transaction: its text, protobuf, transcript, reactions, votes, receipts and
 recall vector go, a reply quoting it loses the quoted copy, and reads stop
-showing it at once. Its preview file is removed through a queue kept
-in the database, so a crash between the two finishes the removal at the next
-start. Successful delete/clear tools wait for that cleanup; a disk failure is
+showing it at once. Its preview file and its [kept copy](#kept-media) are
+removed through a queue kept in the database, so a crash between the two
+finishes the removal at the next start. Successful delete/clear tools wait for that cleanup; a disk failure is
 reported even if WhatsApp already accepted the deletion. Pending
 preview/transcription results cannot restore a deleted message. A revoke only
 ever removes a message in the chat it arrived in. Chat metadata never keeps an
