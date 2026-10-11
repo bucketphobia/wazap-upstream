@@ -11,12 +11,12 @@
  *   A clean stop forgets an outage nobody was told about; the next start counts from itself.
  * - Alerts, posted as the webhook's `alert` event and logged on stderr: `disconnected` once the
  *   link has been down ALERT_AFTER_MS, `recovered` when it comes back after one, and
- *   `relink_required` at once when WhatsApp unlinked the device or the credentials cannot be read.
+ *   `relink_required` at once when WhatsApp unlinked the device or the credentials are corrupt.
  *   Each at most once per outage, across restarts.
  * - The watchdog ticks every WATCH_TICK_MS. A tick later than WAKE_GAP_MS past its time means the
  *   machine slept (or the process was frozen): a socket that looks connected is pinged, one that
  *   was still connecting is replaced, and a reconnect waiting out its backoff runs now. Asleep is
- *   not down, so an outage the owner was not told about starts its clock again at the wake.
+ *   not down, so an outage the owner was not told about moves its clock forward by the sleep.
  *   Between wakes, a connected socket is pinged every PROBE_EVERY_MS and replaced after
  *   PROBE_FAILURES_TO_RECONNECT unanswered pings; a socket stuck connecting for CONNECT_STUCK_MS is
  *   replaced; and a link left down with no reconnect on its way gets one.
@@ -50,8 +50,8 @@ export const STALLED_DOWN_MS = 60_000;
 export const SEEN_EVERY_MS = 60_000;
 /**
  * An outage nobody was told about, in a record older than this, was left by a process that is not
- * running any more (stopped hard, crashed long ago): its clock starts again with this process, as a
- * sleep's does. The exit wazap makes for its supervisor is back within seconds.
+ * running any more (stopped hard, crashed long ago): its clock starts again with this process.
+ * The exit wazap makes for its supervisor is back within seconds.
  */
 export const RECORD_STALE_MS = 3 * 60_000;
 
@@ -189,7 +189,9 @@ export class LinkMonitor {
       this.probeFailures = 0;
       this.lastProbeAt = now;
       if (this.downSince === null) return;
-      if (this.alerted !== null) this.emit("recovered", status, now);
+      // Back from an outage the owner was told about. A link after `relink_required` is a new
+      // session (linked again, perhaps offline), not this outage's end.
+      if (this.alerted === "disconnected") this.emit("recovered", status, now);
       if (this.alerted !== null || !this.bootClock) this.lastOutage = { from: this.downSince, to: now };
       this.downSince = null;
       this.bootClock = false;
@@ -273,6 +275,14 @@ export class LinkMonitor {
       const since = this.host.socketSince();
       if (since !== null && now - since >= CONNECT_STUCK_MS) {
         this.force(`still connecting after ${Math.round((now - since) / 1000)}s`);
+      } else if (
+        since === null &&
+        this.host.reconnectPending() === null &&
+        !this.host.starting() &&
+        now - this.host.statusSince() >= STALLED_DOWN_MS
+      ) {
+        // A start that threw before or while opening its socket leaves no socket and nothing scheduled.
+        this.force("the socket never opened");
       }
       return;
     }

@@ -247,6 +247,8 @@ test("a start that throws counts toward give-up", async () => {
   home.start = async () => {
     throw new Error("boom");
   };
+  // The fixture's accounts have no credentials on disk; a real start would retry that as a dropped link.
+  work.start = async () => {};
   await hub.start();
   assert.equal(exited, 0, "the other account is still up");
   work.reconnectAttempts = 10;

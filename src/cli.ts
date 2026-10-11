@@ -136,7 +136,7 @@ export async function runStatus(config: Config): Promise<StatusReport> {
     account = readLinkedAccount(selected.paths.authDir);
   } catch (err) {
     unreadable = true;
-    if (err instanceof CredentialsReadError) credentialsError = err.code;
+    if (err instanceof CredentialsReadError) credentialsError = err.errno;
   }
 
   // A sidecar outliving the process that wrote it is stale, so only the lock

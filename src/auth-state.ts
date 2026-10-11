@@ -42,7 +42,12 @@ function fileFor(dir: string, name: string): string {
 export async function useAtomicAuthState(
   dir: string
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> {
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+  } catch (err) {
+    // The folder the credentials live in, not there or not writable for now, is not a corrupt session.
+    throw new CredentialsReadError((err as NodeJS.ErrnoException | null)?.code ?? "unknown error");
+  }
 
   const queues = new Map<string, Promise<unknown>>();
   const serialize = <T>(path: string, task: () => Promise<T>): Promise<T> => {
@@ -118,10 +123,10 @@ export async function useAtomicAuthState(
  * not there yet after a wake). Not "nothing is linked": reading it that way would start a fresh
  * session whose first save writes over the real one. The caller retries instead.
  */
-export class CredentialsReadError extends Error {
-  readonly fix = CREDENTIALS_READ_FIX;
-  constructor(readonly code: string) {
-    super(`The stored credentials could not be read (${code}).`);
+export class CredentialsReadError extends WazapError {
+  declare readonly fix: string;
+  constructor(readonly errno: string) {
+    super("SERVICE_ERROR", `The stored credentials could not be read (${errno}).`, CREDENTIALS_READ_FIX);
     this.name = "CredentialsReadError";
   }
 }

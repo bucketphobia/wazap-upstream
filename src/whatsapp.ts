@@ -1616,6 +1616,13 @@ export class WhatsAppService implements WhatsAppApi {
       this.markCorrupt(err);
       return "corrupt";
     }
+    // This service had a session: credentials gone from under it (a volume not mounted yet after a
+    // wake) are a dropped link, retried, not an invitation to link again over them. A logout stops
+    // the service before it deletes them, so it never comes here.
+    if (!linked && this.account !== null) {
+      this.credentialsUnreadable(new CredentialsReadError("ENOENT"));
+      return "unreadable";
+    }
     if (!linked) {
       this.setStatus("not_linked");
       this.account = null;

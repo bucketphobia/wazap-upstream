@@ -788,7 +788,10 @@ test("a sleep moves the outage forward by its length, keeping the awake minutes 
   awake(watch, host, 3 * 60_000);
   host.now += 8 * 3_600_000;
   watch.tick();
-  awake(watch, host, 2 * 60_000 + WATCH_TICK_MS);
+  assert.deepEqual(host.alerts, [], "the sleep itself is not down time");
+  awake(watch, host, 90_000);
+  assert.deepEqual(host.alerts, [], "four and a half awake minutes are under the threshold");
+  awake(watch, host, 30_000 + WATCH_TICK_MS);
   assert.equal(host.alerts.length, 1, "three minutes before the sleep and two after make five");
 });
 
@@ -800,4 +803,43 @@ test("a boot whose socket failed to open is counted once start() is done", (t) =
   host.isStarting = false; // the open threw: connecting, no socket, not starting
   awake(watch, host, ALERT_AFTER_MS + WATCH_TICK_MS);
   assert.equal(host.alerts.length, 1);
+});
+
+// The third review pass ------------------------------------------------------------
+
+test("credentials missing from under a running session are retried, never not_linked", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { svc } = serviceWatch(t);
+  assert.equal(svc.readAccount(), "unreadable", "the session it had is not gone because a read missed it");
+  assert.equal(svc.getStatus().status, "disconnected");
+  assert.notEqual(svc.reconnectTimer, null);
+});
+
+test("a connect after relink_required is a new session, not the outage's end", (t) => {
+  const file = tempFile(t);
+  const host = fakeHost({ statusValue: "connected" });
+  const first = watching(t, host, file);
+  setStatus(first, host, "logged_out");
+  // Linked again offline (`wazap logout` then `wazap login` with no server), then the server starts.
+  const again = fakeHost({ now: host.now + 3_600_000 });
+  const second = watching(t, again, file);
+  setStatus(second, again, "connected");
+  assert.deepEqual(again.alerts, []);
+  assert.equal(second.info().alerted, null);
+});
+
+test("a start that threw before its socket opened is retried by the watchdog", (t) => {
+  const host = fakeHost({ statusValue: "connecting" });
+  const watch = watching(t, host, tempFile(t));
+  awake(watch, host, STALLED_DOWN_MS - WATCH_TICK_MS);
+  assert.deepEqual(host.forced, []);
+  awake(watch, host, WATCH_TICK_MS);
+  assert.deepEqual(host.forced, ["the socket never opened"]);
+});
+
+test("unreadable credentials are a WazapError with a fix that never says log out", () => {
+  const err = new CredentialsReadError("EACCES");
+  assert.equal(err.code, "SERVICE_ERROR");
+  assert.equal(err.errno, "EACCES");
+  assert.match(err.fix, /do not log out/);
 });

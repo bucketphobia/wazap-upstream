@@ -33,7 +33,13 @@
   unlinked.** An I/O error other than a missing file (EMFILE, EIO after a
   wake) used to read as "not linked", and the session that followed could
   write fresh credentials over the real ones. It is now a dropped link,
-  retried.
+  retried, and so is a credentials file that goes missing from under a
+  running session (a volume not mounted yet). `wazap status` and doctor say to
+  check the folder's ownership instead of advising a logout, and
+  `status --json` carries the reason as `credentials_error`.
+- **The relink steps work.** After WhatsApp unlinks the device, `get_status`
+  and the alert say `link_account`, or `wazap logout` then `wazap login`
+  (`wazap login` alone answers "already linked").
 - **A 401 is a logout only when WhatsApp says it.** A proxy or captive portal
   answering the WebSocket with 401 is retried as a dropped link instead of
   marking the session logged out.
