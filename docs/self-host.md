@@ -15,7 +15,10 @@ Streamable HTTP at `/mcp` on `127.0.0.1:8766` (`--host` and `--port`, or
 answers `{ ok, status, since }`; the list of accounts and their status needs a
 credential. It turns 503 once the socket has been anything but connected for
 two minutes, so a tunnel or a monitor sees a real outage rather than a
-reconnect in progress.
+reconnect in progress. How the server recovers on its own, and how it tells
+the owner about an outage or a device WhatsApp unlinked, is in
+[Keep it running](install.md#keep-it-running) and
+[Link alerts](api-and-webhooks.md#link-alerts).
 
 An agent reaches it by URL and signs in with [OAuth](#hosted-agents-oauth);
 `wazap expose` sets that up. A product calling wazap from its own code uses a

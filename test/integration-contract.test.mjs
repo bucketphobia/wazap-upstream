@@ -326,7 +326,8 @@ function upsert(sock, type, ...messages) {
 
 const closedWith = (statusCode) => ({
   connection: "close",
-  lastDisconnect: { error: { message: "Connection Terminated", output: { statusCode } } },
+  // An unlink comes from WhatsApp's failure node; a dropped socket says it was terminated.
+  lastDisconnect: { error: { message: statusCode === 401 ? "Connection Failure" : "Connection Terminated", output: { statusCode } } },
 });
 
 /** The integration's webhook route: keeps the raw bytes it verifies, and answers 204 to everything. */

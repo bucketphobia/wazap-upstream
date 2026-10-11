@@ -5,7 +5,10 @@
 
 import { DisconnectReason, type WASocket } from "baileys";
 import { AccountRegistry } from "./accounts.js";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { clearSession, readLinkedAccount } from "./auth-state.js";
+import { LINK_FILE } from "./service/link.js";
 import { accountPaths } from "./config.js";
 import { WazapError } from "./errors.js";
 import { logError } from "./logger.js";
@@ -68,6 +71,9 @@ export async function logoutAccount(
   timeoutMs = LOGOUT_TIMEOUT_MS
 ): Promise<LogoutOutcome> {
   const storage = accountPaths(dataDir, id);
+  // The outage record is about the session being thrown away, and it is what keeps a server retrying
+  // a credentials file it believes is only missing for now: a logout ends both, linked or not.
+  rmSync(join(storage.root, LINK_FILE), { force: true });
   let linked = null;
   let unreadable = false;
   try {

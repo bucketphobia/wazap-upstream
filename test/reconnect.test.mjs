@@ -81,9 +81,12 @@ function attach(svc, sock) {
   return generation;
 }
 
+/** How Baileys words each close: a 401 comes from WhatsApp's failure node, the rest from the socket. */
 const close = (statusCode) => ({
   connection: "close",
-  lastDisconnect: { error: { message: "Connection Terminated", output: { statusCode } } },
+  lastDisconnect: {
+    error: { message: statusCode === LOGGED_OUT ? "Connection Failure" : "Connection Terminated", output: { statusCode } },
+  },
 });
 
 test("retries follow the exponential schedule instead of firing instantly", (t) => {
@@ -102,7 +105,7 @@ test("retries follow the exponential schedule instead of firing instantly", (t) 
   }
 });
 
-test("gives up after the cap instead of hammering forever", (t) => {
+test("past the cap it slows to one try every 30 min instead of hammering, and keeps the session", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   t.mock.method(Math, "random", () => 0.5);
 
@@ -113,9 +116,12 @@ test("gives up after the cap instead of hammering forever", (t) => {
     t.mock.timers.tick(10 * 60_000); // longer than any backoff
   }
 
-  assert.equal(starts.length, RECONNECT_MAX_ATTEMPTS, "stops retrying once the cap is reached");
-  assert.equal(svc.getStatus().status, "auth_failure", "surfaces a terminal state a human can act on");
-  assert.match(svc.getStatus().last_error ?? "", /re-link the device/i, "tells the operator what to do");
+  // Ten paced retries, then the 30-minute cadence: the five ten-minute ticks after the cap reach one more.
+  assert.equal(starts.length, RECONNECT_MAX_ATTEMPTS + 1, "past the cap, tries are 30 min apart");
+  const status = svc.getStatus();
+  assert.equal(status.status, "disconnected", "a link that cannot be reached is not an expired session");
+  assert.doesNotMatch(status.last_error ?? "", /re-link|login/i, "nothing tells the operator to throw the session away");
+  assert.match(status.last_error ?? "", /session is kept/i);
 });
 
 test("a burst of closes cannot fan out into parallel reconnects", (t) => {
