@@ -80,6 +80,8 @@ export interface LinkHost {
   /** The reconnect that is waiting, if any: a backoff, or the one try a dated temporary ban gets. */
   reconnectPending(): "backoff" | "ban" | null;
   starting(): boolean;
+  /** False when a start cannot succeed however often it is tried (the account database failed). */
+  canStart(): boolean;
   probe(timeoutMs: number): Promise<ProbeResult>;
   /** Drop the live socket, if any, and reconnect through the paced schedule. Never touches credentials. */
   forceReconnect(reason: string): void;
@@ -277,6 +279,7 @@ export class LinkMonitor {
         this.force(`still connecting after ${Math.round((now - since) / 1000)}s`);
       } else if (
         since === null &&
+        this.host.canStart() &&
         this.host.reconnectPending() === null &&
         !this.host.starting() &&
         now - this.host.statusSince() >= STALLED_DOWN_MS

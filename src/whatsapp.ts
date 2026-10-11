@@ -519,6 +519,7 @@ export class WhatsAppService implements WhatsAppApi {
         socketSince: () => (this.sockClient === null ? null : this.socketOpenedAt),
         reconnectPending: () => (this.reconnectTimer === null ? null : this.reconnectKind),
         starting: () => this.starting,
+        canStart: () => this.storage.storageState !== "failed",
         probe: (timeoutMs) => this.probeSocket(timeoutMs),
         forceReconnect: (reason) => this.forceReconnect(reason),
         retryNow: (reason) => this.retryNow(reason),

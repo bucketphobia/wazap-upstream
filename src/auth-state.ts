@@ -126,10 +126,18 @@ export async function useAtomicAuthState(
 export class CredentialsReadError extends WazapError {
   declare readonly fix: string;
   constructor(readonly errno: string) {
-    super("SERVICE_ERROR", `The stored credentials could not be read (${errno}).`, CREDENTIALS_READ_FIX);
+    super(
+      "SERVICE_ERROR",
+      errno === "ENOENT" ? "The stored credentials file is missing." : `The stored credentials could not be read (${errno}).`,
+      errno === "ENOENT" ? CREDENTIALS_MISSING_FIX : CREDENTIALS_READ_FIX
+    );
     this.name = "CredentialsReadError";
   }
 }
+
+/** A running session's credentials gone from under it: usually a disk not mounted yet, sometimes gone for good. */
+export const CREDENTIALS_MISSING_FIX =
+  "wazap retries until the file is back (a data disk not mounted yet); if it is gone for good, run `wazap logout`, then link again";
 
 /** What to do about credentials the file system would not read: never a logout, which deletes them. */
 export const CREDENTIALS_READ_FIX =

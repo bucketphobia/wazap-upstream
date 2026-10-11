@@ -39,6 +39,7 @@ function fakeHost(overrides = {}) {
     socketAt: null,
     pending: null,
     isStarting: false,
+    startable: true,
     probeAnswer: "alive",
     queueable: true,
     alerts: [],
@@ -51,6 +52,7 @@ function fakeHost(overrides = {}) {
     socketSince: () => host.socketAt,
     reconnectPending: () => host.pending,
     starting: () => host.isStarting,
+    canStart: () => host.startable,
     probe: async () => {
       host.probes += 1;
       return host.probeAnswer;
@@ -842,4 +844,19 @@ test("unreadable credentials are a WazapError with a fix that never says log out
   assert.equal(err.code, "SERVICE_ERROR");
   assert.equal(err.errno, "EACCES");
   assert.match(err.fix, /do not log out/);
+});
+
+// The fourth review pass -----------------------------------------------------------
+
+test("a start that cannot succeed (the database failed) is not dressed up as a WhatsApp outage", (t) => {
+  const host = fakeHost({ statusValue: "connecting", startable: false });
+  const watch = watching(t, host, tempFile(t));
+  awake(watch, host, STALLED_DOWN_MS * 5);
+  assert.deepEqual(host.forced, []);
+});
+
+test("a credentials file gone from under a session says so, and how out if it is gone for good", () => {
+  const err = new CredentialsReadError("ENOENT");
+  assert.equal(err.message, "The stored credentials file is missing.");
+  assert.match(err.fix, /wazap logout`, then link again/);
 });
