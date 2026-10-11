@@ -81,11 +81,19 @@ test("a key id can never write outside the auth directory", async () => {
   const names = readdirSync(dir);
   assert.equal(names.length, 3, "every weird id still stores inside the directory");
   for (const name of names) {
-    assert.match(name, /^[A-Za-z0-9._@-]+$/, `${name} carries no path separator`);
+    assert.match(name, /^[A-Za-z0-9._@+=-]+$/, `${name} carries no path separator`);
     assert.ok(!name.startsWith(".."), `${name} cannot climb out of the directory`);
   }
   assert.deepEqual((await state.keys.get("session", ["..\\..\\outside"]))["..\\..\\outside"], { ok: 1 });
   assert.equal(readdirSync(join(dir, "..")).filter((f) => f.includes("outside")).length, 0);
+});
+
+test("a base64 key id finds the file an earlier version wrote, + and = included", async () => {
+  const dir = authDir();
+  const { state } = await useAtomicAuthState(dir);
+  // The name every earlier wazap (and stock Baileys) gave this id: only / and : were escaped.
+  writeFileSync(join(dir, "session-AAAAAP+a/b=.json".replace("/", "__")), JSON.stringify({ ok: 1 }));
+  assert.deepEqual((await state.keys.get("session", ["AAAAAP+a/b="]))["AAAAAP+a/b="], { ok: 1 });
 });
 
 test("readLinkedAccount reports nothing before a login", async () => {
