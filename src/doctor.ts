@@ -690,7 +690,9 @@ function checkWebhook(config: Config): Check {
 function openaiChecks(settings: TranscribeSettings): Check[] {
   return [
     { name: "transcribe", state: "ok", detail: `openai (${settings.apiModel} at ${new URL(settings.baseUrl).host})` },
-    settings.apiKey === null
+    settings.auth !== null
+      ? { name: "auth", state: "ok", detail: "set" }
+      : settings.apiKey === null
       ? { name: "api key", state: "fail", detail: maskKey(null), fix: KEY_FIX }
       : { name: "api key", state: "ok", detail: maskKey(settings.apiKey) },
   ];

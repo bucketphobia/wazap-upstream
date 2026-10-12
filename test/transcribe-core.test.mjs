@@ -20,6 +20,7 @@ const PEER = "40700000002@s.whatsapp.net";
 const TRANSCRIBE_ENV = [
   "WAZAP_TRANSCRIBE",
   "WAZAP_TRANSCRIBE_API_KEY",
+  "WAZAP_TRANSCRIBE_AUTH",
   "WAZAP_TRANSCRIBE_AUTO",
   "WAZAP_TRANSCRIBE_MODEL",
   "WAZAP_TRANSCRIBE_URL",
@@ -522,4 +523,15 @@ test("API opt-in defaults to on-request and automatic mode requires an explicit 
   } finally {
     await automatic.svc.stop();
   }
+});
+
+test("get_status with custom transcription auth carries no credential", async () => {
+  const secret = "custom-private-5678";
+  const { svc } = serviceWith({ WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_AUTH: `X-Api-Key: ${secret}` });
+  try {
+    const status = svc.getStatus();
+    assert.equal(status.transcription.auto, "on");
+    assert.equal(JSON.stringify(status).includes(secret), false);
+    assert.equal(JSON.stringify(status).includes("5678"), false);
+  } finally { await svc.stop(); }
 });

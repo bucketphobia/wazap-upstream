@@ -1,3 +1,5 @@
+import { parseAuthHeader } from "./auth-header.js";
+import { TRANSCRIBE_AUTH_FIX } from "./transcribe/settings.js";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { AccountRegistry, accountPolicy, draftContextEnabled, resolveAccount, type AccountRecord } from "./accounts.js";
@@ -345,7 +347,7 @@ function transcribeRows(config: Config): string[] {
     return [`transcribe: ${settings.message}${settings.fix === undefined ? "" : ` — ${settings.fix}`}`];
   }
   const rows = [`transcribe: ${settings.provider ?? "off"} (${config.sources.transcribe})`];
-  if (settings.provider === "openai") rows.push(`api key: ${maskKey(settings.apiKey)}`);
+  if (settings.provider === "openai") rows.push(settings.auth === null ? `api key: ${maskKey(settings.apiKey)}` : "auth: set");
   return rows;
 }
 
@@ -766,11 +768,14 @@ export async function applyTranscribe(config: Config, choice: string, report = t
   const writes: Record<string, string> = { WAZAP_TRANSCRIBE: choice };
 
   if (choice === "openai") {
-    const key = await askSecret(`${brand("?")} Paste the API key (it is not echoed): `);
-    if (key === "") {
-      throw new WazapError("INVALID_ID", "No API key was typed.", "Run `wazap config transcribe openai` again");
+    const auth = parseAuthHeader(process.env.WAZAP_TRANSCRIBE_AUTH ?? "", "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX);
+    if (auth === null) {
+      const key = await askSecret(`${brand("?")} Paste the API key (it is not echoed): `);
+      if (key === "") {
+        throw new WazapError("INVALID_ID", "No API key was typed.", "Run `wazap config transcribe openai` again");
+      }
+      writes.WAZAP_TRANSCRIBE_API_KEY = key;
     }
-    writes.WAZAP_TRANSCRIBE_API_KEY = key;
     // A piped stdin was consumed whole by the reader above, so the second question
     // is only put to a person; a script sets WAZAP_TRANSCRIBE_URL itself, and
     // whatever it set is left alone here.

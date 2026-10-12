@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Custom transcription auth.** `WAZAP_TRANSCRIBE_AUTH` accepts an
+  Authorization value or `Header-Name: value`, like `WAZAP_WEBHOOK_AUTH`.
+  It overrides the API key and is reported only as set. HTTPS-or-loopback
+  and the refusal to follow redirects are unchanged.
+
 ## 1.4.0
 
 ### Added
