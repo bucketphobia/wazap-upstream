@@ -76,6 +76,18 @@ a question, a wrong name is a wrong answer.
 the base URL (OpenAI unless you type another), and stores both in
 `<data-dir>/.env`.
 
+For an endpoint that needs a different auth header, set
+`WAZAP_TRANSCRIBE_AUTH` in the environment or `<data-dir>/.env`:
+`Bearer <token>` (or any Authorization value), or `X-Api-Key: <value>`.
+This mirrors `WAZAP_WEBHOOK_AUTH`: names and values are validated, and
+wazap's own request headers cannot be replaced. It overrides
+`WAZAP_TRANSCRIBE_API_KEY` and `OPENAI_API_KEY`; neither key is required
+when custom auth is set. `wazap config transcribe openai` skips the key
+prompt then, and reports only `auth: set`. The value is a credential;
+keep it out of shell history and command-line arguments.
+HTTPS-or-loopback and the refusal to follow redirects are unchanged.
+Leaving it unset keeps the existing Bearer API key behavior.
+
 **With this provider the audio leaves your machine.** Every voice note wazap
 transcribes is uploaded to that endpoint. If that is not acceptable, use `local`,
 which uploads nothing.

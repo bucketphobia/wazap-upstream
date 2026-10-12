@@ -63,6 +63,7 @@ test("readTranscribeSettings defaults to transcription off", () => {
     model: "turbo",
     whisperBin: null,
     apiKey: null,
+    auth: null,
     allowApi: false,
     baseUrl: "https://api.openai.com/v1",
     apiModel: "gpt-4o-mini-transcribe",
@@ -549,4 +550,111 @@ test("the model table is pinned by file, size and digest", () => {
     modelUrl(modelSpec("turbo")),
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
   );
+});
+
+test("transcription auth mirrors webhook forms without requiring an API key", async () => {
+  for (const [raw, expected] of [
+    ["Bearer custom-secret", { name: "Authorization", value: "Bearer custom-secret" }],
+    ["  X-Api-Key: custom-secret  ", { name: "X-Api-Key", value: "custom-secret" }],
+    ["Token custom\tsecret", { name: "Authorization", value: "Token custom\tsecret" }],
+  ]) {
+    const settings = readTranscribeSettings(
+      { WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_AUTH: raw },
+      scratch("auth")
+    );
+    assert.deepEqual(settings.auth, expected);
+    assert.equal((await openaiProvider.ready(settings)).ok, true);
+  }
+});
+
+test("transcription auth validation names its setting and never repeats a credential", () => {
+  const secret = "private-credential-5678";
+  for (const raw of [
+    `Bad@Header: ${secret}`,
+    `X-Api-Key: ${secret}\nInjected: yes`,
+    `X-Api-Key: ${secret}\u007f`,
+    "X-Api-Key:",
+    ...["Content-Type", "Content-Length", "Host", "Connection", "Transfer-Encoding", "User-Agent"].map(
+      (name) => `${name}: ${secret}`
+    ),
+  ]) {
+    assert.throws(
+      () => readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTH: raw }, scratch("bad-auth")),
+      (err) => {
+        assert.equal(err.code, "INVALID_ID");
+        assert.match(err.message, /WAZAP_TRANSCRIBE_AUTH/);
+        assert.match(err.fix, /WAZAP_TRANSCRIBE_AUTH/);
+        assert.equal(`${err.message} ${err.fix}`.includes(secret), false);
+        return true;
+      }
+    );
+  }
+});
+
+test("custom transcription auth replaces both API key sources without changing the audio", async () => {
+  for (const raw of ["Bearer private-credential", "X-Api-Key: private-credential"]) {
+    const seen = [];
+    await withServer(
+      async (req, res) => {
+        seen.push({ headers: req.headers, body: await readBody(req) });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ text: "hello" }));
+      },
+      (url) =>
+        openaiProvider.transcribe(
+          readTranscribeSettings(
+            {
+              WAZAP_TRANSCRIBE: "openai",
+              WAZAP_TRANSCRIBE_URL: url,
+              WAZAP_TRANSCRIBE_AUTH: raw,
+              WAZAP_TRANSCRIBE_API_KEY: "unused-key",
+              OPENAI_API_KEY: "unused-fallback",
+            },
+            scratch("auth-post")
+          ),
+          audioFile(),
+          {}
+        )
+    );
+    assert.equal(seen[0].headers.authorization, raw.startsWith("Bearer") ? raw : undefined);
+    assert.equal(seen[0].headers["x-api-key"], raw.startsWith("X-Api-Key") ? "private-credential" : undefined);
+    assert.match(seen[0].body, /OggS-not-really-audio/);
+    assert.match(seen[0].body, /gpt-4o-mini-transcribe/);
+    assert.equal(seen[0].body.includes("private-credential"), false);
+    assert.equal(JSON.stringify(seen).includes("unused-key"), false);
+    assert.equal(JSON.stringify(seen).includes("unused-fallback"), false);
+  }
+});
+
+test("custom auth failures never reach errors or logs, even when the provider echoes it", async () => {
+  const secret = "custom-private-5678";
+  const { logError } = await import("../dist/logger.js");
+  await assert.rejects(withServer((req, res) => {
+    req.resume();
+    res.writeHead(401, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message: secret } }));
+  }, (url) => openaiProvider.transcribe(readTranscribeSettings({
+    WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_URL: url, WAZAP_TRANSCRIBE_AUTH: `X-Api-Key: ${secret}`,
+  }, scratch("custom-refusal")), audioFile(), {})), (err) => {
+    assert.equal(err.code, "TRANSCRIBE_FAILED");
+    assert.match(err.fix, /WAZAP_TRANSCRIBE_AUTH/);
+    const said = [];
+    const real = console.error;
+    console.error = (...args) => said.push(args.join(" "));
+    try { logError("transcribe", err); } finally { console.error = real; }
+    assert.equal(`${err.message} ${err.fix} ${said.join(" ")}`.includes(secret), false);
+    return true;
+  });
+});
+
+test("custom auth refuses redirects without forwarding audio or credentials", async () => {
+  let followed = 0;
+  await withServer((req, res) => { followed++; req.resume(); res.end("unexpected"); }, async (destination) => {
+    await assert.rejects(withServer((req, res) => {
+      req.resume(); res.writeHead(307, { location: destination }); res.end();
+    }, (url) => openaiProvider.transcribe(readTranscribeSettings({
+      WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_URL: url, WAZAP_TRANSCRIBE_AUTH: "X-Api-Key: private-credential",
+    }, scratch("custom-redirect")), audioFile(), {})), { code: "TRANSCRIBE_FAILED" });
+  });
+  assert.equal(followed, 0);
 });

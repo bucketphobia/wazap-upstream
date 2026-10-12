@@ -10,7 +10,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { WazapError } from "../errors.js";
 import { discardResponse, readBoundedJson, ResponseLimitError } from "../http-response.js";
 import { markFailure, type FailureKind } from "./failure.js";
-import { redact } from "./settings.js";
+import { redact, TRANSCRIBE_AUTH_FIX } from "./settings.js";
 import type { Provider, Readiness, TranscribeOpts, TranscribeSettings, Transcript } from "./types.js";
 
 const TIMEOUT_MS = 2 * 60 * 1000;
@@ -63,7 +63,7 @@ async function post(settings: TranscribeSettings, key: string, file: string, lan
   if (language !== "auto") form.append("language", language);
   return fetch(`${settings.baseUrl}/audio/transcriptions`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${key}` },
+    headers: settings.auth === null ? { Authorization: `Bearer ${key}` } : { [settings.auth.name]: settings.auth.value },
     body: form,
     redirect: "error",
     signal: signal === undefined ? AbortSignal.timeout(TIMEOUT_MS) : AbortSignal.any([AbortSignal.timeout(TIMEOUT_MS), signal]),
@@ -74,7 +74,7 @@ export const openaiProvider: Provider = {
   kind: "api",
   async transcribe(settings: TranscribeSettings, file: string, opts: TranscribeOpts): Promise<Transcript> {
     if (!existsSync(file)) throw new WazapError("FILE_NOT_FOUND", `No such file: ${file}`);
-    const key = settings.apiKey;
+    const key = settings.auth?.value ?? settings.apiKey;
     if (key === null) throw new WazapError("TRANSCRIBE_UNAVAILABLE", "No transcription API key is set.", KEY_FIX);
     const language = opts.language ?? settings.language;
 
@@ -101,7 +101,7 @@ export const openaiProvider: Provider = {
         throw failed(
           `Transcription API returned HTTP ${response.status}.`,
           key,
-          response.status === 401 || response.status === 403 ? KEY_FIX : undefined,
+          response.status === 401 || response.status === 403 ? (settings.auth === null ? KEY_FIX : TRANSCRIBE_AUTH_FIX) : undefined,
           meaning.kind,
           meaning.reason
         );
@@ -143,7 +143,7 @@ export const openaiProvider: Provider = {
   },
 
   async ready(settings: TranscribeSettings): Promise<Readiness> {
-    if (settings.apiKey === null) return { ok: false, detail: "no transcription API key is set", fix: KEY_FIX };
+    if (settings.auth === null && settings.apiKey === null) return { ok: false, detail: "no transcription API key is set", fix: KEY_FIX };
     return { ok: true, detail: `${settings.apiModel} at ${new URL(settings.baseUrl).host}` };
   },
 };

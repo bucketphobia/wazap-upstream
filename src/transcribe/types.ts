@@ -1,5 +1,7 @@
 /** The shapes transcription is built from. No logic lives here. */
 
+import type { AuthHeader } from "../auth-header.js";
+
 export type ProviderName = "local" | "openai";
 
 /** The whisper.cpp model aliases wazap knows how to fetch. */
@@ -50,6 +52,8 @@ export interface TranscribeSettings {
   /** local only: WAZAP_WHISPER_BIN override. */
   whisperBin: string | null;
   apiKey: string | null;
+  /** Overrides API key authentication when set. */
+  auth: AuthHeader | null;
   /** WAZAP_TRANSCRIBE_ALLOW_API: uploading audio is allowed while WhatsApp writes stay off. */
   allowApi: boolean;
   /** openai only, already validated https-or-loopback, no trailing slash. */
