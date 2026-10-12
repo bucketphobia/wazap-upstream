@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Ogg voice recordings with an `.opus` suffix upload as `.ogg`.** API
+  transcription changes only the multipart filename, preserving the original
+  file, audio bytes, MIME type and authentication.
+
 ## 1.4.0
 
 ### Added

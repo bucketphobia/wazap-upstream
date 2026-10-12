@@ -367,6 +367,60 @@ test("openaiProvider posts the audio and parses the transcript", async () => {
   assert.equal(seen[0].body.includes('name="language"'), false);
 });
 
+test("openaiProvider names Ogg-container opus uploads ogg without changing their bytes or other formats", async () => {
+  const ogg = Buffer.from([0x4f, 0x67, 0x67, 0x53, 0, 255, 128, 13, 10]);
+  const cases = [
+    { name: "note.opus", bytes: ogg, uploaded: "note.ogg", mime: "audio/ogg" },
+    { name: "Mixed.OPUS", bytes: ogg, uploaded: "Mixed.ogg", mime: "audio/ogg" },
+    { name: "raw.opus", bytes: Buffer.from([0, 255, 128, 4]), uploaded: "raw.opus", mime: "audio/ogg" },
+    { name: "short.opus", bytes: Buffer.from("Ogg"), uploaded: "short.opus", mime: "audio/ogg" },
+    { name: "lower.opus", bytes: Buffer.from("oggs"), uploaded: "lower.opus", mime: "audio/ogg" },
+    { name: "note.ogg", bytes: ogg, uploaded: "note.ogg", mime: "audio/ogg" },
+    { name: "note.wav", bytes: ogg, uploaded: "note.wav", mime: "audio/wav" },
+    { name: "note.mp3", bytes: Buffer.from([0, 255, 1]), uploaded: "note.mp3", mime: "audio/mpeg" },
+    { name: "note.bin", bytes: ogg, uploaded: "note.bin", mime: "application/octet-stream" },
+  ];
+  const seen = [];
+  const folder = scratch("opus-filename");
+  await withServer(
+    async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const form = await new Response(Buffer.concat(chunks), {
+        headers: { "content-type": req.headers["content-type"] },
+      }).formData();
+      const file = form.get("file");
+      seen.push({
+        name: file.name,
+        mime: file.type,
+        bytes: Buffer.from(await file.arrayBuffer()),
+        auth: req.headers.authorization,
+        customAuth: req.headers["x-bf-vk"],
+        model: form.get("model"),
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ text: "synthetic transcript" }));
+    },
+    async (url) => {
+      for (const entry of cases) {
+        const file = join(folder, entry.name);
+        writeFileSync(file, entry.bytes);
+        await openaiProvider.transcribe(openaiSettings(url), file, {});
+        assert.deepEqual(readFileSync(file), entry.bytes, "the original file stays unchanged");
+      }
+    }
+  );
+  assert.equal(seen.length, cases.length);
+  cases.forEach((entry, index) => {
+    assert.equal(seen[index].name, entry.uploaded);
+    assert.equal(seen[index].mime, entry.mime);
+    assert.deepEqual(seen[index].bytes, entry.bytes);
+    assert.equal(seen[index].auth, `Bearer ${KEY}`);
+    assert.equal(seen[index].customAuth, undefined);
+    assert.equal(seen[index].model, "gpt-4o-mini-transcribe");
+  });
+});
+
 test("openaiProvider sends the language when one is configured", async () => {
   const file = audioFile();
   const bodies = [];
