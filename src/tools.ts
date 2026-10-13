@@ -1718,7 +1718,11 @@ function disappearingLabel(seconds: number): string {
 }
 
 function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+  if (text.length <= max) return text;
+  // Keep the UTF-16 budget without leaving half a supplementary character.
+  const last = text.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return `${text.slice(0, end)}…`;
 }
 
 /**
