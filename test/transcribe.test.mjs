@@ -567,6 +567,17 @@ test("transcription auth mirrors webhook forms without requiring an API key", as
   }
 });
 
+test("transcription auth strips pasted quotes and accepts an explicit Authorization name", () => {
+  for (const [raw, expected] of [
+    ['  "Bearer synthetic-token"  ', { name: "Authorization", value: "Bearer synthetic-token" }],
+    ["  'X-Api-Key: synthetic-token'  ", { name: "X-Api-Key", value: "synthetic-token" }],
+    ["Authorization: Bearer synthetic-token", { name: "Authorization", value: "Bearer synthetic-token" }],
+    ['"Authorization: Bearer synthetic-token"', { name: "Authorization", value: "Bearer synthetic-token" }],
+  ]) {
+    assert.deepEqual(readTranscribeSettings({ WAZAP_TRANSCRIBE_AUTH: raw }, scratch("quoted-auth")).auth, expected);
+  }
+});
+
 test("transcription auth validation names its setting and never repeats a credential", () => {
   const secret = "private-credential-5678";
   for (const raw of [

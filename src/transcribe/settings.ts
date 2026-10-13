@@ -112,7 +112,7 @@ export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string):
     autoOwn: all,
     model: parseModel(env.WAZAP_WHISPER_MODEL),
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
-    auth: parseAuthHeader(env.WAZAP_TRANSCRIBE_AUTH ?? "", "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX),
+    auth: parseAuthHeader(stripPasted(env.WAZAP_TRANSCRIBE_AUTH ?? ""), "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),
     allowApi,
     baseUrl: requireSafeUrl(url.replace(/\/+$/, "")),
