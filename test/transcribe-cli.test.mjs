@@ -228,6 +228,18 @@ test("custom transcription auth needs no prompted key and reports only set", asy
   }
 });
 
+test("transcription config accepts quoted header values without prompting for an API key", async () => {
+  for (const raw of ['"X-Api-Key: synthetic-token"', "'Authorization: Bearer synthetic-token'"]) {
+    const dir = dataDir();
+    const configured = await wazap(dir, ["config", "transcribe", "openai"], {
+      env: { WAZAP_TRANSCRIBE_AUTH: raw },
+    });
+    assert.equal(configured.code, 0, configured.stderr);
+    assert.equal(envFile(dir).includes("WAZAP_TRANSCRIBE_API_KEY"), false);
+    assert.equal(`${configured.stdout} ${configured.stderr}`.includes("synthetic-token"), false);
+  }
+});
+
 test("transcribe test sends custom auth without printing any of it", async () => {
   const secret = "custom-private-5678";
   const seen = [];

@@ -27,6 +27,14 @@ function dataDir() {
   return mkdtempSync(join(tmpdir(), "wazap-settings-"));
 }
 
+test("settings imports Node builtins before local modules", () => {
+  const source = readFileSync(new URL("../src/settings.ts", import.meta.url), "utf8");
+  const modules = [...source.matchAll(/^import[\s\S]*?from "([^"\n]+)";/gm)].map((match) => match[1]);
+  const firstLocal = modules.findIndex((name) => name.startsWith("."));
+  assert.ok(firstLocal > 0);
+  assert.ok(modules.slice(firstLocal).every((name) => !name.startsWith("node:")));
+});
+
 test("setEnvSetting replaces its own line and keeps every other one", () => {
   const dir = dataDir();
   const envFile = join(dir, ".env");

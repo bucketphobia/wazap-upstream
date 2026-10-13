@@ -1,7 +1,7 @@
-import { parseAuthHeader } from "./auth-header.js";
-import { TRANSCRIBE_AUTH_FIX } from "./transcribe/settings.js";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { parseAuthHeader } from "./auth-header.js";
+import { TRANSCRIBE_AUTH_FIX } from "./transcribe/settings.js";
 import { AccountRegistry, accountPolicy, draftContextEnabled, resolveAccount, type AccountRecord } from "./accounts.js";
 import { ask, askSecret, warnIfServerRunning } from "./cli.js";
 import { paths, writesHints, type Config } from "./config.js";
@@ -768,7 +768,7 @@ export async function applyTranscribe(config: Config, choice: string, report = t
   const writes: Record<string, string> = { WAZAP_TRANSCRIBE: choice };
 
   if (choice === "openai") {
-    const auth = parseAuthHeader(process.env.WAZAP_TRANSCRIBE_AUTH ?? "", "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX);
+    const auth = parseAuthHeader(stripPasted(process.env.WAZAP_TRANSCRIBE_AUTH ?? ""), "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX);
     if (auth === null) {
       const key = await askSecret(`${brand("?")} Paste the API key (it is not echoed): `);
       if (key === "") {
