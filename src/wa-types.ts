@@ -869,7 +869,7 @@ export interface WhatsAppApi {
   hasDraft(id: string): boolean;
   link(phone: string): Promise<PairingInfo>;
   /** With `private`, a last message from someone tagged #private, or in their chat, comes without its words. */
-  listChats(filter: ChatFilter, limit: number, opts?: { private?: PrivateRule }): Promise<Synced<ChatSummary[]>>;
+  listChats(filter: ChatFilter, limit: number, opts?: { private?: PrivateRule; cursor?: string }): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }>;
   readMessages(chatId: string, limit: number, before?: string, types?: MessageType[]): Promise<ChatRead>;
   getRecentMessages(
     hours: number,
