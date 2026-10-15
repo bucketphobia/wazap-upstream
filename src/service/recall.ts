@@ -131,8 +131,7 @@ export class AccountRecall {
       const author = people !== null && from !== undefined && people.names(from) ? from : undefined;
       // Wide enough that the variety rules below have something to promote, and as wide again when #private hits may take slots.
       const window = Math.max(limit + 5, RECALL_RERANK_WINDOW);
-      // TODO(F1-b3): the hybrid scan runs on the main thread, ~160-190 ms at 100,000 vectors; it moves to a worker.
-      const result = db.vectors.hybrid({
+      const result = await db.vectors.hybridAsync({
         query,
         model: settings.model,
         vector: vector ?? null,
@@ -312,7 +311,7 @@ export class AccountRecall {
       if (this.host.storageState() === "preparing") return { state: "indexing", indexed, pending };
       return { state: "degraded", indexed, pending, detail: "the account database is not open" };
     }
-    return { state: this.embedFeed.busy ? "indexing" : "ready", indexed, pending };
+    return { state: this.embedFeed.busy ? "indexing" : "ready", indexed, pending, cache: db.vectors.cacheStatus() };
   }
 
   /** Stored vectors of the model, counted at most every few seconds: the count walks the table. */
