@@ -67,6 +67,7 @@ function packagedSkills(): string {
 
 /** Frontmatter is a `---` block of one-line values. */
 function parseSkill(text: string): Skill | null {
+  text = text.replace(/\r\n/g, "\n");
   const close = text.startsWith("---\n") ? text.indexOf("\n---\n", 3) : -1;
   if (close === -1) return null;
   const front = text.slice(4, close + 1);
