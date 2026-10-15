@@ -7,6 +7,8 @@ export type RecallState = "off" | "indexing" | "ready" | "degraded";
 
 /** What get_status and the tool report about the index. */
 export interface RecallStatus {
+  /** Performance fallback is advisory: SQLite meaning search remains available. */
+  cache?: import("../db/vector-cache.js").VectorCacheStatus;
   state: RecallState;
   indexed: number;
   pending: number;
