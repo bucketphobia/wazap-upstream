@@ -5,7 +5,7 @@ export interface AuthHeader {
   value: string;
 }
 
-/** Headers wazap sets itself, and the ones fetch owns. */
+/** Headers wazap sets itself, and the ones fetch owns or refuses to send. */
 const RESERVED_HEADERS = new Set([
   "content-type",
   "content-length",
@@ -13,6 +13,10 @@ const RESERVED_HEADERS = new Set([
   "host",
   "connection",
   "transfer-encoding",
+  "upgrade",
+  "expect",
+  "keep-alive",
+  "proxy-connection",
 ]);
 const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 
@@ -35,11 +39,12 @@ export function parseAuthHeader(
     throw new WazapError("INVALID_ID", `The ${label} cannot set ${auth.name}: wazap sets it itself.`, fix);
   }
   if (auth.value === "") {
-    throw new WazapError("INVALID_ID", `The ${label} names ${auth.name} but gives it no value.`, fix);
+    throw new WazapError("INVALID_ID", `The ${label} names a header but gives it no value.`, fix);
   }
-  // A line break would start a header of its own; no printable value needs a control character.
-  if ([...auth.value].some((char) => (char < " " && char !== "\t") || char === "\u007f")) {
-    throw new WazapError("INVALID_ID", `The ${label} value holds a line break or a control character.`, fix);
+  // A line break would start a header of its own; no printable value needs a control character,
+  // and fetch refuses a header value beyond Latin-1 at every request.
+  if ([...auth.value].some((char) => (char < " " && char !== "\t") || char === "\u007f" || char > "\u00ff")) {
+    throw new WazapError("INVALID_ID", `The ${label} value holds a line break, a control character or one HTTP cannot carry.`, fix);
   }
   return auth;
 }
