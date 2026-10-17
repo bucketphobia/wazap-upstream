@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 1.4.2
+
+Includes 1.4.1, which was never published.
 
 ### Added
 
@@ -16,17 +18,21 @@
 - **Ogg voice recordings with an `.opus` suffix upload as `.ogg`.** API
   transcription changes only the multipart filename, preserving the original
   file, audio bytes, MIME type and authentication.
-
-## 1.4.1
-
-### Changed
-
 - **`get_message` shows a message whole.** Its text and the text it quotes are
   no longer cut (they were cut at 500 and 160 characters).
 - **`full_text` on `read_messages` and `search`.** `full_text: true` shows each
   message's text whole, on both search paths and on stories. Without it a list
   still cuts each text at 500 characters (300 for a story). The structured
   content was already whole and is unchanged.
+
+### Fixed
+
+- **A preview never ends on half an emoji.** `list_chats` cuts a preview
+  before a split character, so strict clients get well-formed text.
+- **Backups flush on Windows.** The finished copy is opened writable before
+  its fsync, as Windows requires.
+- **Skills written with CRLF line endings load.** Their frontmatter is read
+  the same as with LF.
 
 ## 1.4.0
 
