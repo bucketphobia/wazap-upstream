@@ -8,6 +8,17 @@
   transcription changes only the multipart filename, preserving the original
   file, audio bytes, MIME type and authentication.
 
+## 1.4.1
+
+### Changed
+
+- **`get_message` shows a message whole.** Its text and the text it quotes are
+  no longer cut (they were cut at 500 and 160 characters).
+- **`full_text` on `read_messages` and `search`.** `full_text: true` shows each
+  message's text whole, on both search paths and on stories. Without it a list
+  still cuts each text at 500 characters (300 for a story). The structured
+  content was already whole and is unchanged.
+
 ## 1.4.0
 
 ### Added
