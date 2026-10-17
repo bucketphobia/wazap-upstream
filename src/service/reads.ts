@@ -7,6 +7,7 @@
  * state through ReadsHost.
  */
 
+import { WazapError } from "../errors.js";
 import type { WAMessage, WASocket } from "baileys";
 import { wordsAsk } from "../asks.js";
 import {
@@ -100,7 +101,7 @@ export class AccountReads {
     private readonly accountRecord: AccountRecord
   ) {}
 
-  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<ChatSummary[]>> {
+  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string } = {}): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }> {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
       await this.host.waitForSync();
@@ -119,12 +120,26 @@ export class AccountReads {
         if (described !== undefined && described !== null) return described;
         return entry.chat.lastTs === null ? 0 : Math.floor(entry.chat.lastTs / 1000);
       };
+      const key = (entry: (typeof entries)[number]): number[] => [activity(entry), entry.chat.lastMessageId ?? 0, entry.chat.id];
+      const compare = (a: number[], b: number[]): number => b[0]! - a[0]! || b[1]! - a[1]! || b[2]! - a[2]!;
+      let after: number[] | null = null;
+      if (opts.cursor !== undefined) {
+        try {
+          if (!/^[A-Za-z0-9_-]{1,512}$/.test(opts.cursor)) throw new Error();
+          const parsed: unknown = JSON.parse(Buffer.from(opts.cursor, "base64url").toString("utf8"));
+          if (!Array.isArray(parsed) || parsed.length !== 4 || parsed[0] !== filter || !parsed.slice(1).every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error();
+          after = parsed.slice(1) as number[];
+        } catch {
+          throw new WazapError("INVALID_ID", "Invalid list_chats cursor, or its filter changed.", "Start listing again without a cursor");
+        }
+      }
+      const ordered = entries.sort((a, b) => compare(key(a), key(b))).filter(entry => after === null || compare(key(entry), after) > 0);
+      const selected = ordered.slice(0, limit);
       const people = this.identity.privateScope(opts.private);
-      const chats = entries
-        .sort((a, b) => activity(b) - activity(a) || (b.chat.lastMessageId ?? 0) - (a.chat.lastMessageId ?? 0) || b.chat.id - a.chat.id)
-        .slice(0, limit)
-        .map((entry) => this.views.chatSummary(entry.chat, entry.proto, people));
-      return this.host.synced(chats);
+      const chats = selected.map(entry => this.views.chatSummary(entry.chat, entry.proto, people));
+      const nextCursor = ordered.length > limit && selected.length > 0
+        ? Buffer.from(JSON.stringify([filter, ...key(selected.at(-1)!)])).toString("base64url") : null;
+      return { ...this.host.synced(chats), nextCursor };
     });
   }
 

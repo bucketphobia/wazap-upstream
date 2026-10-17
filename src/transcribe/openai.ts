@@ -55,9 +55,13 @@ function refusal(status: number): { kind: FailureKind; reason: string } {
 
 async function post(settings: TranscribeSettings, key: string, file: string, language: string, signal?: AbortSignal): Promise<Response> {
   const bytes = await readFile(file);
-  const type = MIME[extname(file).toLowerCase()] ?? "application/octet-stream";
+  const extension = extname(file).toLowerCase();
+  const type = MIME[extension] ?? "application/octet-stream";
+  const name = basename(file);
+  const uploadName = extension === ".opus" && bytes.subarray(0, 4).equals(Buffer.from("OggS"))
+    ? `${name.slice(0, -extension.length)}.ogg` : name;
   const form = new FormData();
-  form.append("file", new Blob([bytes], { type }), basename(file));
+  form.append("file", new Blob([bytes], { type }), uploadName);
   form.append("model", settings.apiModel);
   form.append("response_format", "json");
   if (language !== "auto") form.append("language", language);
