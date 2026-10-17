@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PEER, T0, openTemp, sid, textMessage, wordsOf } from "./db-fixtures.mjs";
 
+// The cache and workers are opt-in; these tests exercise them.
+process.env.WAZAP_RECALL_CACHE_MAX_MB ??= "2048";
+
 function seed(db, values) {
   values.forEach((v, i) => {
     const key = `W${i}`;

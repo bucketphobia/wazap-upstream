@@ -123,6 +123,10 @@ messages indexed so far.
 
 ## Search workers
 
+Off by default: with `WAZAP_RECALL_CACHE_MAX_MB` unset or `0`, meaning searches
+scan SQLite on the calling thread, with no cache and no workers. Setting a limit
+in MiB (for example `2048`) turns both on for large archives.
+
 The embedding feed warms a shared int8 cache in bounded primary-key batches.
 Unfiltered meaning searches use up to four workers (one fewer than available CPU
 cores, minimum one). Workers preserve the existing similarity function and heap.
@@ -130,8 +134,7 @@ Each worker returns at most 4,096 heap admissions per query; an overflow abandon
 the worker result and uses the existing SQLite scan. This also preserves the exact
 legacy choice among equal scores without scanning all vectors a second time.
 
-`WAZAP_RECALL_CACHE_MAX_MB` defaults to `2048` MiB; `0` disables the cache.
-The limit covers vector bytes, shared message IDs, and three reusable sorted-slot
+The `WAZAP_RECALL_CACHE_MAX_MB` limit covers vector bytes, shared message IDs, and three reusable sorted-slot
 indexes (56 bytes of shared bookkeeping per reserved slot). The warm allocation
 includes 10% headroom, or 1,024 slots when larger, clamped to the limit. Supported
 runtimes grow shared buffers without another vector copy. On older runtimes,

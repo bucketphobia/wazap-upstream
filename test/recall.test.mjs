@@ -28,6 +28,7 @@ const PROMPTS = EMBED_MODELS[MODEL].prompts;
 
 const RECALL_ENV = [
   "WAZAP_RECALL",
+  "WAZAP_RECALL_CACHE_MAX_MB",
   "WAZAP_EMBED_MODEL",
   "WAZAP_EMBED_BIN",
   "WAZAP_EMBED_URL",
@@ -1174,9 +1175,23 @@ test("the next page of a search, or the same question again, reuses the query's 
   }
 });
 
-test("A-S6 real service uses the cache and advisory failure preserves SQLite recall", async () => {
+test("recall cache is opt-in: unset keeps the SQLite path with no cache or workers", async () => {
   const stub = await stubEmbedServer();
   const { svc, sock } = await serviceWith({ WAZAP_RECALL: "local", WAZAP_EMBED_URL: stub.url });
+  try {
+    deliver(sock, [text("OFF1", "factura avion"), text("OFF2", "doctor factura")]);
+    await svc.recallIdle();
+    await svc.db.vectors.warmCache(MODEL, DIMS);
+    const result = await svc.recall("factura", undefined, 5);
+    assert.equal(result.data.index.cache.state, "disabled");
+    assert.equal(svc.db.vectors.cache, null);
+    assert.ok(result.data.hits.length > 0);
+  } finally { await svc.stop(); stub.server.close(); }
+});
+
+test("A-S6 real service uses the cache and advisory failure preserves SQLite recall", async () => {
+  const stub = await stubEmbedServer();
+  const { svc, sock } = await serviceWith({ WAZAP_RECALL: "local", WAZAP_EMBED_URL: stub.url, WAZAP_RECALL_CACHE_MAX_MB: "64" });
   try {
     deliver(sock, [text("CACHE1", "factura avion"), text("CACHE2", "doctor factura")]);
     await svc.recallIdle();
