@@ -7,6 +7,12 @@
 - **Page through every chat.** `list_chats` returns `next_cursor`; pass it as
   `cursor` with the same filter to continue in the existing activity order.
 
+### Changed
+
+- **Ogg voice recordings with an `.opus` suffix upload as `.ogg`.** API
+  transcription changes only the multipart filename, preserving the original
+  file, audio bytes, MIME type and authentication.
+
 ## 1.4.1
 
 ### Changed
