@@ -419,6 +419,8 @@ const includePreviews = z
   .default(false)
   .describe("Attach a small image of each photo, up to 12");
 
+const fullText = z.boolean().optional().describe("Each message's text whole; a list cuts long ones otherwise");
+
 /** Previews are 5-15 KB each; a dozen keep one answer small and the first call under the client's timeout. */
 const MAX_PREVIEWS = 12;
 
@@ -578,7 +580,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "read_messages",
     title: "Read messages from a WhatsApp chat",
-    description: `Read one chat, oldest to newest: the latest messages, or older ones with before (wazap asks the phone when the local history runs out). chat_id "status" reads the stories people posted, newest first, from the last hours (at most a day); they show nowhere else.`,
+    description: `Read one chat, oldest to newest: the latest messages, or older ones with before (wazap asks the phone when the local history runs out). Long texts are cut unless full_text. chat_id "status" reads the stories people posted, newest first, from the last hours (at most a day); they show nowhere else.`,
     schema: {
       chat_id: chatId.describe('Chat id from another tool, a phone number, or "status" for stories'),
       limit: z.number().int().min(1).max(200).default(20),
@@ -586,10 +588,11 @@ const TOOLS: readonly ToolDef[] = [
       types: messageTypes,
       include_previews: includePreviews,
       hours: z.number().int().min(1).max(24).optional().describe('"status" only: how far back, 24 by default'),
+      full_text: fullText,
     },
     outputSchema: READ_OUTPUT,
     write: false,
-    handler: async ({ chat_id, limit, before, types, include_previews, hours }, ctx) => {
+    handler: async ({ chat_id, limit, before, types, include_previews, hours, full_text }, ctx) => {
       const { wa } = ctx;
       if (isStatusChat(chat_id)) {
         if (before !== undefined) {
@@ -608,7 +611,7 @@ const TOOLS: readonly ToolDef[] = [
           .join(" ");
         const notes = notesField([previewGap(open, previews, include_previews), omitted > 0 ? `${omitted} older stories left out: raise limit for them.` : null]);
         return ok(
-          renderStories(stories, window, previewLabels(previews), note || null),
+          renderStories(stories, window, previewLabels(previews), note || null, full_text === true ? null : 300),
           synced(result, {
             chat_id: "status",
             hours: window,
@@ -640,7 +643,8 @@ const TOOLS: readonly ToolDef[] = [
             previewNote(result.data, previews, include_previews),
           ]
             .filter(Boolean)
-            .join(" ") || null
+            .join(" ") || null,
+          listTextCap(full_text)
         ),
         synced(result, {
           chat_id,
@@ -743,7 +747,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "search",
     title: "Search WhatsApp messages",
-    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, a URL). since, until and from narrow it; coverage and freshness say how much history was searched.`,
+    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, URL). since, until, from narrow it; full_text: whole texts; coverage, freshness: how much was searched.`,
     schema: {
       query: z.string().min(1),
       match: z.enum(["hybrid", "words"]).default("hybrid").describe('"words": only messages holding the words'),
@@ -752,10 +756,11 @@ const TOOLS: readonly ToolDef[] = [
       since: z.string().min(4).optional().describe("ISO date or time"),
       until: z.string().min(4).optional().describe("ISO date or time"),
       from: z.string().min(1).optional().describe('"me", a number, an id, or a name only one person has'),
+      full_text: fullText,
     },
     outputSchema: SEARCH_OUTPUT,
     write: false,
-    handler: async ({ query, match, chat_id, limit, since, until, from }, ctx) => {
+    handler: async ({ query, match, chat_id, limit, since, until, from, full_text }, ctx) => {
       const { wa } = ctx;
       const resolvedFrom = await resolveSenderFilter(wa, from);
       const sinceMs = parseMoment(since, "since");
@@ -802,7 +807,7 @@ const TOOLS: readonly ToolDef[] = [
             .filter(Boolean)
             .join(" ");
           return ok(
-            `${renderRecall(title, answer)}${note ? `\n${note}` : ""}`,
+            `${renderRecall(title, answer, listTextCap(full_text))}${note ? `\n${note}` : ""}`,
             synced(result, {
               ...echo,
               mode: "hybrid",
@@ -836,7 +841,7 @@ const TOOLS: readonly ToolDef[] = [
         .filter(Boolean)
         .join(" ");
       return ok(
-        renderMessages(title, messages, new Map(), note),
+        renderMessages(title, messages, new Map(), note, listTextCap(full_text)),
         synced(found, {
           ...echo,
           mode: unavailable === null ? "words" : "keyword_fallback",
@@ -863,7 +868,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "get_message",
     title: "Get one WhatsApp message in full",
-    description: `One message in full: the message it quotes, each reaction with who left it, poll votes and event answers by person, its media, and on the user's own messages who it reached and who read it. Without account_id the id is looked for on every account.`,
+    description: `One message in full, its words never cut: the message it quotes, each reaction with who left it, poll votes and event answers by person, its media, and on the user's own messages who it reached and who read it. Without account_id the id is looked for on every account.`,
     // account_id is named again here so the handler sees it typed: an explicit
     // id keeps the lookup on that one account instead of walking the bindings.
     schema: { message_id: messageId, account_id: ACCOUNT_ID.optional() },
@@ -877,7 +882,8 @@ const TOOLS: readonly ToolDef[] = [
           : { binding: resolved, message: await getMessageView(wa, message_id) };
       const [identified] = await withSenderIdentity(binding.wa, [message]);
       const view = identified ?? message;
-      const text = [renderMessages("Message", [view]), reactionLine(view), voteLines(view), deliveryLines(view)]
+      // The one message in full: neither its words nor the words it quotes are cut.
+      const text = [renderMessages("Message", [view], new Map(), null, null, null), reactionLine(view), voteLines(view), deliveryLines(view)]
         .filter(Boolean)
         .join("\n");
       return ok(text, {
@@ -1554,11 +1560,21 @@ function deliveryLines(m: AnyMessage): string | null {
   return lines.length > 0 ? lines.join("\n") : null;
 }
 
+/** How much of a message's words a list shows; full_text lifts it, and get_message never applies it. */
+const LIST_TEXT_CHARS = 500;
+
+/** The cap a list puts on each message's words: none when the caller asked for them in full. */
+function listTextCap(fullText: boolean | undefined): number | null {
+  return fullText === true ? null : LIST_TEXT_CHARS;
+}
+
 function renderMessages(
   title: string,
   messages: ReadonlyArray<AnyMessage>,
   labels: Map<string, string> = new Map(),
-  note: string | null = null
+  note: string | null = null,
+  textCap: number | null = LIST_TEXT_CHARS,
+  quoteCap: number | null = 160
 ): string {
   if (messages.length === 0) return `${title}: no messages found.${note ? ` ${note}` : ""}`;
   const lines = [`# ${title} (${messages.length})`, ""];
@@ -1579,8 +1595,8 @@ function renderMessages(
     lines.push(
       `- **${senderLabel(m, introduced)}** · ${m.age}${tags.length ? ` [${tags.join(", ")}]` : ""} · id: \`${m.message_id}\``
     );
-    if (m.quoted) lines.push(`  > ${truncate(m.quoted.text, 160)}`);
-    lines.push(`  ${truncate(m.text, 500)}`);
+    if (m.quoted) lines.push(`  > ${truncate(m.quoted.text, quoteCap)}`);
+    lines.push(`  ${truncate(m.text, textCap)}`);
   }
   return lines.join("\n");
 }
@@ -1603,7 +1619,11 @@ const WEAK_NOTE = "Weak matches only: the query may have no real answer; treat t
  * them. "index only" warns that wazap holds the message only as text, so
  * get_media has nothing to open.
  */
-function renderRecall(title: string, answer: RecallAnswer | IdentifiedRecallAnswer): string {
+function renderRecall(
+  title: string,
+  answer: RecallAnswer | IdentifiedRecallAnswer,
+  textCap: number | null = LIST_TEXT_CHARS
+): string {
   const { hits, index } = answer;
   const catchingUp =
     index.state === "indexing"
@@ -1636,7 +1656,7 @@ function renderRecall(title: string, answer: RecallAnswer | IdentifiedRecallAnsw
       `- [${m.timestamp}] **${senderLabel(m, introduced)}** · \`${m.chat_id}\` [${tags.join(", ")}] · id: \`${m.message_id}\``
     );
     if (m.quoted) lines.push(`  > ${truncate(m.quoted.text, 160)}`);
-    lines.push(`  ${truncate(m.text, 500)}`);
+    lines.push(`  ${truncate(m.text, textCap)}`);
   }
   return lines.join("\n");
 }
@@ -1645,7 +1665,8 @@ function renderStories(
   stories: MessageView[],
   hours: number,
   labels: Map<string, string>,
-  note: string | null
+  note: string | null,
+  textCap: number | null = 300
 ): string {
   if (stories.length === 0) return `No stories in the last ${hours}h.`;
   const lines = [`# Stories · last ${hours}h (${stories.length})`, ""];
@@ -1657,7 +1678,7 @@ function renderStories(
       lines.push(`## ${m.sender.name} — \`${m.sender.id}\``);
     }
     const label = labels.get(m.message_id);
-    lines.push(`- ${m.age} · ${truncate(m.text, 300)}${label ? ` (${label})` : ""} · id: \`${m.message_id}\``);
+    lines.push(`- ${m.age} · ${truncate(m.text, textCap)}${label ? ` (${label})` : ""} · id: \`${m.message_id}\``);
   }
   return lines.join("\n");
 }
@@ -1719,8 +1740,9 @@ function disappearingLabel(seconds: number): string {
   return days === 1 ? "24h" : `${days}d`;
 }
 
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…` : text;
+/** At most max characters and an ellipsis; a null max keeps every character. */
+function truncate(text: string, max: number | null): string {
+  return max !== null && text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
 /**
