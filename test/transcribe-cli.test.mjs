@@ -202,3 +202,70 @@ test("transcribe test prints the provider, the masked key and the text", async (
     api.close();
   }
 });
+
+test("custom transcription auth needs no prompted key and reports only set", async () => {
+  const dir = dataDir();
+  const secret = "private-credential-5678";
+  const env = { WAZAP_TRANSCRIBE_AUTH: `X-Api-Key: ${secret}` };
+  const configured = await wazap(dir, ["config", "transcribe", "openai"], { env });
+  assert.equal(configured.code, 0, configured.stderr);
+  assert.equal(envFile(dir).includes("WAZAP_TRANSCRIBE_API_KEY"), false);
+  for (const args of [["config"], ["status"], ["status", "--json"]]) {
+    const result = await wazap(dir, args, { env });
+    assert.equal(`${result.stdout} ${result.stderr}`.includes(secret), false);
+    assert.equal(`${result.stdout} ${result.stderr}`.includes("5678"), false);
+    if (args.includes("--json")) {
+      const checks = JSON.parse(result.stdout).checks;
+      assert.deepEqual(
+        checks.find((check) => check.name === "auth"),
+        { name: "auth", state: "ok", detail: "set" }
+      );
+      assert.equal(
+        checks.some((check) => check.name === "api key"),
+        false
+      );
+    } else assert.match(result.stderr, /auth: set/);
+  }
+});
+
+test("transcription config accepts quoted header values without prompting for an API key", async () => {
+  for (const raw of ['"X-Api-Key: synthetic-token"', "'Authorization: Bearer synthetic-token'"]) {
+    const dir = dataDir();
+    const configured = await wazap(dir, ["config", "transcribe", "openai"], {
+      env: { WAZAP_TRANSCRIBE_AUTH: raw },
+    });
+    assert.equal(configured.code, 0, configured.stderr);
+    assert.equal(envFile(dir).includes("WAZAP_TRANSCRIBE_API_KEY"), false);
+    assert.equal(`${configured.stdout} ${configured.stderr}`.includes("synthetic-token"), false);
+  }
+});
+
+test("transcribe test sends custom auth without printing any of it", async () => {
+  const secret = "custom-private-5678";
+  const seen = [];
+  const api = await stubApi((req) => { seen.push(req.headers["x-api-key"]); req.resume(); });
+  try {
+    const dir = dataDir();
+    const audio = join(dir, "note.ogg");
+    writeFileSync(audio, "not really audio");
+    const result = await wazap(dir, ["transcribe", "test", audio], { env: {
+      WAZAP_TRANSCRIBE: "openai", WAZAP_TRANSCRIBE_AUTH: `X-Api-Key: ${secret}`, WAZAP_TRANSCRIBE_URL: api.url,
+    } });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(seen, [secret]);
+    assert.match(result.stderr, /auth {6}set/);
+    assert.equal(`${result.stdout} ${result.stderr}`.includes(secret), false);
+    assert.equal(`${result.stdout} ${result.stderr}`.includes("5678"), false);
+  } finally { api.close(); }
+});
+
+test("invalid custom auth is secret-safe and config writes nothing", async () => {
+  const secret = "custom-private-5678";
+  for (const args of [["config", "transcribe", "openai"], ["config"], ["status", "--json"]]) {
+    const dir = dataDir();
+    const result = await wazap(dir, args, { env: { WAZAP_TRANSCRIBE_AUTH: `Invalid@Header: ${secret}` } });
+    assert.match(`${result.stdout} ${result.stderr}`, /WAZAP_TRANSCRIBE_AUTH/);
+    assert.equal(`${result.stdout} ${result.stderr}`.includes(secret), false);
+    assert.equal(files(dir).some((file) => file.endsWith(".env")), false);
+  }
+});

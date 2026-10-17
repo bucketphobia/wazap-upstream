@@ -4,8 +4,12 @@
  * the API key is handled by these helpers alone.
  */
 import { join } from "node:path";
+import { parseAuthHeader } from "../auth-header.js";
 import { WazapError } from "../errors.js";
 import type { ModelAlias, ProviderName, TranscribeSettings } from "./types.js";
+
+export const TRANSCRIBE_AUTH_FIX =
+  "Set WAZAP_TRANSCRIBE_AUTH to `Bearer <token>` or `<Header-Name>: <value>`, or unset it to use the API key";
 
 const DEFAULT_URL = "https://api.openai.com/v1";
 const DEFAULT_API_MODEL = "gpt-4o-mini-transcribe";
@@ -108,6 +112,7 @@ export function readTranscribeSettings(env: NodeJS.ProcessEnv, dataDir: string):
     autoOwn: all,
     model: parseModel(env.WAZAP_WHISPER_MODEL),
     whisperBin: orNull(env.WAZAP_WHISPER_BIN),
+    auth: parseAuthHeader(stripPasted(env.WAZAP_TRANSCRIBE_AUTH ?? ""), "WAZAP_TRANSCRIBE_AUTH", TRANSCRIBE_AUTH_FIX),
     apiKey: orNull(env.WAZAP_TRANSCRIBE_API_KEY) ?? orNull(env.OPENAI_API_KEY),
     allowApi,
     baseUrl: requireSafeUrl(url.replace(/\/+$/, "")),

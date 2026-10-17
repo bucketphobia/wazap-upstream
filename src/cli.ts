@@ -483,7 +483,7 @@ const PROVIDER_ROWS: Record<ProviderName, (settings: TranscribeSettings) => [str
   openai: (settings) => [
     ["provider", `openai (${new URL(settings.baseUrl).host})`],
     ["model", settings.apiModel],
-    ["key", maskKey(settings.apiKey)],
+    settings.auth === null ? ["key", maskKey(settings.apiKey)] : ["auth", "set"],
   ],
 };
 

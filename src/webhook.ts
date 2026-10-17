@@ -15,6 +15,7 @@ import { WAZAP_VERSION } from "./config.js";
 import { WazapError, asWazapError } from "./errors.js";
 import { logError } from "./logger.js";
 import { normalizeSendRule } from "./send-guard.js";
+import { parseAuthHeader, type AuthHeader } from "./auth-header.js";
 import { redact, stripPasted } from "./transcribe/index.js";
 import { discardResponse } from "./http-response.js";
 import { withCode } from "./error-code.js";
@@ -56,19 +57,6 @@ export const WEBHOOK_TAG_FIX = 'set WAZAP_WEBHOOK_TAG to a short label like "aut
 export const WEBHOOK_COALESCE_FIX = `set WAZAP_WEBHOOK_COALESCE to a whole number of seconds from 1 to ${WEBHOOK_COALESCE_MAX_S}, or off`;
 export const WEBHOOK_RETRY_401_FIX = "set WAZAP_WEBHOOK_RETRY_401 to on or off";
 
-/** Headers wazap sets itself, and the ones fetch owns: the auth setting cannot replace them. */
-const RESERVED_HEADERS = new Set([
-  "content-type",
-  "content-length",
-  "user-agent",
-  "host",
-  "connection",
-  "transfer-encoding",
-  "x-wazap-event",
-  "x-wazap-signature",
-]);
-const HEADER_NAME = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-
 export const WEBHOOK_KINDS = ["text", "audio", "image", "other"] as const;
 export type WebhookKind = (typeof WEBHOOK_KINDS)[number];
 
@@ -79,10 +67,7 @@ const ON = new Set(["on", "1", "true", "yes"]);
 const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"]);
 
 /** A header the receiver asks for on top of wazap's signature: `Authorization` unless the setting names another. */
-export interface WebhookAuth {
-  name: string;
-  value: string;
-}
+export type WebhookAuth = AuthHeader;
 
 /**
  * Which chats a message event may name, besides `#private`, which is never
@@ -510,25 +495,7 @@ export function requireWebhookUrl(url: string): string {
  * The value is a credential: no error here repeats it.
  */
 export function parseWebhookAuth(raw: string): WebhookAuth | null {
-  const typed = raw.trim();
-  if (typed === "") return null;
-  // A header line puts a token, a colon and a space first; "Bearer abc:def" has a space before its colon.
-  const named = /^([^\s:]+):\s*(.*)$/.exec(typed);
-  const auth = named !== null ? { name: named[1]!, value: named[2]!.trim() } : { name: "Authorization", value: typed };
-  if (!HEADER_NAME.test(auth.name)) {
-    throw new WazapError("INVALID_ID", "The webhook auth header has a name no HTTP header can have.", WEBHOOK_AUTH_FIX);
-  }
-  if (RESERVED_HEADERS.has(auth.name.toLowerCase())) {
-    throw new WazapError("INVALID_ID", `The webhook auth cannot set ${auth.name}: wazap sets it itself.`, WEBHOOK_AUTH_FIX);
-  }
-  if (auth.value === "") {
-    throw new WazapError("INVALID_ID", `The webhook auth names ${auth.name} but gives it no value.`, WEBHOOK_AUTH_FIX);
-  }
-  // A line break would start a header of its own; no printable value needs a control character.
-  if ([...auth.value].some((char) => (char < " " && char !== "\t") || char === "\u007f")) {
-    throw new WazapError("INVALID_ID", "The webhook auth value holds a line break or a control character.", WEBHOOK_AUTH_FIX);
-  }
-  return auth;
+  return parseAuthHeader(raw, "webhook auth", WEBHOOK_AUTH_FIX, ["x-wazap-event", "x-wazap-signature"]);
 }
 
 /** `sha256=<hex>` of the exact UTF-8 body, the value of `X-Wazap-Signature`. */

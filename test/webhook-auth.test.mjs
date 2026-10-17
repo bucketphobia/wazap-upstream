@@ -104,6 +104,10 @@ test("a header wazap sets itself, a bad name, an empty value or a line break is 
     `Bearer ${TOKEN}\r\nX-Evil: 1`,
     `X-Api-Key: ${TOKEN}\nX-Evil: 1`,
     `Bad(Name): ${TOKEN}`,
+    `Upgrade: ${TOKEN}`,
+    `Expect: ${TOKEN}`,
+    `Keep-Alive: ${TOKEN}`,
+    `Bearer ${TOKEN}€`,
   ];
   for (const raw of cases) {
     assert.throws(
@@ -116,6 +120,18 @@ test("a header wazap sets itself, a bad name, an empty value or a line break is 
       raw
     );
   }
+});
+
+test("a key pasted with curl's trailing colon is refused without repeating the key", () => {
+  const key = "sk_test_51SYNTHETICKEY0000";
+  assert.throws(
+    () => parseWebhookAuth(`${key}:`),
+    (err) => {
+      assert.equal(err.code, "INVALID_ID");
+      assert.ok(!err.message.includes(key) && !(err.fix ?? "").includes(key), "the refusal repeats the key");
+      return true;
+    }
+  );
 });
 
 test("the setting is read from WAZAP_WEBHOOK_AUTH, an account's webhook_auth wins, and a bad one makes the webhook invalid", () => {

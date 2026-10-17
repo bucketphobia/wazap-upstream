@@ -6,6 +6,10 @@
 
 - **Page through every chat.** `list_chats` returns `next_cursor`; pass it as
   `cursor` with the same filter to continue in the existing activity order.
+- **Custom transcription auth.** `WAZAP_TRANSCRIBE_AUTH` accepts an
+  Authorization value or `Header-Name: value`, like `WAZAP_WEBHOOK_AUTH`.
+  It overrides the API key and is reported only as set. HTTPS-or-loopback
+  and the refusal to follow redirects are unchanged.
 
 ### Changed
 
