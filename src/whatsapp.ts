@@ -990,7 +990,7 @@ export class WhatsAppService implements WhatsAppApi {
     this.lastInboundAt = Math.max(this.lastInboundAt ?? 0, ts);
   }
 
-  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<ChatSummary[]>> {
+  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string } = {}): Promise<Synced<ChatSummary[]>> {
     return this.reads.listChats(filter, limit, opts);
   }
 

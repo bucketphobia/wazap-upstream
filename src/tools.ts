@@ -86,6 +86,7 @@ const OPEN_OBJECT = z.object({}).passthrough();
 const NOTES = z.array(z.string()).optional().describe("Caveats to act on or tell the user");
 
 const LIST_CHATS_OUTPUT = {
+  next_cursor: z.string().nullable().optional(),
   filter: z.string(),
   count: z.number(),
   chats: z.array(
@@ -559,11 +560,12 @@ const TOOLS: readonly ToolDef[] = [
       filter: z.enum(["all", "unread", "groups", "individual", "archived"]).default("all").describe('"all" leaves out archived'),
       limit: z.number().int().min(1).max(100).default(20),
       include_pictures: z.boolean().default(false).describe("Add picture_url, each chat's profile photo (links expire)"),
+      cursor: z.string().max(512).optional().describe("Opaque next_cursor from the preceding page; keep the same filter"),
     },
     outputSchema: LIST_CHATS_OUTPUT,
     write: false,
-    handler: async ({ filter, limit, include_pictures }, ctx) => {
-      const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId) });
+    handler: async ({ filter, limit, include_pictures, cursor }, ctx) => {
+      const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId), cursor });
       let chats: Array<ChatSummary & { picture_url?: string | null }> = result.data;
       if (include_pictures && ctx.wa.profilePictures) {
         // A #private person's chat shows who, not their face.
@@ -571,7 +573,7 @@ const TOOLS: readonly ToolDef[] = [
         const pictures = await ctx.wa.profilePictures(open).catch(() => ({}) as Record<string, string | null>);
         chats = chats.map((chat) => ({ ...chat, picture_url: pictures[chat.chat_id] ?? null }));
       }
-      return ok(renderChats(result.data, filter), synced(result, { filter, count: chats.length, chats }));
+      return ok(renderChats(result.data, filter), synced(result, { filter, count: chats.length, chats, next_cursor: result.nextCursor ?? null }));
     },
   }),
 
