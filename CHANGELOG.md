@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- **Page through every chat.** `list_chats` returns `next_cursor`; pass it as
+  `cursor` with the same filter to continue in the existing activity order.
+
 ### Changed
 
 - **Ogg voice recordings with an `.opus` suffix upload as `.ogg`.** API
