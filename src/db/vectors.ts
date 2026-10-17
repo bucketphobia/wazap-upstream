@@ -12,7 +12,7 @@
  * asynchronous API for an exact worker scan over a shared int8 cache.
  */
 import { createHash } from "node:crypto";
-import { VectorCache } from "./vector-cache.js";
+import { VectorCache, cacheLimitBytes } from "./vector-cache.js";
 import type { Connection } from "./connection.js";
 import { StorageError } from "./errors.js";
 import { secondOf, secondOfId } from "./ids.js";
@@ -294,16 +294,24 @@ export class Vectors {
   ) {}
 
   private cache: VectorCache | null = null;
+  private readonly cacheEnabled = cacheLimitBytes() > 0;
 
   /** Loads in small batches; searches use SQLite until the cache is ready. */
   warmCache(model: string, dimensions?: number): Promise<void> {
-    if (this.c.readOnly) return Promise.resolve();
+    if (this.c.readOnly || !this.cacheEnabled) return Promise.resolve();
     this.cache ??= new VectorCache(this.c);
     return this.cache.warm(model, dimensions);
   }
 
   cacheStatus() {
-    return this.cache?.status() ?? { state: "cold" as const, sharedBytes: 0, recoveries: 0, capFallbacks: 0 };
+    return (
+      this.cache?.status() ?? {
+        state: this.cacheEnabled ? ("cold" as const) : ("disabled" as const),
+        sharedBytes: 0,
+        recoveries: 0,
+        capFallbacks: 0,
+      }
+    );
   }
 
   close(): void {

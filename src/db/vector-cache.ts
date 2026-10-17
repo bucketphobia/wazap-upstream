@@ -42,6 +42,15 @@ interface Row {
 class CacheLimit extends Error {}
 class CacheCancelled extends Error {}
 
+/** Opt-in: unset or 0 keeps every search on SQLite, with no cache or workers. */
+export function cacheLimitBytes(): number {
+  const raw = process.env.WAZAP_RECALL_CACHE_MAX_MB?.trim() || "0";
+  const n = Number(raw);
+  if (Number.isSafeInteger(n) && n >= 0 && n <= 1048576) return n * 1048576;
+  log("recall cache: invalid WAZAP_RECALL_CACHE_MAX_MB; using SQLite");
+  return 0;
+}
+
 export class VectorCache {
   private model = "";
   private dimensions = 0;
@@ -71,7 +80,7 @@ export class VectorCache {
   private capFallbacks = 0;
   private retryAt = 0;
   private version = 0;
-  private maxBytes = this.readLimit();
+  private maxBytes = cacheLimitBytes();
   private recoveryDelayMs = 1000;
   private scanTimeoutMs = 15000;
   private warmTimeoutMs = 60000;
@@ -94,14 +103,6 @@ export class VectorCache {
         INSERT INTO vector_cache_dirty VALUES (old.message_id) ON CONFLICT(id) DO NOTHING; END;`);
     this.timer = setInterval(() => this.maintain(), 250);
     this.timer.unref();
-  }
-
-  private readLimit(): number {
-    const raw = process.env.WAZAP_RECALL_CACHE_MAX_MB?.trim() || "2048";
-    const n = Number(raw);
-    if (Number.isSafeInteger(n) && n >= 0 && n <= 1048576) return n * 1048576;
-    log("recall cache: invalid WAZAP_RECALL_CACHE_MAX_MB; using SQLite");
-    return 0;
   }
 
   status(): VectorCacheStatus {

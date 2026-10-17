@@ -4,6 +4,9 @@ import { AccountDb } from "../dist/db/index.js";
 import { VectorCache } from "../dist/db/vector-cache.js";
 import { sqlite } from "../dist/db/sqlite.js";
 import { PEER, T0, openTemp, sid, textMessage, wordsOf } from "./db-fixtures.mjs";
+
+// The cache and workers are opt-in; these tests exercise them.
+process.env.WAZAP_RECALL_CACHE_MAX_MB ??= "2048";
 const input = { model: "m", vector: [1, 0], query: "zzzz", limit: 2, semanticCandidates: 2, minSimilarity: 0 };
 function seed(db, values) {
   values.forEach((v, i) => {
