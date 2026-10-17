@@ -142,7 +142,8 @@ function beginCopy(live: string, destination: string): Copy {
 
 /** The written copy, on disk and under its name: fsync first, then one atomic rename. */
 function finishCopy({ target, temp }: Copy): void {
-  const fd = openSync(temp, "r");
+  // Windows requires write access for FlushFileBuffers (fsync).
+  const fd = openSync(temp, "r+");
   try {
     fsyncSync(fd);
   } finally {
