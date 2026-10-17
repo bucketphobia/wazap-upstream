@@ -573,3 +573,37 @@ test("list_chats adds profile photos only when asked, and none for a #private pe
   assert.equal(result.structuredContent.chats[1].picture_url, null);
   assert.deepEqual(asked, ["40700000002@s.whatsapp.net"]);
 });
+
+test("list_chats previews retain complete UTF-16 pairs at the truncation boundary", async (t) => {
+  const cases = [
+    { name: "split emoji", text: "a".repeat(159) + "😀tail", preview: "a".repeat(159) + "…" },
+    { name: "complete emoji", text: "a".repeat(158) + "😀tail", preview: "a".repeat(158) + "😀…" },
+    { name: "ASCII clipped", text: "a".repeat(161), preview: "a".repeat(160) + "…" },
+    { name: "ASCII exact budget", text: "a".repeat(160), preview: "a".repeat(160) },
+    { name: "emoji exact budget", text: "a".repeat(158) + "😀", preview: "a".repeat(158) + "😀" },
+    { name: "short original", text: "مرحبا 😀", preview: "مرحبا 😀" },
+  ];
+  for (const { name, text, preview } of cases) {
+    await t.test(name, async () => {
+      const server = fakeServer();
+      const wa = {
+        getStatus: () => ({ status: "connected" }),
+        listChats: async () => ({
+          data: [{
+            chat_id: "40700000002@s.whatsapp.net", name: "Synthetic", type: "individual",
+            unread_count: 0,
+            last_message: { text, timestamp: "2026-10-09T10:00:00+03:00", from_me: false },
+          }],
+          sync: "done",
+        }),
+      };
+      registerTools(server, asToolSource(wa), { allowWrite: false });
+      const result = await server.tools.get("list_chats").handler({ filter: "all", limit: 20 });
+      assert.equal(result.isError, undefined);
+      assert.equal(result.content[0].text.isWellFormed(), true);
+      assert.ok(result.content[0].text.includes(`- **last**: ${preview} (`));
+      // Structured source text remains complete; only the human preview is bounded.
+      assert.equal(result.structuredContent.chats[0].last_message.text, text);
+    });
+  }
+});
