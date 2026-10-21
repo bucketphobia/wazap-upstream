@@ -91,6 +91,9 @@ import type {
   ParticipantResult,
   RecallAnswer,
   RecentConversation,
+  RecentMessagePage,
+  RecentMessageRefs,
+  RecentReadOptions,
   ReminderView,
   ScheduledView,
   SentMessage,
@@ -1006,6 +1009,14 @@ export class WhatsAppService implements WhatsAppApi {
     opts: { private?: PrivateRule } = {}
   ): Promise<Synced<RecentConversation[]>> {
     return this.reads.getRecentMessages(hours, filter, includeSystem, types, opts);
+  }
+
+  recentMessageRefs(options: RecentReadOptions): Promise<Synced<RecentMessageRefs[]>> {
+    return this.reads.recentMessageRefs(options);
+  }
+
+  readRecentMessages(ref: RecentMessageRefs, limit: number, options: RecentReadOptions): Promise<Synced<RecentMessagePage>> {
+    return this.reads.readRecentMessages(ref, limit, options);
   }
 
   searchMessages(

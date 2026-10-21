@@ -104,6 +104,230 @@ test("recent pages are bounded, repeatable, isolated by client and recheck delet
   assert.deepEqual(again.structuredContent.conversations, next.structuredContent.conversations);
 });
 
+test("recent pagination constructs only each page's views and never rescans on continuation", async (t) => {
+  const f = fixture(t);
+  const now = Date.now();
+  f.svc.db.transaction(() => f.svc.db.messages.upsertMany(Array.from({ length: 3000 }, (_, i) => ({
+    chatJid: i % 2 ? ANA : DAN, keyId: `PAGE${i}`, fromMe: false, ts: now - 4000 + i,
+    type: "text", text: `Synthetic message ${i}`,
+  }))));
+  const view = f.svc.views.viewOfStored.bind(f.svc.views);
+  let views = 0;
+  f.svc.views.viewOfStored = (...args) => { views++; return view(...args); };
+  const first = await f.call("get_recent_messages", { limit: 25 });
+  assert.equal(first.structuredContent.message_count, 25);
+  assert.equal(views, 25, "the first page must not render the entire window");
+  const cursor = first.structuredContent.next_cursor;
+  assert.ok(cursor);
+  f.svc.recentMessageRefs = async () => { throw new Error("cursor rescanned recent history"); };
+  f.svc.db.messages.chatPage = () => { throw new Error("cursor scanned a chat instead of its ids"); };
+  views = 0;
+  const next = await f.call("get_recent_messages", { cursor, limit: 25 });
+  assert.equal(next.isError, undefined);
+  assert.equal(next.structuredContent.message_count, 25);
+  assert.equal(views, 25);
+  const firstIds = new Set(first.structuredContent.conversations.flatMap((c) => c.messages.map((m) => m.message_id)));
+  assert.ok(next.structuredContent.conversations.flatMap((c) => c.messages).every((m) => !firstIds.has(m.message_id)));
+});
+
+test("recent pages preserve full-read ordering, metadata and type/system filters", async (t) => {
+  const f = fixture(t);
+  f.arrive(ANA, "First question?");
+  f.arrive(GROUP, "Group question?", false, DAN);
+  f.arrive(ANA, { imageMessage: { mimetype: "image/jpeg", caption: "Named picture" } });
+  f.arrive(DAN, "A reply", true);
+  f.arrive(ANA, "Last message");
+  f.svc.db.messages.upsert({ chatJid: DAN, keyId: "SYSTEM", fromMe: false, ts: Date.now() - 1000, type: "system", text: "A system entry" });
+  for (const args of [{}, { types: ["text"] }, { include_system: true }, { filter: "groups" }, { filter: "individual" }]) {
+    const expected = (await f.svc.getRecentMessages(24, args.filter ?? "all", args.include_system ?? false, args.types)).data;
+    const pending = expected.map((row) => ({ ...row, account_id: "default", messages: [...row.messages].reverse() }));
+    let cursor;
+    do {
+      const answer = await f.call("get_recent_messages", cursor ? { cursor, limit: 2 } : { ...args, limit: 2 });
+      assert.equal(answer.isError, undefined);
+      let left = 2;
+      const page = [];
+      for (const row of pending) {
+        const take = row.messages.splice(0, left);
+        left -= take.length;
+        if (take.length) page.push({ ...row, messages: take.reverse() });
+      }
+      assert.deepEqual(answer.structuredContent.conversations, page);
+      cursor = answer.structuredContent.next_cursor;
+      assert.equal(cursor !== null, pending.some((row) => row.messages.length));
+    } while (cursor);
+  }
+});
+
+test("recent cursors fill deletion and expiry gaps without adding newly arrived messages", async (t) => {
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  const f = fixture(t);
+  f.svc.db.transaction(() => f.svc.db.messages.upsertMany([
+    { chatJid: DAN, keyId: "OTHER", fromMe: false, ts: now - 6000, type: "text", text: "Other conversation" },
+    { chatJid: ANA, keyId: "KEEP", fromMe: false, ts: now - 5000, type: "text", text: "Keep this" },
+    { chatJid: ANA, keyId: "EXPIRE", fromMe: false, ts: now - 4000, type: "text", text: "Expires soon", expiresAt: now + 5000 },
+    { chatJid: ANA, keyId: "DELETE", fromMe: false, ts: now - 3000, type: "text", text: "Delete this" },
+    { chatJid: ANA, keyId: "FIRST", fromMe: false, ts: now - 2000, type: "text", text: "First page" },
+  ]));
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  const cursor = first.structuredContent.next_cursor;
+  assert.ok(cursor);
+  f.sock.ev.emit("messages.delete", { keys: [{ remoteJid: ANA, fromMe: false, id: "DELETE" }] });
+  now += 10_000;
+  f.svc.db.messages.upsert({ chatJid: ANA, keyId: "NEW", fromMe: false, ts: now, type: "text", text: "New arrival" });
+  const next = await f.call("get_recent_messages", { cursor, limit: 2 });
+  assert.equal(next.structuredContent.message_count, 2);
+  assert.deepEqual(next.structuredContent.conversations.flatMap((row) => row.messages.map((m) => m.message_id)), [
+    `false_${ANA}_KEEP`, `false_${DAN}_OTHER`,
+  ]);
+  assert.equal(next.structuredContent.next_cursor, null);
+  assert.doesNotMatch(allText(next), /Expires soon|Delete this|New arrival/);
+  assert.deepEqual((await f.call("get_recent_messages", { cursor, limit: 2 })).structuredContent.conversations, next.structuredContent.conversations);
+});
+
+test("recent cursors skip long deleted runs in batches without consuming the following page", async (t) => {
+  const f = fixture(t);
+  const now = Date.now();
+  f.svc.db.messages.upsertMany(Array.from({ length: 100 }, (_, i) => ({
+    chatJid: ANA, keyId: `GAP${i}`, fromMe: false, ts: now - 1000 - (100 - i) * 1000, type: "text", text: `Message ${i}`,
+  })));
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  f.sock.ev.emit("messages.delete", { keys: Array.from({ length: 49 }, (_, i) => ({ remoteJid: ANA, fromMe: false, id: `GAP${50 + i}` })) });
+  const byIds = f.svc.db.messages.byIds.bind(f.svc.db.messages);
+  let queries = 0;
+  f.svc.db.messages.byIds = (...args) => { queries++; return byIds(...args); };
+  const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 1 });
+  assert.equal(next.structuredContent.conversations[0].messages[0].message_id, `false_${ANA}_GAP49`);
+  assert.ok(queries < 10, "a long gap must not require one query per deleted message");
+  const last = await f.call("get_recent_messages", { cursor: next.structuredContent.next_cursor, limit: 1 });
+  assert.equal(last.structuredContent.conversations[0].messages[0].message_id, `false_${ANA}_GAP48`);
+});
+
+test("recent cursors apply new private tags to group senders and embedded quotes", async (t) => {
+  const f = fixture(t);
+  f.arrive(GROUP, "SECRET-AUTHOR", false, ANA);
+  f.arrive(GROUP, { extendedTextMessage: { text: "Public answer", contextInfo: { stanzaId: "QUOTE", participant: ANA, quotedMessage: { conversation: "SECRET-QUOTE" } } } }, false, DAN);
+  f.arrive(GROUP, "Newest", false, DAN);
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  f.svc.db.identity.updateFields(ANA, { addTags: ["private"] });
+  const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 2 });
+  assert.equal(next.structuredContent.message_count, 2);
+  assert.equal(next.structuredContent.conversations[0].messages[0].private, true);
+  assert.match(allText(next), /Public answer/);
+  assert.doesNotMatch(allText(next), /SECRET-AUTHOR|SECRET-QUOTE/);
+});
+
+test("recent cursors retain partial sync metadata for accounts outside the selected page", async (t) => {
+  const home = fixture(t), work = fixture(t);
+  home.arrive(ANA, "Home question?");
+  work.arrive(DAN, "Work question?");
+  work.arrive(DAN, "Work follow-up?");
+  const status = home.svc.getStatus.bind(home.svc);
+  home.svc.getStatus = () => ({ ...status(), sync: "pending" });
+  const bindings = [{ id: "home", wa: home.svc }, { id: "work", wa: work.svc }];
+  const hub = { ...asToolSource(home.svc), bindings: () => bindings, defaultBinding: () => bindings[0],
+    binding: (id) => bindings.find((b) => b.id === id), record: (id) => ({ id, enabled: true }), records: () => bindings.map((b) => ({ id: b.id, enabled: true })) };
+  const { call } = schemaCheckedTools(hub, { allowWrite: false, legacyReads: true });
+  const first = await call("get_recent_messages", { all_accounts: true, limit: 1 });
+  const next = await call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 1 });
+  assert.equal(next.structuredContent.conversations[0].account_id, "work");
+  assert.equal(next.structuredContent.sync, "pending");
+  assert.equal(next.structuredContent.partial, true);
+});
+
+test("recent cursors recheck archived/unread filters and cursor expiry", async (t) => {
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  const f = fixture(t);
+  f.arrive(ANA, "One");
+  f.arrive(ANA, "Two");
+  f.arrive(DAN, "Three");
+  f.arrive(DAN, "Four");
+  f.svc.db.identity.upsertChat({ jid: ANA, unread: 2 });
+  f.svc.db.identity.upsertChat({ jid: DAN, unread: 2 });
+  const first = await f.call("get_recent_messages", { filter: "unread", limit: 1 });
+  const cursor = first.structuredContent.next_cursor;
+  f.svc.db.identity.upsertChat({ jid: DAN, unread: 0 });
+  f.svc.db.identity.upsertChat({ jid: ANA, archived: true });
+  const next = await f.call("get_recent_messages", { cursor, limit: 2 });
+  assert.equal(next.structuredContent.message_count, 0);
+  assert.equal(next.structuredContent.next_cursor, null);
+  now += 16 * 60_000;
+  assert.equal(JSON.parse((await f.call("get_recent_messages", { cursor })).content[0].text).error, "CURSOR_EXPIRED");
+});
+
+test("recent cursors recheck the rolling window before quoting stored ids", async (t) => {
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  t.after(() => { Date.now = realNow; });
+  const f = fixture(t);
+  f.svc.db.messages.upsert({ chatJid: ANA, keyId: "BOUNDARY", fromMe: false, ts: now - 3_600_000 + 1000, type: "text", text: "Falls outside window" });
+  f.arrive(ANA, "Newest");
+  const first = await f.call("get_recent_messages", { hours: 1, limit: 1 });
+  assert.ok(first.structuredContent.next_cursor);
+  now += 2000;
+  const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor });
+  assert.equal(next.structuredContent.message_count, 0);
+  assert.equal(next.structuredContent.next_cursor, null);
+  assert.doesNotMatch(allText(next), /Falls outside window/);
+});
+
+test("recent pagination isolates account-local ids and merges account pages in activity order", async (t) => {
+  const home = fixture(t);
+  const work = fixture(t);
+  const now = Date.now();
+  const seed = (svc, chat, label, ages) => svc.db.messages.upsertMany(ages.map((age, i) => ({
+    chatJid: chat, keyId: `SHARED${i}`, fromMe: false, ts: now - age, type: "text", text: `${label} ${i}`,
+  })));
+  seed(home.svc, ANA, "HOME", [4000, 2000]);
+  seed(work.svc, DAN, "WORK", [4000, 1000]);
+  const bindings = [{ id: "home", wa: home.svc }, { id: "work", wa: work.svc }];
+  const hub = { ...asToolSource(home.svc), bindings: () => bindings,
+    defaultBinding: () => bindings[0], binding: (id) => bindings.find((b) => b.id === id),
+    record: (id) => ({ id, enabled: true }), records: () => bindings.map((b) => ({ id: b.id, enabled: true })) };
+  const { call } = schemaCheckedTools(hub, { allowWrite: false, legacyReads: true });
+  const first = await call("get_recent_messages", { all_accounts: true, limit: 1 });
+  assert.equal(first.structuredContent.conversations[0].account_id, "work");
+  const next = await call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 2 });
+  assert.deepEqual(next.structuredContent.conversations.map((c) => [c.account_id, c.messages.map((m) => m.text)]), [
+    ["work", ["WORK 0"]], ["home", ["HOME 1"]],
+  ]);
+  work.svc.db.identity.updateFields(ANA, { addTags: ["private"] });
+  const last = await call("get_recent_messages", { cursor: next.structuredContent.next_cursor, limit: 10 });
+  assert.equal(last.structuredContent.conversations[0].account_id, "home");
+  assert.equal(last.structuredContent.message_count, 1);
+  assert.doesNotMatch(allText(last), /HOME 0/);
+  assert.equal(last.structuredContent.conversations[0].messages[0].private, true);
+  assert.equal(last.structuredContent.next_cursor, null);
+});
+
+test("recent cursors never substitute a different message after an account database replacement", async (t) => {
+  const original = fixture(t), replacement = fixture(t);
+  const now = Date.now();
+  original.svc.db.messages.upsertMany([
+    { chatJid: ANA, keyId: "ORIGINAL", fromMe: false, ts: now - 2000, type: "text", text: "Original history" },
+    { chatJid: ANA, keyId: "NEWEST", fromMe: false, ts: now - 1000, type: "text", text: "First page" },
+  ]);
+  replacement.svc.db.messages.upsert({ chatJid: ANA, keyId: "UNRELATED", fromMe: false, ts: now - 2000, type: "text", text: "Different history" });
+  assert.equal(original.svc.db.messages.get(`false_${ANA}_ORIGINAL`).id, replacement.svc.db.messages.get(`false_${ANA}_UNRELATED`).id);
+  let current = original.svc;
+  const hub = { ...asToolSource(original.svc), bindings: () => [{ id: "default", wa: current }],
+    defaultBinding: () => ({ id: "default", wa: current }), binding: (id) => id === "default" ? { id, wa: current } : undefined };
+  const { call } = schemaCheckedTools(hub, { allowWrite: false, legacyReads: true });
+  const first = await call("get_recent_messages", { limit: 1 });
+  current = replacement.svc;
+  const next = await call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 1 });
+  assert.equal(next.structuredContent.message_count, 0);
+  assert.equal(next.structuredContent.next_cursor, null);
+  assert.doesNotMatch(allText(next), /Different history/);
+});
+
 test("private direct messages, group authors and their quoted words stay private in both compatibility summaries", async (t) => {
   const f = fixture(t);
   f.arrive(ANA, "SECRET-DIRECT poți trimite?");
@@ -190,11 +414,10 @@ test("compact reads remove empty media and deleted messages in both representati
   f.arrive(ANA, "🐾");
   const gone = f.arrive(ANA, "NU MAI EXISTA");
   // Old synced/imported history may contain tombstones; live revokes remove the row.
-  const getRecent = f.svc.getRecentMessages.bind(f.svc);
-  f.svc.getRecentMessages = async (...args) => {
-    const found = await getRecent(...args);
-    return { ...found, data: found.data.map((row) => ({ ...row, messages: row.messages.map((m) =>
-      m.message_id === gone ? { ...m, type: "deleted", text: "[deleted]" } : m) })) };
+  const viewOfStored = f.svc.views.viewOfStored.bind(f.svc.views);
+  f.svc.views.viewOfStored = (...args) => {
+    const m = viewOfStored(...args);
+    return m.message_id === gone ? { ...m, type: "deleted", text: "[deleted]" } : m;
   };
   const caption = f.arrive(ANA, { imageMessage: { mimetype: "image/jpeg", caption: "Lista pentru joi" } });
   const document = f.arrive(ANA, { documentMessage: { mimetype: "application/pdf", fileName: "lista.pdf" } });

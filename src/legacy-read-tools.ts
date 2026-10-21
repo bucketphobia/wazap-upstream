@@ -6,7 +6,7 @@ import { resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { privateRule } from "./catchup.js";
 import { compactRecent } from "./recent-compact.js";
 import { WazapError } from "./errors.js";
-import { MESSAGE_TYPES, type MessageView, type RecentConversation } from "./wa-types.js";
+import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs } from "./wa-types.js";
 import type { ToolArgs, ToolCtx, ToolDef, ToolResult } from "./tool-runtime.js";
 
 const account = {
@@ -17,8 +17,8 @@ const account = {
 const readHints = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const TTL = 15 * 60_000;
 type RecentRow = Omit<RecentConversation, "messages"> & { account_id: string; messages: RecentConversation["messages"] };
-type RecentPage = { owner: string; expires: number; rows: RecentRow[]; sync: string; hours: number; filter: string; compact: boolean; accounts: string[]; includeSystem: boolean; types?: typeof MESSAGE_TYPES[number][] };
-type Snapshot = Omit<RecentPage, "rows"> & { refs: Array<{ account_id: string; ids: string[] }> };
+type Snapshot = { owner: string; expires: number; sync: string; hours: number; filter: "all" | "unread" | "groups" | "individual"; compact: boolean; accounts: string[]; includeSystem: boolean; types?: typeof MESSAGE_TYPES[number][];
+  refs: Array<RecentMessageRefs & { account_id: string }> };
 const pages = new Map<string, Snapshot>();
 
 function result(payload: Record<string, unknown>, images: ToolResult["content"] = []): ToolResult {
@@ -39,54 +39,52 @@ function selected(args: ToolArgs, ctx: ToolCtx) {
 async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
   const owner = `${ctx.client}:${ctx.accountId}`;
   for (const [key, page] of pages) if (page.expires <= Date.now()) pages.delete(key);
-  let page: RecentPage;
+  let page: Snapshot;
   if (args.cursor !== undefined) {
     const saved = pages.get(args.cursor as string);
     if (!saved || saved.owner !== owner) throw new WazapError("CURSOR_EXPIRED", "This recent-message page expired.", "Start again without cursor");
-    // Keep only ids between pages. Re-read through today's privacy and retention rules.
-    const rows: RecentRow[] = [];
-    let sync = "done";
-    for (const ref of saved.refs) {
-      const binding = resolveToolAccount(ctx.hub, { account_id: ref.account_id }, { name: "get_status", write: false });
-      const found = await binding.wa.getRecentMessages(saved.hours, saved.filter as "all", saved.includeSystem, saved.types,
-        { private: await privateRule(ctx.hub, binding.id) });
-      if (found.sync !== "done") sync = found.sync;
-      const wanted = new Set(ref.ids);
-      for (const row of found.data) {
-        const messages = row.messages.filter((message) => wanted.has(message.message_id)).reverse();
-        if (messages.length) rows.push({ ...row, account_id: binding.id, messages });
-      }
-    }
-    rows.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
-    page = { ...saved, rows, sync };
+    page = { ...saved, sync: "done" };
   } else {
-    const rows: RecentRow[] = [];
+    const refs: Snapshot["refs"] = [];
     let sync = "done";
     const bindings = selected(args, ctx);
     for (const binding of bindings) {
-      const found = await binding.wa.getRecentMessages(args.hours as number, args.filter as "all", args.include_system as boolean,
-        args.types as typeof MESSAGE_TYPES[number][] | undefined, { private: await privateRule(ctx.hub, binding.id) });
+      const found = await binding.wa.recentMessageRefs({ hours: args.hours as number, filter: args.filter as "all", includeSystem: args.include_system as boolean,
+        types: args.types as typeof MESSAGE_TYPES[number][] | undefined });
       if (found.sync !== "done") sync = found.sync;
-      rows.push(...found.data.map((row) => ({ ...row, account_id: binding.id, messages: [...row.messages].reverse() })));
+      refs.push(...found.data.map((ref) => ({ ...ref, account_id: binding.id })));
     }
-    rows.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
-    page = { owner, expires: Date.now() + TTL, rows, sync, hours: args.hours as number, filter: args.filter as string, compact: args.compact === true, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
+    refs.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
+    page = { owner, expires: Date.now() + TTL, refs, sync, hours: args.hours as number, filter: args.filter as "all", compact: args.compact === true, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
   }
   let remaining = args.limit as number;
   const conversations: RecentRow[] = [];
-  const rest: RecentRow[] = [];
-  for (const row of page.rows) {
-    const taken = row.messages.slice(0, remaining);
-    if (taken.length) conversations.push({ ...row, messages: taken.reverse() });
-    remaining -= taken.length;
-    if (taken.length < row.messages.length) rest.push({ ...row, messages: row.messages.slice(taken.length) });
+  const rest: Snapshot["refs"] = [];
+  const bindings = new Map(page.accounts.map((id) => [id, resolveToolAccount(ctx.hub, { account_id: id }, { name: "get_status", write: false })]));
+  for (const { wa } of bindings.values()) {
+    const sync = wa.getStatus().sync;
+    if (sync !== "done") page.sync = sync;
+  }
+  const privacy = new Map<string, Awaited<ReturnType<typeof privateRule>>>();
+  for (const ref of page.refs) {
+    if (remaining === 0) { rest.push(ref); continue; }
+    const binding = bindings.get(ref.account_id)!;
+    if (!privacy.has(binding.id)) privacy.set(binding.id, await privateRule(ctx.hub, binding.id));
+    const found = await binding.wa.readRecentMessages(ref, remaining, { hours: page.hours, filter: page.filter, includeSystem: page.includeSystem,
+      types: page.types, private: privacy.get(binding.id) });
+    if (found.sync !== "done") page.sync = found.sync;
+    const row = found.data.conversation;
+    if (row !== null) {
+      conversations.push({ ...row, account_id: binding.id });
+      remaining -= row.messages.length;
+    }
+    if (found.data.remaining !== null) rest.push({ ...found.data.remaining, account_id: binding.id });
   }
   let next: string | null = null;
   if (rest.length) {
     if (pages.size >= 16) pages.delete(pages.keys().next().value!);
     next = randomUUID();
-    const { rows: _rows, ...meta } = page;
-    pages.set(next, { ...meta, refs: page.accounts.map((id) => ({ account_id: id, ids: rest.filter((row) => row.account_id === id).flatMap((row) => row.messages.map((m) => m.message_id)) })) });
+    pages.set(next, { ...page, refs: rest });
   }
   const images: ToolResult["content"] = [];
   if (args.include_previews === true) {

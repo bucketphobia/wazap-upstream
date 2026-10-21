@@ -432,6 +432,26 @@ export interface RecentConversation {
   messages: MessageView[];
 }
 
+/** Internal cursor references, newest first; never retain message bodies or names. */
+export interface RecentMessageRefs {
+  chat_id: string;
+  last_activity: string;
+  ids: Array<{ id: number; key: string; from_me: boolean }>;
+}
+
+export interface RecentReadOptions {
+  hours: number;
+  filter: Exclude<ChatFilter, "archived">;
+  includeSystem: boolean;
+  types?: MessageType[];
+  private?: PrivateRule;
+}
+
+export interface RecentMessagePage {
+  conversation: RecentConversation | null;
+  remaining: RecentMessageRefs | null;
+}
+
 /** What wait_for_messages is asked to watch for. */
 export interface WaitOptions {
   timeoutMs: number;
@@ -880,6 +900,8 @@ export interface WhatsAppApi {
     types?: MessageType[],
     opts?: { private?: PrivateRule }
   ): Promise<Synced<RecentConversation[]>>;
+  recentMessageRefs(options: RecentReadOptions): Promise<Synced<RecentMessageRefs[]>>;
+  readRecentMessages(ref: RecentMessageRefs, limit: number, options: RecentReadOptions): Promise<Synced<RecentMessagePage>>;
   searchMessages(
     query: string,
     chatId: string | undefined,

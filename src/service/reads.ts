@@ -42,6 +42,9 @@ import type {
   MessageView,
   PrivateRule,
   RecentConversation,
+  RecentMessagePage,
+  RecentMessageRefs,
+  RecentReadOptions,
   Synced,
   HandledResult,
   SearchAnswer,
@@ -220,33 +223,7 @@ export class AccountReads {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
       await this.host.waitForSync();
-      const cutoff = Date.now() - hours * 3_600_000;
-      const active = this.storage.db.identity.listChats().filter((chat) => chat.lastTs !== null && chat.lastTs >= cutoff);
-      await this.identity.learnLidPhones(active.map((chat) => chat.jid));
-      // A group's metadata is what names a sender the address book does not
-      // know; fetch it for the groups that spoke in the window, once each.
-      const activeGroups = active
-        .map((chat) => chat.jid)
-        .filter((jid) => isGroupId(jid) && !this.groups.groupCache.has(jid) && !this.groups.unreadableGroups.has(jid));
-      await Promise.all(activeGroups.slice(0, RECENT_GROUP_META_MAX).map((jid) => this.groups.learnParticipants(jid)));
-
-      const db = this.storage.db;
-      const wanted = types === undefined || types.length === 0 ? null : new Set<string>(types);
-      const chosen: Array<{ jid: string; stored: StoredMessage[] }> = [];
-      for (const chat of active) {
-        if (chat.kind === "status" || isNoiseJid(chat.jid) || !this.views.matchesChatFilter(chat, filter)) continue;
-        // Each chat's newest messages in the window, at most as many as main's per-chat ring held.
-        const newestFirst: StoredMessage[] = [];
-        for (let before: number | undefined; newestFirst.length < RECENT_PER_CHAT_MAX; ) {
-          const limit = Math.min(500, RECENT_PER_CHAT_MAX - newestFirst.length);
-          const page = db.messages.chatPage(chat.jid, { limit, since: cutoff, ...(before === undefined ? {} : { before }) });
-          newestFirst.push(...page.items);
-          if (page.nextBefore === null) break;
-          before = page.nextBefore;
-        }
-        const stored = newestFirst.reverse().filter((message) => wanted === null || wanted.has(message.type));
-        if (stored.length > 0) chosen.push({ jid: chat.jid, stored });
-      }
+      const chosen = await this.recentStored(hours, filter, types);
       // One read of every chosen message's reactions, votes and receipts, and each name once.
       const lookups = this.views.viewLookups(chosen.flatMap((entry) => entry.stored));
       const conversations: RecentConversation[] = [];
@@ -271,6 +248,98 @@ export class AccountReads {
       conversations.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
       return this.host.synced(conversations);
     });
+  }
+
+  /** Select the cursor's identities without constructing every message view. */
+  recentMessageRefs(options: RecentReadOptions): Promise<Synced<RecentMessageRefs[]>> {
+    return this.host.guarded(async () => {
+      this.host.ensureConnected();
+      await this.host.waitForSync();
+      const chosen = await this.recentStored(options.hours, options.filter, options.types);
+      const refs: RecentMessageRefs[] = [];
+      for (const { jid, stored } of chosen) {
+        const visible = stored.filter((message) => options.includeSystem || message.type !== "system");
+        if (visible.length) refs.push({ chat_id: jid, last_activity: isoWithOffset(visible.at(-1)!.ts),
+          ids: visible.map((message) => ({ id: message.id, key: message.keyId, from_me: message.fromMe })).reverse() });
+      }
+      refs.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
+      return this.host.synced(refs);
+    });
+  }
+
+  /** Revalidate only the requested page, filling gaps left by deletion, expiry or changed filters. */
+  readRecentMessages(ref: RecentMessageRefs, limit: number, options: RecentReadOptions): Promise<Synced<RecentMessagePage>> {
+    return this.host.guarded(async () => {
+      this.host.ensureConnected();
+      await this.host.waitForSync();
+      const db = this.storage.db;
+      const jid = this.identity.resolveId(ref.chat_id);
+      const chat = db.identity.chat(jid);
+      const empty = (): Synced<RecentMessagePage> => this.host.synced({ conversation: null, remaining: null });
+      if (chat === null || chat.kind === "status" || isNoiseJid(jid) || !this.views.matchesChatFilter(chat, options.filter)) return empty();
+      const cutoff = Date.now() - options.hours * 3_600_000;
+      const wanted = options.types?.length ? new Set<string>(options.types) : null;
+      const people = this.identity.privateScope(options.private ?? { others: [] });
+      const messages: MessageView[] = [];
+      let offset = 0;
+      while (offset < ref.ids.length && messages.length < limit) {
+        const budget = limit - messages.length;
+        // Skip long runs of removed messages in batches, without rendering or
+        // consuming visible messages belonging to the following page.
+        const ids = ref.ids.slice(offset, offset + Math.min(200, Math.max(32, budget)));
+        const found = new Map(db.messages.byIds(ids.map((ref) => ref.id)).map((message) => [message.id, message]));
+        const stored = ids.flatMap((ref) => {
+          const message = found.get(ref.id);
+          return message !== undefined && message.keyId === ref.key && message.fromMe === ref.from_me && message.chatJid === jid && message.ts >= cutoff && (wanted === null || wanted.has(message.type)) && (options.includeSystem || message.type !== "system") ? [message] : [];
+        }).slice(0, budget);
+        offset += stored.length === budget ? ids.findIndex((ref) => ref.id === stored.at(-1)!.id) + 1 : ids.length;
+        for (const view of this.views.viewsOfStored(stored)) {
+          if (!options.includeSystem && view.type === "system") continue;
+          messages.push(people === null ? view : people.names(jid) || people.names(view.sender.id) ? withoutWords(view) : withoutPrivateQuote(view, people));
+        }
+      }
+      const note = this.identity.noteFor(jid);
+      return this.host.synced({
+        conversation: messages.length === 0 ? null : {
+          chat_id: jid, chat_name: this.identity.displayName(jid),
+          ...(note && !people?.names(jid) ? { note } : {}),
+          type: isGroupId(jid) ? "group" : "individual",
+          last_activity: ref.last_activity, messages: messages.reverse(),
+        },
+        remaining: offset < ref.ids.length ? { ...ref, ids: ref.ids.slice(offset) } : null,
+      });
+    });
+  }
+
+  private async recentStored(hours: number, filter: Exclude<ChatFilter, "archived">, types?: MessageType[]): Promise<Array<{ jid: string; stored: StoredMessage[] }>> {
+    const cutoff = Date.now() - hours * 3_600_000;
+    const active = this.storage.db.identity.listChats().filter((chat) => chat.lastTs !== null && chat.lastTs >= cutoff);
+    await this.identity.learnLidPhones(active.map((chat) => chat.jid));
+    // A group's metadata is what names a sender the address book does not
+    // know; fetch it for the groups that spoke in the window, once each.
+    const activeGroups = active
+      .map((chat) => chat.jid)
+      .filter((jid) => isGroupId(jid) && !this.groups.groupCache.has(jid) && !this.groups.unreadableGroups.has(jid));
+    await Promise.all(activeGroups.slice(0, RECENT_GROUP_META_MAX).map((jid) => this.groups.learnParticipants(jid)));
+
+    const db = this.storage.db;
+    const wanted = types === undefined || types.length === 0 ? null : new Set<string>(types);
+    const chosen: Array<{ jid: string; stored: StoredMessage[] }> = [];
+    for (const chat of active) {
+      if (chat.kind === "status" || isNoiseJid(chat.jid) || !this.views.matchesChatFilter(chat, filter)) continue;
+      // Each chat's newest messages in the window, at most as many as main's per-chat ring held.
+      const newestFirst: StoredMessage[] = [];
+      for (let before: number | undefined; newestFirst.length < RECENT_PER_CHAT_MAX; ) {
+        const limit = Math.min(500, RECENT_PER_CHAT_MAX - newestFirst.length);
+        const page = db.messages.chatPage(chat.jid, { limit, since: cutoff, ...(before === undefined ? {} : { before }) });
+        newestFirst.push(...page.items);
+        if (page.nextBefore === null) break;
+        before = page.nextBefore;
+      }
+      const stored = newestFirst.reverse().filter((message) => wanted === null || wanted.has(message.type));
+      if (stored.length > 0) chosen.push({ jid: chat.jid, stored });
+    }
+    return chosen;
   }
 
   searchMessages(
