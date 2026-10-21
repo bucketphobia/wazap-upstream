@@ -1,0 +1,136 @@
+name: Finish a published release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag already published to npm
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - id: verify
+        name: Verify the immutable tag matches the published npm package
+        run: |
+          node --input-type=module - <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const tag = process.env.RELEASE_TAG;
+          assert.match(tag, /^v[0-9]+\.[0-9]+\.[0-9]+$/);
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.equal(tag, `v${pkg.version}`);
+          assert.equal(pkg.name, 'wazap-mcp');
+          const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          const response = await fetch(`https://registry.npmjs.org/wazap-mcp/${pkg.version}`);
+          assert.equal(response.status, 200);
+          const published = await response.json();
+          assert.equal(published.gitHead, sha);
+          assert.equal(published.mcpName, pkg.mcpName);
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+          JS
+
+  registry:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Validate and publish only to MCP Registry
+        run: |
+          node scripts/validate-server-json.mjs
+          curl -fsSL --retry 3 -o mcp-publisher.tar.gz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          for attempt in 1 2 3; do
+            if ./mcp-publisher login github-oidc && ./mcp-publisher publish; then exit 0; fi
+            sleep 15
+          done
+          exit 1
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.verify.outputs.sha }}
+
+  release:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run bundle:mcpb
+      - name: Create GitHub Release from the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          node scripts/changelog-notes.mjs "$version" > "$RUNNER_TEMP/notes.md"
+          gh release create "$RELEASE_TAG" "dist-bundle/wazap-$version.mcpb" \
+            --verify-tag --title "wazap $version" --notes-file "$RUNNER_TEMP/notes.md"
