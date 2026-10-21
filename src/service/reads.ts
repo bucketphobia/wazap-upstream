@@ -287,7 +287,7 @@ export class AccountReads {
         // Skip long runs of removed messages in batches, without rendering or
         // consuming visible messages belonging to the following page.
         const ids = ref.ids.slice(offset, offset + Math.min(200, Math.max(32, budget)));
-        const found = new Map(db.messages.byIds(ids.map((ref) => ref.id)).map((message) => [message.id, message]));
+        const found = new Map(db.messages.byIds(ids.map((ref) => ref.id), { chatJid: jid }).map((message) => [message.id, message]));
         const stored = ids.flatMap((ref) => {
           const message = found.get(ref.id);
           return message !== undefined && message.keyId === ref.key && message.fromMe === ref.from_me && message.chatJid === jid && message.ts >= cutoff && (wanted === null || wanted.has(message.type)) && (options.includeSystem || message.type !== "system") ? [message] : [];

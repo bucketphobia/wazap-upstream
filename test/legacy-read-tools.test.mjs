@@ -323,9 +323,98 @@ test("recent cursors never substitute a different message after an account datab
   const first = await call("get_recent_messages", { limit: 1 });
   current = replacement.svc;
   const next = await call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 1 });
-  assert.equal(next.structuredContent.message_count, 0);
-  assert.equal(next.structuredContent.next_cursor, null);
+  assert.equal(textError(next).error, "CURSOR_EXPIRED");
   assert.doesNotMatch(allText(next), /Different history/);
+});
+
+test("adversarial: a recent cursor cannot cross to a replacement service with matching message keys", async (t) => {
+  const original = fixture(t), replacement = fixture(t);
+  const now = Date.now();
+  for (const [f, text] of [[original, "Original account"], [replacement, "REPLACEMENT-CONTENT"]]) {
+    f.svc.db.messages.upsertMany([
+      { chatJid: ANA, keyId: "SAME", fromMe: false, ts: now - 2000, type: "text", text },
+      { chatJid: ANA, keyId: "TOP", fromMe: false, ts: now - 1000, type: "text", text: "Top" },
+    ]);
+  }
+  let current = original.svc;
+  const hub = { ...asToolSource(original.svc), bindings: () => [{ id: "default", wa: current }],
+    defaultBinding: () => ({ id: "default", wa: current }), binding: (id) => id === "default" ? { id, wa: current } : undefined };
+  const { call } = schemaCheckedTools(hub, { allowWrite: false, legacyReads: true });
+  const first = await call("get_recent_messages", { limit: 1 });
+  current = replacement.svc;
+  const next = await call("get_recent_messages", { cursor: first.structuredContent.next_cursor });
+  assert.doesNotMatch(allText(next), /REPLACEMENT-CONTENT/);
+  assert.equal(textError(next).error, "CURSOR_EXPIRED");
+});
+
+test("adversarial: changing the linked owner invalidates a cursor on the same service", async (t) => {
+  const f = fixture(t);
+  f.arrive(ANA, "Older");
+  f.arrive(ANA, "Newest");
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  f.svc.account = { id: DAN, number: DAN.split("@")[0], name: "Different owner" };
+  assert.equal(textError(await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor })).error, "CURSOR_EXPIRED");
+});
+
+test("adversarial: an owner change while a preview awaits cannot return the old page", async (t) => {
+  const f = fixture(t);
+  f.arrive(ANA, "Older page body");
+  f.arrive(ANA, "Newest");
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  f.svc.previews = async () => {
+    f.svc.account = { id: DAN, number: DAN.split("@")[0], name: "New linked owner" };
+    return [];
+  };
+  const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor, include_previews: true });
+  assert.equal(textError(next).error, "CURSOR_EXPIRED");
+  assert.doesNotMatch(allText(next), /Older page body/);
+});
+
+test("adversarial: an in-progress address fold cannot resurrect a retracted twin through a recent cursor", async (t) => {
+  const f = fixture(t);
+  const lid = "900000000000002@lid", now = Date.now();
+  f.svc.db.messages.upsertMany([
+    { chatJid: lid, keyId: "TWIN", fromMe: false, ts: now - 3000, type: "text", text: "RETRACTED-LID-CONTENT" },
+    { chatJid: ANA, keyId: "TWIN", fromMe: false, ts: now - 3000, type: "text", text: "Phone twin" },
+    { chatJid: DAN, keyId: "TOP", fromMe: false, ts: now - 1000, type: "text", text: "First page" },
+  ]);
+  f.svc.db.messages.delete(`false_${ANA}_TWIN`);
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  assert.ok(first.structuredContent.next_cursor);
+  let release;
+  const blocked = f.svc.db.connection.bulk(() => new Promise((resolve) => { release = resolve; }));
+  // Let the bulk blocker start, then pause the asynchronous row movement.
+  await Promise.resolve();
+  f.svc.identity.lids.learn(lid, ANA);
+  const folding = f.svc.db.learnLidPhone(lid, ANA);
+  try {
+    assert.equal(f.svc.db.messages.get(`false_${ANA}_TWIN`), null, "the canonical lookup already respects the retraction");
+    const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor });
+    assert.doesNotMatch(allText(next), /RETRACTED-LID-CONTENT/);
+    assert.equal(next.structuredContent.message_count, 0);
+  } finally { release(); await blocked; await folding; }
+});
+
+test("adversarial: visible twins are returned only once while an address fold is paused", async (t) => {
+  const f = fixture(t);
+  const lid = "900000000000002@lid", now = Date.now();
+  f.svc.db.messages.upsertMany([
+    { chatJid: lid, keyId: "TWIN", fromMe: false, ts: now - 3000, type: "text", text: "Lid copy" },
+    { chatJid: ANA, keyId: "TWIN", fromMe: false, ts: now - 3000, type: "text", text: "Phone copy" },
+    { chatJid: DAN, keyId: "TOP", fromMe: false, ts: now - 1000, type: "text", text: "First page" },
+  ]);
+  const first = await f.call("get_recent_messages", { limit: 1 });
+  let release;
+  const blocked = f.svc.db.connection.bulk(() => new Promise((resolve) => { release = resolve; }));
+  await Promise.resolve();
+  f.svc.identity.lids.learn(lid, ANA);
+  const folding = f.svc.db.learnLidPhone(lid, ANA);
+  try {
+    const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor });
+    assert.equal(next.structuredContent.message_count, 1);
+    assert.equal(next.structuredContent.conversations[0].messages[0].text, "Phone copy");
+    assert.equal(next.structuredContent.next_cursor, null);
+  } finally { release(); await blocked; await folding; }
 });
 
 test("private direct messages, group authors and their quoted words stay private in both compatibility summaries", async (t) => {

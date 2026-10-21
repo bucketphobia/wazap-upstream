@@ -6,7 +6,7 @@ import { resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { privateRule } from "./catchup.js";
 import { compactRecent } from "./recent-compact.js";
 import { WazapError } from "./errors.js";
-import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs } from "./wa-types.js";
+import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs, type WhatsAppApi } from "./wa-types.js";
 import type { ToolArgs, ToolCtx, ToolDef, ToolResult } from "./tool-runtime.js";
 
 const account = {
@@ -18,8 +18,16 @@ const readHints = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 const TTL = 15 * 60_000;
 type RecentRow = Omit<RecentConversation, "messages"> & { account_id: string; messages: RecentConversation["messages"] };
 type Snapshot = { owner: string; expires: number; sync: string; hours: number; filter: "all" | "unread" | "groups" | "individual"; compact: boolean; accounts: string[]; includeSystem: boolean; types?: typeof MESSAGE_TYPES[number][];
+  sources: Map<string, { instance: symbol; owner: string | null }>;
   refs: Array<RecentMessageRefs & { account_id: string }> };
 const pages = new Map<string, Snapshot>();
+const sourceIds = new WeakMap<WhatsAppApi, symbol>();
+
+function sourceStamp(wa: WhatsAppApi) {
+  let instance = sourceIds.get(wa);
+  if (instance === undefined) { instance = Symbol(); sourceIds.set(wa, instance); }
+  return { instance, owner: wa.getStatus().account?.id ?? null };
+}
 
 function result(payload: Record<string, unknown>, images: ToolResult["content"] = []): ToolResult {
   return { content: [{ type: "text", text: JSON.stringify(payload) }, ...images], structuredContent: payload };
@@ -48,6 +56,7 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
     const refs: Snapshot["refs"] = [];
     let sync = "done";
     const bindings = selected(args, ctx);
+    const sources = new Map(bindings.map((binding) => [binding.id, sourceStamp(binding.wa)]));
     for (const binding of bindings) {
       const found = await binding.wa.recentMessageRefs({ hours: args.hours as number, filter: args.filter as "all", includeSystem: args.include_system as boolean,
         types: args.types as typeof MESSAGE_TYPES[number][] | undefined });
@@ -55,16 +64,24 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       refs.push(...found.data.map((ref) => ({ ...ref, account_id: binding.id })));
     }
     refs.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
-    page = { owner, expires: Date.now() + TTL, refs, sync, hours: args.hours as number, filter: args.filter as "all", compact: args.compact === true, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
+    page = { owner, expires: Date.now() + TTL, refs, sources, sync, hours: args.hours as number, filter: args.filter as "all", compact: args.compact === true, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
   }
   let remaining = args.limit as number;
   const conversations: RecentRow[] = [];
   const rest: Snapshot["refs"] = [];
-  const bindings = new Map(page.accounts.map((id) => [id, resolveToolAccount(ctx.hub, { account_id: id }, { name: "get_status", write: false })]));
-  for (const { wa } of bindings.values()) {
-    const sync = wa.getStatus().sync;
-    if (sync !== "done") page.sync = sync;
-  }
+  const checkSources = () => {
+    const bindings = new Map(page.accounts.map((id) => [id, resolveToolAccount(ctx.hub, { account_id: id }, { name: "get_status", write: false })]));
+    for (const { id, wa } of bindings.values()) {
+      const expected = page.sources.get(id)!, current = sourceStamp(wa);
+      if (expected.instance !== current.instance || expected.owner !== current.owner) {
+        throw new WazapError("CURSOR_EXPIRED", "The account behind this recent-message page changed.", "Start again without cursor");
+      }
+      const sync = wa.getStatus().sync;
+      if (sync !== "done") page.sync = sync;
+    }
+    return bindings;
+  };
+  const bindings = checkSources();
   const privacy = new Map<string, Awaited<ReturnType<typeof privateRule>>>();
   for (const ref of page.refs) {
     if (remaining === 0) { rest.push(ref); continue; }
@@ -94,6 +111,8 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       for (const preview of await wa.previews(ids, Math.max(0, 12 - images.length))) images.push({ type: "image", data: preview.base64, mimeType: preview.mime });
     }
   }
+  // Re-link or roster replacement may happen while a read or preview awaits.
+  checkSources();
   // Compact must reach structured-only clients too. The cursor still budgets original messages.
   const rendered = page.compact ? conversations.map((row) => ({ ...row, ...compactRecent(row.messages) })) : conversations;
   const payload = { hours: page.hours, filter: page.filter, conversation_count: conversations.length,

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.5
+
+- **Recent-message pages render only the requested messages.** The first page
+  selects references before building message views; later pages read those
+  references directly in batches instead of rescanning the history window.
+  Compact output, source ids, ordering, filters and privacy rules are retained.
+- **Cursors stop when their account changes.** Replacing an account's service
+  or linked owner invalidates its old cursors, including changes during reads
+  or preview fetching. Message keys and directions are checked alongside ids.
+- **Address folds respect retractions between pages.** A phone/lid twin cannot
+  restore a deleted message while its rows are still merging; visible twins
+  appear once. Deleted and expired gaps are filled from the remaining snapshot.
+- **Sender lookups and repeated meaning searches do less work.** Exact phone
+  lookups read contacts by key, and repeated queries reuse up to 32 embeddings
+  within the account service. The existing search filters remain in force.
+- **A reproducible recent-page benchmark is included.** It compares timings,
+  rendered-message counts and hashes of the returned conversations on synthetic
+  data, without opening a real account.
+
 ## 1.4.4
 
 - **Compact remote summaries now remove noise in both answer formats.** Empty

@@ -1231,14 +1231,26 @@ export class Messages {
   }
 
   /** Visible messages by id, newest first. */
-  byIds(ids: readonly number[]): StoredMessage[] {
+  byIds(ids: readonly number[], options: { chatJid?: string } = {}): StoredMessage[] {
     if (ids.length === 0) return [];
+    let scope = { sql: "", params: [] as Array<number | string> };
+    let once = { sql: "", params: [] as Array<number | string> };
+    if (options.chatJid !== undefined) {
+      const chat = this.identity.chat(options.chatJid);
+      if (chat === null) return [];
+      const family = this.identity.chatIdsOf(chat);
+      const inChat = chatCondition(family);
+      scope = { sql: `AND ${inChat.sql}`, params: inChat.params };
+      once = foldTwinCondition(family, chat.id);
+    }
     return this.c
       .all<MessageRow>(
         `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
-         WHERE m.id IN (SELECT value FROM json_each(?)) AND ${VISIBLE} ORDER BY m.id DESC`,
+         WHERE m.id IN (SELECT value FROM json_each(?)) AND ${VISIBLE} ${scope.sql} ${once.sql} ORDER BY m.id DESC`,
         idsJson(ids),
-        this.c.now()
+        this.c.now(),
+        ...scope.params,
+        ...once.params
       )
       .map(messageFromRow);
   }
