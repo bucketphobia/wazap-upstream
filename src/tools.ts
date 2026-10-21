@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { legacyReadTools } from "./legacy-read-tools.js";
 import type { AccountSource } from "./account-hub.js";
 import { renderGetStatus } from "./account-resolve.js";
 import { draftContextEnabled } from "./accounts.js";
@@ -165,6 +166,7 @@ const DELETE_OUTPUT = { message_id: z.string(), for_everyone: z.boolean(), accou
 
 const SEARCH_OUTPUT = {
   query: z.string(),
+  next_before: z.string().nullable().optional(),
   mode: z.enum(["hybrid", "words", "keyword_fallback"]).describe("keyword_fallback: meaning search could not run, see recall_unavailable"),
   from_resolved: z.string().optional(),
   count: z.number(),
@@ -750,6 +752,7 @@ const TOOLS: readonly ToolDef[] = [
     description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, URL). since, until, from narrow it; full_text: whole texts; coverage, freshness: how much was searched.`,
     schema: {
       query: z.string().min(1),
+      before: messageId.optional().describe("Older lexical matches; requires match words"),
       match: z.enum(["hybrid", "words"]).default("hybrid").describe('"words": only messages holding the words'),
       chat_id: chatId.optional(),
       limit: z.number().int().min(1).max(50).default(20),
@@ -760,13 +763,14 @@ const TOOLS: readonly ToolDef[] = [
     },
     outputSchema: SEARCH_OUTPUT,
     write: false,
-    handler: async ({ query, match, chat_id, limit, since, until, from, full_text }, ctx) => {
+    handler: async ({ query, match, chat_id, limit, since, until, from, full_text, before }, ctx) => {
       const { wa } = ctx;
+      if (before !== undefined && match !== "words") throw new WazapError("INVALID_ID", "A message cursor requires match words.");
       const resolvedFrom = await resolveSenderFilter(wa, from);
       const sinceMs = parseMoment(since, "since");
       const untilMs = parseMoment(until, "until", true);
       // Without a chat, someone tagged #private is left out unless from names them (src/private-contacts.ts).
-      const filters = { sinceMs, untilMs, from: resolvedFrom, ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}) };
+      const filters = { sinceMs, untilMs, from: resolvedFrom, before, ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}) };
       const scope = [
         chat_id ? `in ${chat_id}` : null,
         from ? `from ${from}` : null,
@@ -845,6 +849,7 @@ const TOOLS: readonly ToolDef[] = [
         synced(found, {
           ...echo,
           mode: unavailable === null ? "words" : "keyword_fallback",
+          next_before: messages.length === limit ? messages.at(-1)!.message_id : null,
           ...(unavailable === null
             ? {}
             : { recall_unavailable: { code: unavailable.code, message: unavailable.message, ...(unavailable.fix ? { fix: unavailable.fix } : {}) } }),
@@ -1371,7 +1376,11 @@ const TOOLS: readonly ToolDef[] = [
 
 export const TOOL_NAMES: readonly string[] = TOOLS.map((t) => t.name);
 
-export const registerTools = createToolRegistrar(TOOLS);
+// A single registrar owns every session's shared work and rate budgets.
+export const registerTools = createToolRegistrar([
+  ...TOOLS,
+  ...legacyReadTools(TOOLS).map((definition) => ({ ...definition, legacyRead: true })),
+]);
 
 function renderChats(chats: ChatSummary[], filter: string): string {
   if (chats.length === 0) return `No chats found (filter: ${filter}).`;

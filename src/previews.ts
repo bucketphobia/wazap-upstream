@@ -28,6 +28,17 @@ export interface PreviewImage {
   height: number;
 }
 
+/** Tiny WhatsApp thumbnails identify a photo but cannot show a document's words. */
+export function tinyThumbnail(input: Buffer): boolean {
+  try {
+    const image = jpeg.decode(input, { useTArray: true, maxResolutionInMP: 1, maxMemoryUsageInMB: 16 });
+    return Math.max(image.width, image.height) < 160;
+  } catch {
+    // Leave unrecognized previews alone; do not trigger a download on malformed metadata.
+    return false;
+  }
+}
+
 /** Decode a JPEG, shrink it with a box filter, encode it small. Throws on a file that is not a JPEG. */
 export function makePreview(
   input: Buffer,

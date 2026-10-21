@@ -58,6 +58,8 @@ export interface ToolHints {
 }
 
 export interface ToolDef {
+  /** Only listed for remote connectors that need the cached read catalogue. */
+  legacyRead?: boolean;
   name: string;
   title: string;
   description: string;
@@ -73,6 +75,8 @@ export interface ToolDef {
 }
 
 export interface RegisterOpts {
+  /** Remote connectors may retain the pre-1.0 read catalogue until refreshed. */
+  legacyReads?: boolean;
   allowWrite: boolean;
   /**
    * The credential's right to change local state (see ToolCtx.allowLocalEdits).
@@ -154,6 +158,7 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
     };
     for (const def of defs) {
       if (def.write && !opts.allowWrite) continue;
+      if (def.legacyRead && !opts.legacyReads) continue;
       const own = buckets.get(def.name);
       server.registerTool(
         def.name,

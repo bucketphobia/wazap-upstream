@@ -1002,9 +1002,10 @@ export class WhatsAppService implements WhatsAppApi {
     hours: number,
     filter: Exclude<ChatFilter, "archived">,
     includeSystem = false,
-    types?: MessageType[]
+    types?: MessageType[],
+    opts: { private?: PrivateRule } = {}
   ): Promise<Synced<RecentConversation[]>> {
-    return this.reads.getRecentMessages(hours, filter, includeSystem, types);
+    return this.reads.getRecentMessages(hours, filter, includeSystem, types, opts);
   }
 
   searchMessages(
@@ -1036,8 +1037,8 @@ export class WhatsAppService implements WhatsAppApi {
     return this.reads.getStories(hours, opts);
   }
 
-  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number): Promise<Synced<UnansweredChat[]>> {
-    return this.reads.getUnanswered(minAgeHours, maxAgeHours, limit);
+  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<UnansweredChat[]>> {
+    return this.reads.getUnanswered(minAgeHours, maxAgeHours, limit, opts);
   }
 
   catchUpScan(request: CatchupScanRequest): Promise<CatchupScan> {

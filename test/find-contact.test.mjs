@@ -93,7 +93,7 @@ const MORE_PEOPLE = {
   },
 };
 
-test("find_contact is a read tool in every session, with an output schema, and the only way to look people up", async () => {
+test("find_contact is the current lookup in every session, while remote clients retain the read-only contact adapter", async () => {
   const { s } = await world();
   const readOnly = await mcpSession(ready.mcp_url, ready.tokens.read);
   for (const session of [s, readOnly]) {
@@ -102,7 +102,9 @@ test("find_contact is a read tool in every session, with an output schema, and t
     assert.equal(tool.annotations.readOnlyHint, true);
     assert.deepEqual(tool.outputSchema.required.sort(), ["query", "status"]);
     assert.ok(tool.description.length <= 300, `${tool.description.length} characters`);
-    assert.ok(!session.tools.some((entry) => ["search_contacts", "get_contact", "sync_contacts"].includes(entry.name)), "the tools it replaced are gone");
+    assert.ok(!session.tools.some((entry) => ["get_contact", "sync_contacts"].includes(entry.name)), "other retired contact tools stay gone");
+    const legacy = session.tools.find((entry) => entry.name === "search_contacts");
+    assert.equal(legacy.annotations.readOnlyHint, true, "cached remote catalogues retain contact candidates");
   }
   await s.close();
   await readOnly.close();

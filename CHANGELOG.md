@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.3
+
+### Fixed
+
+- **Cached remote connectors can read again.** HTTP clients whose tool
+  catalogue predates 1.0 retain adapters for message and contact searches,
+  recent conversations, unanswered candidates, media downloads and audio
+  transcription. Current local clients keep the compact tool catalogue.
+- **Compatibility reads keep current protections.** Private contacts and
+  quotes stay private, deleted messages are rechecked between recent-message
+  pages, remote downloads cannot choose host directories, and every session
+  shares the same process-wide work budget.
+- **Account selection is respected by cached searches.** Results name their
+  source account, keep coverage and freshness information, and obey
+  `account_ids` and `all_accounts` instead of searching only the default.
+- **Lexical searches can page to older matches.** `search` with
+  `match: "words"` and the compatibility message search accept `before` and
+  return `next_before` for one account.
+- **Tiny photo thumbnails get a clearer preview.** When the original is
+  available, a requested preview is upgraded and cached. An expired original
+  leaves the shipped thumbnail available.
+
 ## 1.4.2
 
 Includes 1.4.1, which was never published.

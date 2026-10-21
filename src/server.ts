@@ -55,6 +55,7 @@ function buildMcpServer(
     // #private tag — and a write credential on a read-only server still can.
     allowLocalEdits: allowWrite,
     allowLocalFiles,
+    legacyReads: !allowLocalFiles,
     client,
     ...(draftIdentity === undefined ? {} : { draftIdentity }),
     ...(config.maxInFlight === undefined ? {} : { maxInFlight: config.maxInFlight }),

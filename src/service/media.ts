@@ -12,7 +12,7 @@ import { isAbsolute, join } from "node:path";
 import { WazapError } from "../errors.js";
 import { logError } from "../logger.js";
 import { mediaFilename } from "../outgoing-media.js";
-import { makePreview, videoFrame } from "../previews.js";
+import { makePreview, tinyThumbnail, videoFrame } from "../previews.js";
 import { mediaInfo, thumbnailOf } from "../messages.js";
 import { DIR_MODE, FILE_MODE } from "./util.js";
 import type { ConnectionStatus, MediaResult, Preview } from "../wa-types.js";
@@ -67,8 +67,8 @@ export class AccountMedia {
 
   /**
    * Small JPEGs of these messages' photos, in the order given, at most `max`.
-   * The preview WhatsApp shipped comes first, then one made earlier, and only
-   * then is the photo downloaded and shrunk here, once, within a time budget so
+   * A preview made earlier comes first. A tiny shipped thumbnail is upgraded
+   * from the original, once, within a time budget so
    * the call returns with what it has. A photo that is not a JPEG, has expired
    * or is too big simply has no preview.
    */
@@ -82,34 +82,34 @@ export class AccountMedia {
         const raw = message === null ? null : this.views.rawOf(message);
         if (!raw) continue;
         const shipped = thumbnailOf(raw);
-        if (shipped) {
-          out.push({ message_id: sid, ...shipped });
-          continue;
-        }
         const cached = await this.readPreview(sid);
         if (!this.host.hasMessage(sid)) continue;
         if (cached) {
           out.push({ message_id: sid, mime: "image/jpeg", base64: cached.toString("base64") });
           continue;
         }
-        const info = mediaInfo(raw);
-        if (!info) continue;
-        const photo = /^image\/jpe?g\b/i.test(info.mime) && (info.size ?? 0) <= PREVIEW_SOURCE_MAX_BYTES;
-        const video = /^video\//i.test(info.mime) && (info.size ?? 0) <= PREVIEW_VIDEO_MAX_BYTES;
-        if (!photo && !video) continue;
-        if (Date.now() - started > PREVIEW_BUDGET_MS) continue;
-        const sock = this.host.sock();
-        if (!sock || this.host.status() !== "connected") continue;
-        try {
-          const buffer = (await this.host.keptMedia(sid, raw)) ?? (await this.host.mediaBuffer(sock, sid, raw));
-          const made = photo ? Buffer.from(makePreview(buffer).base64, "base64") : await videoFrame(buffer);
-          if (!made || !this.host.hasMessage(sid)) continue;
-          await this.writePreview(sid, made);
-          if (!this.host.hasMessage(sid)) continue;
-          out.push({ message_id: sid, mime: "image/jpeg", base64: made.toString("base64") });
-        } catch {
-          // Expired on WhatsApp's side, or not decodable: this one goes without.
+        if (shipped && !tinyThumbnail(Buffer.from(shipped.base64, "base64"))) {
+          out.push({ message_id: sid, ...shipped });
+          continue;
         }
+        let chosen = shipped;
+        const info = mediaInfo(raw);
+        const photo = info !== undefined && /^image\/jpe?g\b/i.test(info.mime) && (info.size ?? 0) <= PREVIEW_SOURCE_MAX_BYTES;
+        const video = info !== undefined && /^video\//i.test(info.mime) && (info.size ?? 0) <= PREVIEW_VIDEO_MAX_BYTES;
+        const sock = this.host.sock();
+        if ((photo || video) && Date.now() - started <= PREVIEW_BUDGET_MS && sock && this.host.status() === "connected") {
+          try {
+            const buffer = (await this.host.keptMedia(sid, raw)) ?? (await this.host.mediaBuffer(sock, sid, raw));
+            const made = photo ? Buffer.from(makePreview(buffer).base64, "base64") : await videoFrame(buffer);
+            if (made && this.host.hasMessage(sid)) {
+              await this.writePreview(sid, made);
+              chosen = { mime: "image/jpeg", base64: made.toString("base64") };
+            }
+          } catch {
+            // Expired or unreadable original: keep the shipped thumbnail when available.
+          }
+        }
+        if (chosen && this.host.hasMessage(sid)) out.push({ message_id: sid, ...chosen });
       }
       return out.filter((preview) => this.host.hasMessage(preview.message_id));
     });

@@ -461,3 +461,20 @@ trace, so an agent can decide whether to retry, ask the user, or stop.
 | `ACCOUNT_NOT_FOUND` | No account with that id. Run `wazap account add`; `get_status` lists the ids. |
 | `ACCOUNT_DISABLED` | That account is disabled. Run `wazap account enable <id>`; a running server picks it up. |
 | `TIMEOUT` / `WHATSAPP_ERROR` | WhatsApp did not answer, or rejected the operation. |
+
+### Cached remote connectors
+
+Remote HTTP sessions also register read-only compatibility adapters for client
+catalogues saved before 1.0. These preserve message search, contact candidates,
+recent conversation pages, unanswered candidates and media reads. Local clients
+keep the current compact catalogue. Refresh a remote client's tools to use the
+current names and workflows described above.
+
+Compatibility reads use the same account, privacy and filesystem restrictions.
+Recent pages are bounded by message count; their opaque cursors last 15 minutes
+and recheck current message retention and private tags. A candidate for a reply
+is not proof of an obligation, since a call outside WhatsApp may have resolved it.
+
+Photo previews upgrade tiny shipped thumbnails from the original when available,
+cache the larger preview, and retain the thumbnail if the original has expired.
+Use the media read when the full image is needed to read a document.

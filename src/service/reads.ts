@@ -214,7 +214,8 @@ export class AccountReads {
     hours: number,
     filter: Exclude<ChatFilter, "archived">,
     includeSystem = false,
-    types?: MessageType[]
+    types?: MessageType[],
+    opts: { private?: PrivateRule } = {}
   ): Promise<Synced<RecentConversation[]>> {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
@@ -249,16 +250,18 @@ export class AccountReads {
       // One read of every chosen message's reactions, votes and receipts, and each name once.
       const lookups = this.views.viewLookups(chosen.flatMap((entry) => entry.stored));
       const conversations: RecentConversation[] = [];
+      const people = this.identity.privateScope(opts.private ?? { others: [] });
       for (const { jid, stored } of chosen) {
         const messages = stored
           .map((message) => this.views.viewOfStored(message, lookups))
-          .filter((view) => includeSystem || view.type !== "system");
+          .filter((view) => includeSystem || view.type !== "system")
+          .map((view) => people === null ? view : people.names(jid) || people.names(view.sender.id) ? withoutWords(view) : withoutPrivateQuote(view, people));
         if (messages.length === 0) continue;
         const note = this.identity.noteFor(jid);
         conversations.push({
           chat_id: jid,
           chat_name: this.identity.displayName(jid),
-          ...(note ? { note } : {}),
+          ...(note && !people?.names(jid) ? { note } : {}),
           type: isGroupId(jid) ? "group" : "individual",
           last_activity: messages[messages.length - 1]!.timestamp,
           messages,
@@ -295,7 +298,9 @@ export class AccountReads {
       const found: StoredMessage[] = [];
       let privateOmitted = 0;
       let capped: number | null = null;
-      for (let before: number | undefined; found.length < limit; ) {
+      const start = opts.before === undefined ? undefined : db.messages.get(opts.before)?.id;
+      if (opts.before !== undefined && start === undefined) throw new WazapError("MESSAGE_NOT_FOUND", "The search cursor message is no longer available.");
+      for (let before: number | undefined = start; found.length < limit; ) {
         const page = db.search.text({ query, limit, ...filter, ...(before === undefined ? {} : { before }) });
         for (const message of page.items) {
           // The status feed is not a chat: a story never answers a search.
@@ -398,7 +403,7 @@ export class AccountReads {
    * the account was @-mentioned or replied to after its own last message.
    * People first, then the oldest wait first.
    */
-  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number): Promise<Synced<UnansweredChat[]>> {
+  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<UnansweredChat[]>> {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
       await this.host.waitForSync();
@@ -407,6 +412,7 @@ export class AccountReads {
       const horizon = now - maxAgeHours * 3_600_000;
       const db = this.storage.db;
       const found: UnansweredChat[] = [];
+      const people = this.identity.privateScope(opts.private ?? { others: [] });
       // The database narrows to chats whose newest word is theirs inside the
       // horizon and that no handled mark still covers; the ask is judged here.
       for (let after: { lastTs: number; id: number } | undefined; ; ) {
@@ -425,10 +431,13 @@ export class AccountReads {
             chat_id: jid,
             name: this.identity.displayName(jid),
             type: group ? "group" : "individual",
-            ask: this.views.viewOfStored(ask),
+            ask: people === null ? this.views.viewOfStored(ask)
+              : people.names(jid) || people.names(ask.senderJid ?? "")
+                ? withoutWords(this.views.viewOfStored(ask))
+                : withoutPrivateQuote(this.views.viewOfStored(ask), people),
             messages_since_you: theirs.length,
             business: !group && Boolean(db.identity.contact(jid)?.verifiedName),
-            ...(note ? { note } : {}),
+            ...(note && !people?.names(jid) ? { note } : {}),
             waiting_since: isoWithOffset(ask.ts),
             age: formatAge(ask.ts),
           });

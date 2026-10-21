@@ -476,6 +476,8 @@ export interface UnansweredChat {
 }
 
 export interface SearchOptions {
+  /** Exclusive message cursor for older lexical matches. */
+  before?: string;
   /** Epoch ms; only messages at or after it. */
   sinceMs?: number;
   /** Epoch ms; only messages at or before it. */
@@ -875,7 +877,8 @@ export interface WhatsAppApi {
     hours: number,
     filter: Exclude<ChatFilter, "archived">,
     includeSystem?: boolean,
-    types?: MessageType[]
+    types?: MessageType[],
+    opts?: { private?: PrivateRule }
   ): Promise<Synced<RecentConversation[]>>;
   searchMessages(
     query: string,
@@ -920,7 +923,7 @@ export interface WhatsAppApi {
   setContactNote(contactId: string, note: string): Promise<ContactSummary>;
   markHandled(chatId: string): Promise<HandledResult>;
   previews(messageIds: string[], max: number): Promise<Preview[]>;
-  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number): Promise<Synced<UnansweredChat[]>>;
+  getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number, opts?: { private?: PrivateRule }): Promise<Synced<UnansweredChat[]>>;
   /**
    * `owner` is the MCP session drafting; only the same owner may confirm.
    * With `schedule`, confirming it schedules it instead (confirmSchedule).
