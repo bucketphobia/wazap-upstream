@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.7
+
+- **Search with bge-m3 stops answering questions that have no answer.** A hit
+  that carries no word of the query must now reach a similarity of 0.62
+  instead of the 0.55 floor; hits that carry the query's words keep 0.55, and
+  `WAZAP_RECALL_MIN_SIMILARITY`, when set, is the only bar. On a real account,
+  questions with no answer in the history came back with noise for 5 of 8
+  before and 1 of 8 now, and no answer found before was lost (23/41 → 27/41).
+  The other embedding models are unchanged.
+
 ## 1.4.6
 
 - **A development knob to see what a linked device hears about calls.**
