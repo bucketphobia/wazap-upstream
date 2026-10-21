@@ -1101,3 +1101,28 @@ test("a match found by meaning fades with age: a two-month-old, slightly closer 
     stub.server.close();
   }
 });
+
+test("the next page of a search, or the same question again, reuses the query's embedding; a failed one is asked again", async () => {
+  let refuse = true;
+  const stub = await stubEmbedServer({ answer: (texts, res) => isQuery(texts) && refuse && (res.writeHead(500).end(), true) });
+  const { svc, sock } = await serviceWith({ WAZAP_RECALL: "local", WAZAP_EMBED_URL: stub.url });
+  try {
+    deliver(sock, [text("M1", "ți-am trimis factura pe e-mail ieri")]);
+    await svc.recallIdle();
+    const { call } = schemaCheckedTools(svc, { allowWrite: false });
+    const queries = () => stub.seen.filter((t) => isQuery([t])).length;
+    assert.equal((await call("search", { query: "the invoice" })).structuredContent.mode, "keyword_fallback");
+    refuse = false;
+    assert.equal((await call("search", { query: "the invoice" })).structuredContent.mode, "hybrid", "a refusal is not remembered");
+    const asked = queries();
+    const again = await call("search", { query: "the invoice" });
+    assert.equal(again.structuredContent.mode, "hybrid");
+    assert.equal(again.structuredContent.count, 1);
+    assert.equal(queries(), asked, "the model was not asked twice for one question");
+    await call("search", { query: "the bill" });
+    assert.equal(queries(), asked + 1, "a new question is embedded");
+  } finally {
+    await svc.stop();
+    stub.server.close();
+  }
+});

@@ -215,6 +215,25 @@ export class AccountContacts {
   }
 
   /**
+   * searchContacts' answer for one exact number, read by key instead of a scan
+   * of the address book: what a read tool asks once per sender it shows.
+   */
+  contactByNumber(phone: string): Promise<ContactSummary | undefined> {
+    return this.host.guarded(async () => {
+      this.host.ensureConnected();
+      await this.host.waitForSync();
+      const jid = `${phone}@s.whatsapp.net`;
+      if (isNoiseJid(jid)) return undefined;
+      const db = this.storage.db;
+      // A folded row gives up its phone_jid, so a row still holding it is the live one.
+      const contact = db.identity.contact(jid);
+      if (contact === null || contact.phoneJid !== jid) return undefined;
+      if (contact.listed === null && db.identity.notes(jid) === null) return undefined;
+      return this.views.contactSummary(jid);
+    });
+  }
+
+  /**
    * Profile photo links for chats, a few lookups at a time, each remembered for
    * PICTURE_TTL_MS. A chat without a photo, or one WhatsApp does not answer for
    * in time, gets null.

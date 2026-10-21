@@ -894,6 +894,8 @@ export interface WhatsAppApi {
   ): Promise<Synced<RecallAnswer>>;
   getMessage(messageId: string): Promise<MessageView>;
   searchContacts(query: string, limit: number, opts?: { tag?: string }): Promise<ContactSummary[]>;
+  /** searchContacts' match for one exact number, without the scan; optional, so a stand-in need not have it. */
+  contactByNumber?(phone: string): Promise<ContactSummary | undefined>;
   getContact(contactId: string): Promise<ContactDetails>;
   /** Profile photo links by chat id; optional, so a stand-in need not have it. */
   profilePictures?(chatIds: readonly string[]): Promise<Record<string, string | null>>;

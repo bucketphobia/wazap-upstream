@@ -161,6 +161,7 @@ async function relearnViews(wa: WhatsAppApi, messages: MessageView[]): Promise<M
 
 /** The contact row for a number, when there is one — by exact number, not a substring. */
 async function contactOf(wa: WhatsAppApi, phone: string): Promise<ContactSummary | undefined> {
+  if (wa.contactByNumber) return wa.contactByNumber(phone).catch(() => undefined);
   const matches = (await wa.searchContacts?.(phone, 10).catch(() => undefined)) ?? [];
   return matches.find((c) => c.number === phone);
 }

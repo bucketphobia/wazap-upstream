@@ -1084,6 +1084,10 @@ export class WhatsAppService implements WhatsAppApi {
     return this.contacts.searchContacts(query, limit, opts);
   }
 
+  contactByNumber(phone: string): Promise<ContactSummary | undefined> {
+    return this.contacts.contactByNumber(phone);
+  }
+
   getContact(contactId: string): Promise<ContactDetails> {
     return this.contacts.getContact(contactId);
   }

@@ -41,6 +41,9 @@ const RECALL_QUERY_WAIT_MS = 8_000;
 /** How long the recall status reuses its count of stored vectors. */
 const VECTOR_COUNT_TTL_MS = 10_000;
 
+/** Query embeddings kept, newest last: the next page of a search, or the same question again, skips the model. */
+const QUERY_VECTORS_KEPT = 32;
+
 /** Same rule as transcribe: a wrong WAZAP_RECALL_* value degrades to feature-off, never a crash. */
 function readRecallConfig(dataDir: string): RecallSettings | WazapError {
   try {
@@ -72,6 +75,8 @@ export class AccountRecall {
   /** Embeds what the database holds; null when recall is off. */
   readonly embedFeed: EmbedFeed | null;
   vectorCount: { at: number; count: number } | null = null;
+  /** The last QUERY_VECTORS_KEPT query embeddings, by query text; the model never changes while the service runs. */
+  private readonly queryVectors = new Map<string, number[]>();
   /** The sidecar starts on the first embedding call, never at boot. */
   private recallEngineP: Promise<EmbedEngine> | null = null;
   /** RECALL_QUERY_WAIT_MS; a field so a test need not wait eight seconds. */
@@ -232,6 +237,20 @@ export class AccountRecall {
    * the request under way finishes for nobody, so the next search finds it up.
    */
   private async queryVector(query: string): Promise<number[] | undefined> {
+    const kept = this.queryVectors.get(query);
+    if (kept !== undefined) {
+      this.queryVectors.delete(query);
+      this.queryVectors.set(query, kept);
+      return kept;
+    }
+    const vector = await this.embedQuery(query);
+    if (vector === undefined) return undefined;
+    this.queryVectors.set(query, vector);
+    if (this.queryVectors.size > QUERY_VECTORS_KEPT) this.queryVectors.delete(this.queryVectors.keys().next().value!);
+    return vector;
+  }
+
+  private async embedQuery(query: string): Promise<number[] | undefined> {
     const embedding = this.recallEmbed([query], "query");
     embedding.catch(() => {});
     let timer: NodeJS.Timeout | undefined;

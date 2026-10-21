@@ -24,6 +24,8 @@ first-time setup for an agent's user.
   and 24 (`-- --all` for the whole suite).
 - `npm run bench:db`, `npm run fold:table` — database timing, and regenerating
   `src/db/fold-table.ts`. Neither is in the gate.
+- `npm run bench:tools` — the read tools timed on a copy of a real account
+  (`~/.wazap` by default); the data dir itself is only read.
 
 ## The gate and the hook
 

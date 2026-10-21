@@ -223,3 +223,29 @@ test("find_contact reports name_source alongside saved", async () => {
   assert.equal(dan.name_source, "pushname", "a notify name is what the person publishes");
   if (unsaved.contact) assert.equal(unsaved.contact.saved, false);
 });
+
+test("a sender's entry is read by number, with the address-book scan's own answer", async () => {
+  const { svc, sock, call, arrive } = setup();
+  const FILED = "40700000005@s.whatsapp.net";
+  const STRANGER = "40700000006@s.whatsapp.net";
+  sock.ev.emit("contacts.upsert", [{ id: ANA, name: "Ana" }]);
+  arrive(FILED, "nota mea");
+  arrive(STRANGER, "nu ma stii");
+  svc.db.identity.setNote(FILED, "contabila");
+
+  // The scan: the first ten address-book matches of the digits, then the one with exactly this number.
+  const scanned = async (phone) => (await svc.searchContacts(phone, 10)).find((c) => c.number === phone);
+  for (const jid of [ANA, FILED, STRANGER, "40700000099@s.whatsapp.net"]) {
+    const phone = jid.split("@")[0];
+    assert.deepEqual(await svc.contactByNumber(phone), await scanned(phone), phone);
+  }
+
+  const searchContacts = svc.searchContacts.bind(svc);
+  let scans = 0;
+  svc.searchContacts = (...args) => (scans++, searchContacts(...args));
+  for (const jid of [ANA, FILED, STRANGER]) arrive(jid, "rulaj comun");
+  const result = await call("search", { match: "words", query: "rulaj comun" });
+  assert.equal(result.structuredContent.count, 3);
+  assert.equal(result.structuredContent.messages.find((m) => m.sender.id === ANA).sender.contact_name, "Ana");
+  assert.equal(scans, 0, "no sender costs a pass over the address book");
+});

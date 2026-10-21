@@ -43,6 +43,7 @@
     "bundle:mcpb": "node scripts/bundle-mcpb.mjs",
     "icon": "node scripts/make-icon.mjs",
     "bench:db": "npm run build && node scripts/bench-db.mjs",
+    "bench:tools": "npm run build && node scripts/bench-tools.mjs",
     "fold:table": "npm run build && node scripts/gen-fold-table.mjs",
     "lint": "eslint .",
     "check": "node scripts/check.mjs",
