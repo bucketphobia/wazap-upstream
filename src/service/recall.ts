@@ -141,7 +141,10 @@ export class AccountRecall {
         ...(opts.sinceMs === undefined ? {} : { since: opts.sinceMs }),
         ...(opts.untilMs === undefined ? {} : { until: opts.untilMs }),
       });
-      const ranked = result.hits.filter((hit) => hit.message.chatJid !== STATUS_JID);
+      // A hit with no query word in it answers on its meaning alone, held to the model's higher bar for that.
+      const ranked = result.hits.filter(
+        (hit) => hit.message.chatJid !== STATUS_JID && (hit.lexicalRank !== null || (hit.similarity ?? 0) >= settings.meaningOnlyMinSimilarity)
+      );
       const hidden = new Set(people === null || author !== undefined ? [] : ranked.filter((hit) => people.message(hit.message)));
       // The window the variety rules walk stays as wide as without anyone #private, so the rest rank as they would.
       const shown = ranked.filter((hit) => !hidden.has(hit)).slice(0, window);

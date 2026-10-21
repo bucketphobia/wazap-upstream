@@ -28,4 +28,6 @@ export interface RecallSettings {
   embedIdleMs: number;
   /** Cosine floor for a hit to count; model-dependent, tuned on the default. */
   minSimilarity: number;
+  /** The floor for a hit with no query word in it: the model's own bar, or minSimilarity when that is set by hand. */
+  meaningOnlyMinSimilarity: number;
 }

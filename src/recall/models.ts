@@ -43,6 +43,12 @@ export interface EmbedModelSpec {
    */
   defaultMinSimilarity: number;
   floorCalibrated: boolean;
+  /**
+   * The higher bar for a hit found by its meaning alone, with no query word in
+   * it, when WAZAP_RECALL_MIN_SIMILARITY is unset; without one it is the floor.
+   * A word hit keeps the floor, so a search that names its words loses nothing.
+   */
+  meaningOnlyMinSimilarity?: number;
 }
 
 /**
@@ -106,6 +112,10 @@ export const EMBED_MODELS: Record<EmbedModelAlias, EmbedModelSpec> = {
     // model for a history written in more than one language.
     defaultMinSimilarity: 0.55,
     floorCalibrated: true,
+    // Measured 2026-10-22 on a 29,715-message account, 41 real questions:
+    // meaning-only noise for questions with no answer sat at 0.55-0.62 and came
+    // back for 5 of 8; at 0.62 one does, and no answer found before is lost.
+    meaningOnlyMinSimilarity: 0.62,
   },
 };
 

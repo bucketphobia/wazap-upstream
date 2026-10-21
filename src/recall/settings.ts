@@ -65,6 +65,9 @@ function parseUrl(raw: string | undefined): string | null {
 export function readRecallSettings(env: NodeJS.ProcessEnv, dataDir: string): RecallSettings {
   const embedBin = stripPasted(env.WAZAP_EMBED_BIN ?? "");
   const model = parseModel(env.WAZAP_EMBED_MODEL);
+  const spec = EMBED_MODELS[model];
+  const minSimilarity = parseMinSimilarity(env.WAZAP_RECALL_MIN_SIMILARITY, spec.defaultMinSimilarity);
+  const floorSet = stripPasted(env.WAZAP_RECALL_MIN_SIMILARITY ?? "") !== "";
   return {
     enabled: parseEnabled(env.WAZAP_RECALL),
     model,
@@ -72,6 +75,7 @@ export function readRecallSettings(env: NodeJS.ProcessEnv, dataDir: string): Rec
     embedUrl: parseUrl(env.WAZAP_EMBED_URL),
     modelsDir: join(dataDir, "models"),
     embedIdleMs: EMBED_IDLE_MS,
-    minSimilarity: parseMinSimilarity(env.WAZAP_RECALL_MIN_SIMILARITY, EMBED_MODELS[model].defaultMinSimilarity),
+    minSimilarity,
+    meaningOnlyMinSimilarity: floorSet ? minSimilarity : Math.max(minSimilarity, spec.meaningOnlyMinSimilarity ?? minSimilarity),
   };
 }

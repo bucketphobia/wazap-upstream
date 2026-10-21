@@ -843,6 +843,26 @@ test("the floor defaults to the model's own, and the env override wins over both
   for (const model of ["embeddinggemma-300m", "e5-base-multilingual", "bge-m3"]) {
     const env = { WAZAP_EMBED_MODEL: model, WAZAP_RECALL_MIN_SIMILARITY: "0.5" };
     assert.equal(readRecallSettings(env, dir).minSimilarity, 0.5, model);
+    assert.equal(readRecallSettings(env, dir).meaningOnlyMinSimilarity, 0.5, `${model}: a floor set by hand is the only bar`);
+  }
+  assert.equal(bge.meaningOnlyMinSimilarity, 0.62, "bge-m3 holds a hit with no query word in it higher");
+  assert.equal(e5.meaningOnlyMinSimilarity, e5.minSimilarity, "a model without its own bar keeps the floor");
+});
+
+test("a hit with no query word in it must clear the model's meaning-only bar; a word hit keeps the floor", async () => {
+  const stub = await stubEmbedServer();
+  const { svc, sock } = await serviceWith({ WAZAP_RECALL: "local", WAZAP_EMBED_URL: stub.url });
+  try {
+    deliver(sock, [text("M1", "ți-am trimis factura pe e-mail ieri")]);
+    await svc.recallIdle();
+    const ids = async (query) => (await svc.recall(query, undefined, 10)).data.hits.map((hit) => hit.message.message_id);
+    assert.deepEqual(await ids("the bill"), [`false_${PEER}_M1`], "under the floor alone, meaning finds it");
+    svc.recallIndex.recallEnv = { ...svc.recallIndex.recallEnv, meaningOnlyMinSimilarity: 0.5 };
+    assert.deepEqual(await ids("the bill"), [], "the same meaning, with no word of the query, is under the bar");
+    assert.deepEqual(await ids("factura"), [`false_${PEER}_M1`], "a word hit just as close in meaning stays");
+  } finally {
+    await svc.stop();
+    stub.server.close();
   }
 });
 

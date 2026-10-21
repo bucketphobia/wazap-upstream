@@ -30,7 +30,9 @@ is missing. `wazap status` runs the three checks — `recall`, `llama-server`,
 `chat_id`, `since`, `until` and `from` narrow a search by meaning exactly as
 they narrow one by words. Hits rank by a fused score (reciprocal rank fusion of the
 word and meaning rankings), and a hit found only by meaning must clear the
-similarity floor, so a question with no answer comes back empty. A match found
+similarity floor, so a question with no answer comes back empty. With bge-m3 a
+hit that carries no word of the query needs 0.62 rather than the 0.55 floor;
+setting `WAZAP_RECALL_MIN_SIMILARITY` sets both. A match found
 by meaning weighs a little less with age — 85% a month on, never under 70%, for
 its rank and for the floor — so the fresher of two close matches comes first
 while a clearly closer old one still does, and a word hit whose meaning falls
