@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { proto } from "baileys";
 
-import { CallTracker, callMessage } from "../dist/calls.js";
+import { CallTracker, callMessage, callMessageLine, callNodeLine } from "../dist/calls.js";
 import { callInfo } from "../dist/messages.js";
 
 const ME = "40700000001@s.whatsapp.net";
@@ -164,4 +164,20 @@ test("an entry survives the encode and decode the store puts it through", () => 
     );
     assert.equal(Number(restored.messageTimestamp), Math.floor(entry.at / 1000));
   }
+});
+
+test("the call debug log shows a stanza whole, bytes as their length, and only messages that carry a call", () => {
+  const node = {
+    tag: "call",
+    attrs: { from: "40700000002@s.whatsapp.net", t: "1790000000" },
+    content: [{ tag: "terminate", attrs: { "call-id": "C1", reason: "accepted_elsewhere" }, content: [{ tag: "enc", attrs: {}, content: new Uint8Array(32) }] }],
+  };
+  assert.equal(
+    callNodeLine(node),
+    '<call from=40700000002@s.whatsapp.net t=1790000000><terminate call-id=C1 reason=accepted_elsewhere><enc>[32 B]</enc></terminate></call>'
+  );
+  const key = { remoteJid: "40700000002@s.whatsapp.net", fromMe: true, id: "M1" };
+  assert.equal(callMessageLine({ key, message: { conversation: "salut" } }), null);
+  assert.match(callMessageLine({ key, message: { callLogMesssage: { callOutcome: 0 } } }), /^call message: id=M1 .*fromMe=true callLogMesssage=\{"callOutcome":0\}$/);
+  assert.match(callMessageLine({ key, messageStubType: proto.WebMessageInfo.StubType.CALL_MISSED_VOICE }), /stub=CALL_MISSED_VOICE$/);
 });

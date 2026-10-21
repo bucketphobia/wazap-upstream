@@ -81,5 +81,5 @@ settings: `WAZAP_TEST_WAIT_SCALE`, `WAZAP_NO_UPDATE_CHECK`, `WAZAP_NO_SHARE`,
 `WAZAP_LIVE_TIMEOUT_MS`, `WAZAP_TRANSCRIBE_AUTO`, `WAZAP_TRANSCRIBE_URL`,
 `WAZAP_TRANSCRIBE_MODEL`, `WAZAP_WHISPER_MODEL`, `WAZAP_WHISPER_BIN`,
 `WAZAP_EMBED_MODEL`, `WAZAP_EMBED_BIN`, `WAZAP_EMBED_URL`,
-`WAZAP_RECALL_MIN_SIMILARITY`. Do not document them as settings, and do not
-remove one while a test sets it.
+`WAZAP_RECALL_MIN_SIMILARITY`, `WAZAP_DEBUG_CALLS`. Do not document them as
+settings, and do not remove one while a test sets it.

@@ -16,7 +16,7 @@
 
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { downloadMediaMessage, type WAMessage, type WASocket } from "baileys";
+import { downloadMediaMessage, type BinaryNode, type WAMessage, type WASocket } from "baileys";
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import { accountPolicy, type AccountRecord } from "./accounts.js";
 import { clearAuth, CredentialsReadError, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
@@ -27,6 +27,7 @@ import {
   type CatchupTagJids,
   type CatchupWindow,
 } from "./catchup-scan.js";
+import { callMessageLine, callNodeLine } from "./calls.js";
 import { BAILEYS_VERSION, WAZAP_VERSION, writesHints, type AccountPaths, type Config } from "./config.js";
 import { AccountDb, chatKindOf, StorageError, type StoredMessage } from "./db/index.js";
 import { type DraftContext, type StyleCheck } from "./draft-style.js";
@@ -1559,8 +1560,13 @@ export class WhatsAppService implements WhatsAppApi {
 
     sock.ev.on("messaging-history.set", (batch) => this.ingest.ingestHistory(batch));
 
+    // WAZAP_DEBUG_CALLS=1 (a development knob): every call stanza as sent, and every message carrying a call, to the log.
+    const debugCalls = process.env.WAZAP_DEBUG_CALLS === "1";
+    if (debugCalls) sock.ws?.on("CB:call", (node: BinaryNode) => log(`call node: ${callNodeLine(node)}`));
+
     sock.ev.on("call", ([call]) => {
       if (generation !== this.generation || !call) return;
+      if (debugCalls) log(`call event: ${JSON.stringify(call)}`);
       // WhatsApp addresses a call node by LID as often as by number, and ownJid
       // is only ever the number, so an outgoing call reads as incoming unless
       // the two are brought into the same form first.
@@ -1614,6 +1620,7 @@ export class WhatsAppService implements WhatsAppApi {
     });
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
+      if (debugCalls) for (const line of messages.map(callMessageLine)) if (line !== null) log(`${line} (${type})`);
       if (this.ingest.historyPending === 0 || this.stopped) {
         this.ingest.receiveMessages(messages, type);
         return;

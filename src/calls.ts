@@ -5,7 +5,7 @@
  * socket, no store, so a test can drive it by feeding events and a clock.
  */
 
-import { proto, type WACallEvent, type WAMessage } from "baileys";
+import { proto, WAMessageStubType, type BinaryNode, type WACallEvent, type WAMessage } from "baileys";
 import type { CallDirection, CallKind, CallOutcome } from "./wa-types.js";
 
 /** A ringing call nobody answered and nobody hung up: the terminal event was lost. */
@@ -185,4 +185,30 @@ export function callMessage(entry: CallEntry): WAMessage {
       },
     },
   };
+}
+
+/**
+ * One line for a raw call stanza, for the WAZAP_DEBUG_CALLS log: tags and
+ * attributes all the way down, bytes as their length. It shows what a linked
+ * device is actually sent, before Baileys keeps only part of it.
+ */
+export function callNodeLine(node: BinaryNode): string {
+  const attrs = Object.entries(node.attrs ?? {}).map(([key, value]) => ` ${key}=${value}`).join("");
+  const content = Array.isArray(node.content)
+    ? node.content.map(callNodeLine).join("")
+    : node.content instanceof Uint8Array
+      ? `[${node.content.length} B]`
+      : typeof node.content === "string"
+        ? JSON.stringify(node.content)
+        : "";
+  return `<${node.tag}${attrs}>${content}</${node.tag}>`;
+}
+
+/** For the same log: a message that carries a call (a call log, a call stub), as one line; null for any other. */
+export function callMessageLine(raw: WAMessage): string | null {
+  const fields = Object.keys(raw.message ?? {}).filter((key) => /call/i.test(key));
+  const stub = raw.messageStubType ? WAMessageStubType[raw.messageStubType] : undefined;
+  if (fields.length === 0 && !stub?.includes("CALL")) return null;
+  const content = fields.map((key) => `${key}=${JSON.stringify((raw.message as Record<string, unknown>)[key])}`).join(" ");
+  return `call message: id=${raw.key.id} chat=${raw.key.remoteJid} fromMe=${raw.key.fromMe}${stub ? ` stub=${stub}` : ""} ${content}`.trim();
 }
