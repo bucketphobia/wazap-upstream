@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.6
+
+- **A development knob to see what a linked device hears about calls.**
+  `WAZAP_DEBUG_CALLS=1` (not a setting; off unless set) logs every raw call
+  stanza, every parsed call event and every incoming message that carries a
+  call. It is there to find out why a call answered on the phone is stored as
+  missed and why a call placed from the phone never shows.
+
 ## 1.4.5
 
 - **Recent-message pages render only the requested messages.** The first page
