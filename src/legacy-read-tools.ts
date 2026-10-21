@@ -4,6 +4,7 @@ import { z } from "zod";
 import { resolveToolAccount } from "./account-resolve.js";
 import { resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { privateRule } from "./catchup.js";
+import { compactRecent } from "./recent-compact.js";
 import { WazapError } from "./errors.js";
 import { MESSAGE_TYPES, type MessageView, type RecentConversation } from "./wa-types.js";
 import type { ToolArgs, ToolCtx, ToolDef, ToolResult } from "./tool-runtime.js";
@@ -16,7 +17,7 @@ const account = {
 const readHints = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 const TTL = 15 * 60_000;
 type RecentRow = Omit<RecentConversation, "messages"> & { account_id: string; messages: RecentConversation["messages"] };
-type RecentPage = { owner: string; expires: number; rows: RecentRow[]; sync: string; hours: number; filter: string; accounts: string[]; includeSystem: boolean; types?: typeof MESSAGE_TYPES[number][] };
+type RecentPage = { owner: string; expires: number; rows: RecentRow[]; sync: string; hours: number; filter: string; compact: boolean; accounts: string[]; includeSystem: boolean; types?: typeof MESSAGE_TYPES[number][] };
 type Snapshot = Omit<RecentPage, "rows"> & { refs: Array<{ account_id: string; ids: string[] }> };
 const pages = new Map<string, Snapshot>();
 
@@ -69,7 +70,7 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       rows.push(...found.data.map((row) => ({ ...row, account_id: binding.id, messages: [...row.messages].reverse() })));
     }
     rows.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
-    page = { owner, expires: Date.now() + TTL, rows, sync, hours: args.hours as number, filter: args.filter as string, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
+    page = { owner, expires: Date.now() + TTL, rows, sync, hours: args.hours as number, filter: args.filter as string, compact: args.compact === true, accounts: bindings.map((b) => b.id), includeSystem: args.include_system as boolean, types: args.types as typeof MESSAGE_TYPES[number][] | undefined };
   }
   let remaining = args.limit as number;
   const conversations: RecentRow[] = [];
@@ -95,14 +96,21 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
       for (const preview of await wa.previews(ids, Math.max(0, 12 - images.length))) images.push({ type: "image", data: preview.base64, mimeType: preview.mime });
     }
   }
-  // Compact changes presentation only: the structured messages retain their full text and ids.
+  // Compact must reach structured-only clients too. The cursor still budgets original messages.
+  const rendered = page.compact ? conversations.map((row) => ({ ...row, ...compactRecent(row.messages) })) : conversations;
   const payload = { hours: page.hours, filter: page.filter, conversation_count: conversations.length,
-    message_count: conversations.reduce((n, row) => n + row.messages.length, 0), conversations,
+    message_count: conversations.reduce((n, row) => n + row.messages.length, 0), conversations: rendered,
+    ...(page.compact ? { compact: true, shown_message_count: rendered.reduce((n, row) => n + ("shown_message_count" in row ? row.shown_message_count as number : 0), 0),
+      line_count: rendered.reduce((n, row) => n + row.messages.length, 0) } : {}),
     next_cursor: next, partial: next !== null || page.sync !== "done", sync: page.sync,
     account_id: page.accounts.length === 1 ? page.accounts[0] : null,
     notes: ["Available synced history only; an unanswered request may have been handled outside WhatsApp."] };
   const answer = result(payload, images);
-  if (args.compact === true) answer.content[0] = { type: "text", text: conversations.map((row) => `${row.chat_name}:\n${row.messages.map((m) => `${m.from_me ? "me" : m.sender.name}: ${m.text.slice(0, 300)}`).join("\n")}`).join("\n\n") || "No recent messages in the available history." };
+  if (page.compact) answer.content[0] = { type: "text", text: rendered.map((row) => {
+    const omitted = "omitted" in row ? Object.entries(row.omitted as Record<string, number>).map(([type, count]) => `${count} ${type}`) : [];
+    return `${row.chat_name}:\n${[...row.messages.map((m) => `${m.from_me ? "me" : m.sender.name}: ${m.text}`),
+      ...(omitted.length ? [`[omitted: ${omitted.join(", ")}]`] : [])].join("\n")}`;
+  }).join("\n\n") || "No recent messages in the available history." };
   return answer;
 }
 

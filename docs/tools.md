@@ -470,10 +470,26 @@ recent conversation pages, unanswered candidates and media reads. Local clients
 keep the current compact catalogue. Refresh a remote client's tools to use the
 current names and workflows described above.
 
+Remote `learn`, read workflow prompts and the session instructions use the cached
+names for message lookups, contact candidates, summaries, media and transcripts.
+They do not require a client to call a
+new name absent from its saved catalogue. Local `learn` keeps the current guide.
+
 Compatibility reads use the same account, privacy and filesystem restrictions.
 Recent pages are bounded by message count; their opaque cursors last 15 minutes
 and recheck current message retention and private tags. A candidate for a reply
 is not proof of an obligation, since a call outside WhatsApp may have resolved it.
+
+In the compact presentation, both the text and structured answer omit deleted entries,
+empty media and emoji-only text, and group adjacent plain text from one author.
+Captioned media, named documents, transcribed voice notes and calls remain;
+quotes and other message-specific details stay separate. A group has its source
+`message_ids` and `first_timestamp`; `message_id` names its last message.
+Each conversation reports `omitted` counts by type. `message_count` remains the
+original page budget, `shown_message_count` counts retained source messages, and
+`line_count` counts grouped entries. Cursors preserve compact mode. An empty
+visible page can still have omitted media and more pages; use a full read for
+their contents.
 
 Photo previews upgrade tiny shipped thumbnails from the original when available,
 cache the larger preview, and retain the thumbnail if the original has expired.

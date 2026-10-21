@@ -22,6 +22,8 @@ export interface ToolResult {
 export type ToolArgs = Record<string, unknown>;
 
 export interface ToolCtx {
+  /** Give remote connectors workflows that work with their cached read names. */
+  legacyReads?: boolean;
   wa: WhatsAppApi;
   hub: AccountSource;
   allowWrite: boolean;
@@ -231,6 +233,7 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
               );
             }
             const result = await def.handler(parsed, {
+              legacyReads: opts.legacyReads === true,
               wa: resolved.wa,
               hub,
               allowWrite: opts.allowWrite,

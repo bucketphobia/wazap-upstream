@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.4
+
+- **Compact remote summaries now remove noise in both answer formats.** Empty
+  media, deleted entries and emoji-only text are counted under each chat's
+  `omitted` field. Adjacent plain text from the same author is grouped, with
+  source `message_ids` retained. Captioned media, named documents, transcribed
+  voice notes, calls, quotes and private-message markers keep their context.
+- **Recent-page cursors preserve compact mode.** Page limits still count the
+  original messages; `shown_message_count` and `line_count` distinguish retained
+  messages from grouped entries. An all-media page reports omissions instead of
+  claiming that no messages exist.
+- **Remote guidance works with cached connector catalogues.** `learn`, the
+  session instructions and read workflow prompts use the compatibility names
+  actually available to older clients. They explain word matching, ambiguous
+  contacts, server-side media paths and why an unanswered candidate may already
+  be handled. Local clients keep the current guide.
+
 ## 1.4.3
 
 ### Fixed

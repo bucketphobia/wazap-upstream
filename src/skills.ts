@@ -8,6 +8,7 @@ import type { Config } from "./config.js";
 import { WazapError } from "./errors.js";
 import { log, say } from "./logger.js";
 import { READ_ONLY_RULE, SEND_RULE } from "./send-guard.js";
+import { LEGACY_READ_GUIDE, LEGACY_READ_INSTRUCTIONS } from "./legacy-read-guide.js";
 import { info, nextHint, ok, shortPath } from "./ui.js";
 
 export interface SkillTarget {
@@ -109,6 +110,8 @@ function trigger(description: string): string {
 
 /** What the session's instructions depend on besides the skills. */
 export interface InstructionOptions {
+  /** Remote clients may have retained the cached read catalogue. */
+  legacyReads?: boolean;
   /** Whether this session has the send tools; true unless said otherwise. */
   allowWrite?: boolean;
   /** The live accounts, the default marked: named when there are several, so "Business" reaches its account_id. */
@@ -135,7 +138,7 @@ function accountsLine(accounts: InstructionOptions["accounts"]): string | null {
  */
 export function skillInstructions(skills: readonly Skill[], options: InstructionOptions = {}): string {
   const accounts = accountsLine(options.accounts);
-  const intro =
+  const intro = options.legacyReads ? LEGACY_READ_INSTRUCTIONS + (accounts === null ? "" : ` ${accounts}`) :
     "Call `learn` first: it returns every tool, the id formats and every error code with what to do about it. " +
     "With several WhatsApp accounts, `get_status` lists them and every tool takes `account_id`: without it, a chat or message only one account knows picks that account, `catch_up` and `find_contact` cover them all, other reads use the default, and a write to a chat no account knows fails AMBIGUOUS_ACCOUNT. " +
     "An agent that should act as messages arrive calls `wait_for_messages` in a loop with the cursor it returns, instead of polling." +
@@ -153,10 +156,11 @@ export function skillInstructions(skills: readonly Skill[], options: Instruction
 }
 
 /** The same workflows a skill-aware harness reads off disk, for every client that has no skills directory. */
-export function registerSkillPrompts(server: McpServer, skills: readonly Skill[]): void {
+export function registerSkillPrompts(server: McpServer, skills: readonly Skill[], options: Pick<InstructionOptions, "legacyReads"> = {}): void {
   for (const skill of skills) {
+    const cachedRead = options.legacyReads && ["whatsapp-inbox", "whatsapp-recall", "whatsapp-groups"].includes(skill.name);
     server.registerPrompt(skill.name, { title: skillTitle(skill), description: skill.description }, async () => ({
-      messages: [{ role: "user" as const, content: { type: "text" as const, text: skill.body } }],
+      messages: [{ role: "user" as const, content: { type: "text" as const, text: cachedRead ? LEGACY_READ_GUIDE : skill.body } }],
     }));
   }
 }

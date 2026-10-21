@@ -112,6 +112,7 @@ test("private direct messages, group authors and their quoted words stay private
   f.svc.db.identity.updateFields(ANA, { addTags: ["private"] });
   for (const name of ["get_recent_messages", "get_unanswered"])
     assert.doesNotMatch(allText(await f.call(name)), /SECRET-DIRECT|SECRET-GROUP|SECRET-QUOTE/);
+  assert.doesNotMatch(allText(await f.call("get_recent_messages", { compact: true })), /SECRET-DIRECT|SECRET-GROUP|SECRET-QUOTE/);
   assert.equal((await f.call("search_messages", { query: "SECRET" })).structuredContent.count, 0);
 });
 
@@ -177,5 +178,103 @@ test("cached search honours account_ids and all_accounts instead of silently sea
     assert.ok(messages.some((m) => m.text.includes("WORK")));
     assert.equal(messages.length, selection.all_accounts ? 2 : 1);
     assert.ok(messages.every((m) => ["home", "work"].includes(m.account_id)));
+  }
+});
+
+test("compact reads remove empty media and deleted messages in both representations, group adjacent text and keep source ids", async (t) => {
+  const f = fixture(t);
+  const first = f.arrive(ANA, "Prima parte");
+  const second = f.arrive(ANA, "A doua parte");
+  f.arrive(ANA, { imageMessage: { mimetype: "image/jpeg" } });
+  f.arrive(ANA, { stickerMessage: { mimetype: "image/webp" } });
+  f.arrive(ANA, "🐾");
+  const gone = f.arrive(ANA, "NU MAI EXISTA");
+  // Old synced/imported history may contain tombstones; live revokes remove the row.
+  const getRecent = f.svc.getRecentMessages.bind(f.svc);
+  f.svc.getRecentMessages = async (...args) => {
+    const found = await getRecent(...args);
+    return { ...found, data: found.data.map((row) => ({ ...row, messages: row.messages.map((m) =>
+      m.message_id === gone ? { ...m, type: "deleted", text: "[deleted]" } : m) })) };
+  };
+  const caption = f.arrive(ANA, { imageMessage: { mimetype: "image/jpeg", caption: "Lista pentru joi" } });
+  const document = f.arrive(ANA, { documentMessage: { mimetype: "application/pdf", fileName: "lista.pdf" } });
+  const compact = await f.call("get_recent_messages", { compact: true, limit: 20 });
+  const row = compact.structuredContent.conversations[0];
+  assert.equal(row.messages.length, 3);
+  assert.equal(row.messages[0].text, "Prima parte\nA doua parte");
+  assert.deepEqual(row.messages[0].message_ids, [first, second]);
+  assert.deepEqual(row.messages.slice(1).map((m) => m.message_id), [caption, document]);
+  assert.deepEqual(row.omitted, { image: 1, sticker: 1, text: 1, deleted: 1 });
+  assert.equal(compact.structuredContent.message_count, 8, "page budget still counts original messages");
+  assert.equal(compact.structuredContent.shown_message_count, 4);
+  assert.equal(compact.structuredContent.line_count, 3);
+  assert.doesNotMatch(compact.content[0].text, /\[deleted\]|\[image\](?:\n|$)|🐾|NU MAI EXISTA/);
+  assert.match(compact.content[0].text, /omitted:.*image/);
+  const full = await f.call("get_recent_messages", { compact: false, limit: 20 });
+  assert.equal(full.structuredContent.conversations[0].messages.length, 8);
+  assert.equal(full.structuredContent.conversations[0].messages[0].text, "Prima parte", "compaction never mutates source messages");
+});
+
+test("compact cursors keep their mode; an all-media page reports omissions instead of claiming no history", async (t) => {
+  const f = fixture(t);
+  f.arrive(ANA, "Înainte");
+  f.arrive(ANA, { imageMessage: { mimetype: "image/jpeg" } });
+  f.arrive(ANA, { audioMessage: { mimetype: "audio/ogg", ptt: true } });
+  const first = await f.call("get_recent_messages", { compact: true, limit: 1 });
+  assert.equal(first.structuredContent.shown_message_count, 0);
+  assert.deepEqual(first.structuredContent.conversations[0].omitted, { voice: 1 });
+  assert.doesNotMatch(first.content[0].text, /No recent messages/);
+  const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 10 });
+  assert.equal(next.structuredContent.compact, true);
+  assert.equal(next.structuredContent.shown_message_count, 1);
+  assert.deepEqual(next.structuredContent.conversations[0].omitted, { image: 1 });
+});
+
+test("compact reads keep missed calls, bracketed words and quotes, without merging different group authors", async (t) => {
+  const f = fixture(t);
+  f.arrive(GROUP, "[URGENT]", false, ANA);
+  const quoted = f.arrive(GROUP, { extendedTextMessage: { text: "Verifică mâine", contextInfo: {
+    stanzaId: "QUOTED", participant: DAN, quotedMessage: { conversation: "La ora 10" },
+  } } }, false, ANA);
+  f.arrive(GROUP, "Confirm", false, DAN);
+  const at = Date.now() - 10_000;
+  for (const status of ["offer", "timeout"]) f.sock.ev.emit("call", [{
+    chatId: ANA, from: ANA, id: "MISSED", date: new Date(at), status, offline: false,
+  }]);
+  const answer = await f.call("get_recent_messages", { compact: true, limit: 20 });
+  const group = answer.structuredContent.conversations.find((row) => row.chat_id === GROUP);
+  assert.equal(group.messages.length, 3);
+  assert.equal(group.messages[0].text, "[URGENT]");
+  const reply = group.messages.find((m) => m.message_id === quoted);
+  assert.equal(reply.quoted.text, "La ora 10");
+  const direct = answer.structuredContent.conversations.find((row) => row.chat_id === ANA);
+  assert.equal(direct.messages[0].call.outcome, "missed");
+});
+
+test("remote learn and server instructions use callable cached workflows; local learn keeps the modern guide", async (t) => {
+  const f = fixture(t);
+  const guide = (await f.call("learn", {})).content[0].text;
+  for (const name of LEGACY) assert.ok(guide.includes(name), name);
+  assert.doesNotMatch(guide, /\b(?:catch_up|find_contact|search|get_media|remember|send_message|confirm_send)\b/);
+  assert.match(guide, /words,\s+not meaning/i);
+  assert.match(guide, /candidates.*not.*obligations/i);
+  const local = schemaCheckedTools(f.svc, { allowWrite: false });
+  assert.match((await local.call("learn", {})).content[0].text, /catch_up/);
+  const stop = new AbortController();
+  t.after(() => stop.abort());
+  const port = await startHttpEndpoint(asToolSource(f.svc), f.svc.config, {
+    host: "127.0.0.1", port: 0, openRead: false, signal: stop.signal, credentials: [{ token: "synthetic-guide-reader", write: false }],
+  });
+  const client = new Client({ name: "cached-guide-connector", version: "0.23" });
+  t.after(() => client.close());
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { Authorization: "Bearer synthetic-guide-reader" } } }));
+  const instructions = client.getInstructions();
+  assert.match(instructions, /get_recent_messages/);
+  assert.doesNotMatch(instructions, /\b(?:catch_up|find_contact)\b/);
+  for (const name of ["whatsapp-inbox", "whatsapp-recall", "whatsapp-groups"]) {
+    const prompt = await client.getPrompt({ name });
+    const body = prompt.messages[0].content.text;
+    assert.match(body, /get_recent_messages/);
+    assert.doesNotMatch(body, /\b(?:catch_up|find_contact|get_media|remember)\b/);
   }
 });

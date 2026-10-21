@@ -47,7 +47,7 @@ function buildMcpServer(
 ): McpServer {
   const skills = loadSkills();
   const writes = allowWrite && !config.readOnly && anyAccountAllowsWrites(hub);
-  const server = new McpServer({ name: "wazap", version: WAZAP_VERSION }, { instructions: skillInstructions(skills, { allowWrite: writes, accounts: namedAccounts(hub) }) });
+  const server = new McpServer({ name: "wazap", version: WAZAP_VERSION }, { instructions: skillInstructions(skills, { allowWrite: writes, accounts: namedAccounts(hub), legacyReads: !allowLocalFiles }) });
   registerTools(server, hub, {
     allowWrite: writes,
     // remember's edits are local state, not WhatsApp writes: they answer to
@@ -61,7 +61,7 @@ function buildMcpServer(
     ...(config.maxInFlight === undefined ? {} : { maxInFlight: config.maxInFlight }),
     ...(config.maxInFlightTotal === undefined ? {} : { maxInFlightTotal: config.maxInFlightTotal }),
   });
-  registerSkillPrompts(server, skills);
+  registerSkillPrompts(server, skills, { legacyReads: !allowLocalFiles });
   return server;
 }
 

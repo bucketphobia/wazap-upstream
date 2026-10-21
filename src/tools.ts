@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { legacyReadTools } from "./legacy-read-tools.js";
+import { LEGACY_READ_GUIDE } from "./legacy-read-guide.js";
 import type { AccountSource } from "./account-hub.js";
 import { renderGetStatus } from "./account-resolve.js";
 import { draftContextEnabled } from "./accounts.js";
@@ -507,7 +508,7 @@ const TOOLS: readonly ToolDef[] = [
     schema: {},
     write: false,
     // Prose, once: the guide is not repeated as structured content.
-    handler: async () => ({ content: [{ type: "text", text: GUIDE }] }),
+    handler: async (_args, ctx) => ({ content: [{ type: "text", text: ctx.legacyReads ? LEGACY_READ_GUIDE : GUIDE }] }),
   }),
 
   tool({
