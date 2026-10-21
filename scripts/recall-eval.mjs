@@ -119,7 +119,7 @@ for (const c of cases) {
       console.log(
         `${pass ? "PASS" : "FAIL"}  positive  "${c.query}" → ${
           pass
-            ? `#${match + 1} sim ${matched.similarity.toFixed(3)}${matched.from_index ? " (index only)" : ""}: "${snippet(hitText(matched))}"`
+            ? `#${match + 1} sim ${matched.similarity?.toFixed(3) ?? "- (words)"}${matched.from_index ? " (index only)" : ""}: "${snippet(hitText(matched))}"`
             : `expected needle absent in ${hits.length} hits`
         }`
       );
