@@ -1,0 +1,134 @@
+name: Publish a native container image
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag already published to npm
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-image-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag }}
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.verify.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - id: verify
+        name: Verify the release matches the published npm package
+        run: |
+          node --input-type=module - <<'JS'
+          import assert from 'node:assert/strict';
+          import { readFileSync, appendFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          assert.match(process.env.RELEASE_TAG, /^v[0-9]+\.[0-9]+\.[0-9]+$/);
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          assert.equal(process.env.RELEASE_TAG, `v${pkg.version}`);
+          assert.equal(pkg.name, 'wazap-mcp');
+          const sha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          const response = await fetch(`https://registry.npmjs.org/wazap-mcp/${pkg.version}`);
+          assert.equal(response.status, 200);
+          const published = await response.json();
+          assert.equal(published.gitHead, sha);
+          assert.equal(published.mcpName, pkg.mcpName);
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+          JS
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ${{ env.IMAGE }}:native-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.verify.outputs.sha }}
+      - name: Smoke test the published architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          docker pull "$IMAGE:native-$RUN_ID-$ATTEMPT-$ARCH"
+          actual=$(docker run --rm --network none "$IMAGE:native-$RUN_ID-$ATTEMPT-$ARCH" --version 2>&1)
+          test "$actual" = "${RELEASE_TAG#v}"
+
+  merge:
+    needs: [verify, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}},value=${{ inputs.tag }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ inputs.tag }}
+      - name: Publish the multi-platform manifest only after both smoke tests pass
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          args=()
+          while IFS= read -r tag; do args+=(--tag "$tag"); done <<< "$TAGS"
+          docker buildx imagetools create "${args[@]}" \
+            "$IMAGE:native-$RUN_ID-$ATTEMPT-amd64" "$IMAGE:native-$RUN_ID-$ATTEMPT-arm64"
+          docker buildx imagetools inspect "$IMAGE:${RELEASE_TAG#v}"
