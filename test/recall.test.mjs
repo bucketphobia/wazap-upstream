@@ -17,7 +17,7 @@ import { proto } from "baileys";
 import { WhatsAppService } from "../dist/whatsapp.js";
 import { registerTools } from "../dist/tools.js";
 import { EMBED_MODELS, readRecallSettings } from "../dist/recall/index.js";
-import { asToolSource, connectedService, schemaCheckedTools } from "./helpers.mjs";
+import { asToolSource, connectedService, schemaCheckedTools, waitFor } from "./helpers.mjs";
 import { accountPaths } from "../dist/config.js";
 
 const ME = "40700000001@s.whatsapp.net";
@@ -491,6 +491,33 @@ test("search waits for the query's meaning only so long, then answers by words; 
     await svc.stop();
     stub.server.close();
   }
+});
+
+test("identical concurrent queries share one embedding and a late success warms their next attempt", async () => {
+  let held = null;
+  let queries = 0;
+  const stub = await stubEmbedServer({ answer: (texts, res) => {
+    if (!isQuery(texts)) return false;
+    queries++;
+    held = { texts, res };
+    return true;
+  } });
+  const { svc, sock } = await serviceWith({ WAZAP_RECALL: "local", WAZAP_EMBED_URL: stub.url });
+  try {
+    deliver(sock, [text("M1", "Factura pentru chiria lunară este pe email")]);
+    await svc.recallIdle();
+    svc.recallIndex.recallQueryWaitMs = 60;
+    const pending = Promise.allSettled([svc.recall("factura", undefined, 5), svc.recall("factura", undefined, 5)]);
+    await waitFor(() => held, 2000, "shared query request");
+    const results = await pending;
+    assert.ok(results.every((r) => r.status === "rejected" && r.reason.code === "TIMEOUT"));
+    assert.equal(queries, 1);
+    held.res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(held.texts.map((text, index) => ({ index, embedding: [vectorFor(text)] }))));
+    await waitFor(() => svc.recallIndex.queryVectors.has("factura"), 2000, "late query vector");
+    const again = await svc.recall("factura", undefined, 5);
+    assert.equal(again.data.hits[0].message.message_id, `false_${PEER}_M1`);
+    assert.equal(queries, 1, "the next attempt must use the completed model work");
+  } finally { held?.res.destroy(); await svc.stop(); stub.server.close(); }
 });
 
 test("while the index catches up, search by meaning and words still finds every message the words alone find", async () => {

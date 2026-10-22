@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.5.0
+
+- **Natural questions work through cached connectors too.** `search_messages`
+  uses the same hybrid retrieval as `search`; automatic matching takes an
+  exact fast path for codes, URLs and quoted literals. Explicit word matching
+  and lexical cursors remain available. A code no longer matches a longer
+  value merely sharing its prefix.
+- **The best hits include nearby evidence in the same call.** Bounded,
+  chronological context windows carry exact source ids, direct reply targets
+  and query-relevant excerpts. A small coverage refinement preserves the
+  existing meaning-only floors. Ambiguous questions are flagged for
+  clarification; scores are not presented as confidence. No extra model call
+  or always-on context index is added.
+- **Search rechecks sources after identity work.** Deleted, edited or newly
+  private sources are omitted before returning; merged account reads repeat
+  that check together. An owner or service replacement invalidates the read.
+- **Query work is bounded and reused.** Meaning gets a 2.5-second budget
+  before explicit keyword fallback. Concurrent identical questions share
+  their embedding; a late success warms the next attempt. Only query vectors
+  are cached, never search results or message bodies.
+- **Retrieval has a repeatable quality benchmark.** Fictional split answers,
+  corrections, typos, old facts and ambiguous/absent answers can be evaluated
+  with the installed model. Private cases run on a database copy and report
+  aggregates; before/after checks detect regressions. The recall skill uses
+  returned context and stops for a useful clarification instead of rescanning
+  history without a lead.
+
 ## 1.4.7
 
 - **Search with bge-m3 stops answering questions that have no answer.** A hit

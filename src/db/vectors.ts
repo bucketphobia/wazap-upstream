@@ -275,6 +275,8 @@ export interface HybridHit {
   /** 1-based rank among semantic candidates, when it was one. */
   semanticRank: number | null;
   similarity: number | null;
+  /** Optional contextual refinement, leaving the original fused score intact. */
+  contextScore?: number;
 }
 
 export interface HybridResult {

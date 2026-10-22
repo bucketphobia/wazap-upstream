@@ -8,9 +8,72 @@ below). A match counts on its similarity alone; age only orders.
 It reaches every message the account keeps. For an exact string — an id, a
 phone number, a URL — pass `match: "words"`. When meaning search cannot run —
 recall off, the embedding server failing or refusing the query, or the sidecar
-still starting after 8 s — `search` matches the words only and says so
+still starting after 2.5 s — `search` matches the words only and says so
 (`mode: "keyword_fallback"`, with `recall_unavailable` naming the cause and, for
 recall off, the command that turns it on).
+
+Cached connectors use the same search, including meaning. `match` defaults to `auto`: natural
+questions use hybrid retrieval, while codes, URLs, email addresses and fully
+quoted literals use exact matching without starting the embedding model.
+`match: "hybrid"` and `match: "words"` remain explicit. A lexical cursor with
+`auto` continues by words; an explicit hybrid cursor is refused.
+
+By default the best five hits carry `contexts`: small chronological windows
+read from the existing conversation index, at most three neighbours on each
+side within 15 minutes, plus a visible direct reply target in the same chat.
+Explicit date limits still apply. Context may include other authors; a broad
+read still excludes private people unless the call names that author. Each
+source has its own message id and timestamp, with long text marked truncated.
+`include_context: false` skips these windows and their bounded coverage
+reranking. Context does not add an always-on index or a cached copy of message
+text; edits, retractions, expiry and private tags are read fresh. No history is
+fetched from the phone to fill a window.
+
+Long context messages use a contiguous, query-relevant excerpt; `text_offset`
+locates it in the source and `text_truncated` says it is incomplete. Search
+rechecks sources after identity/metadata work, and all accounts again before a
+merged response. Sources deleted, changed or newly private while that work
+awaited are omitted (`changed_during_read`); an account replacement or owner
+change refuses the read. Automatic literal matching excludes a longer code
+that merely shares the query's prefix; explicit `match: "words"` retains
+substring matching and lexical cursor semantics.
+Post-filtering stops after 2,000 candidates and reports capped coverage, so a
+large run of rejected prefixes or private hits cannot trigger an exhaustive
+history scan. Narrow the chat/date or refine the query when that happens.
+
+`assessment` distinguishes candidates, underspecified questions matching
+several chats, and no matches in the searched history. It is not a calibrated
+confidence score: the assistant must check corrections in context and cite
+the actual supporting source, or ask one short clarification when necessary.
+The existing meaning-only similarity floors still apply before contextual
+reranking. A result does not establish absence from unsynced history.
+
+Repeated and simultaneous identical questions reuse their account's bounded
+query-vector cache; a query that finishes after the time budget warms a later
+attempt. Search results and message text are never cached by that mechanism.
+
+## Evaluation
+
+`npm run bench:search` runs the fictional cases in `eval/search-questions.json`
+against a deterministic embedding stub. Use `-- --model real` for the already
+installed local model, `--runs 10 --json report.json` for timings and
+`--require-pass` to require all cases. A stub checks the retrieval contract,
+not real model quality. Reports distinguish a source hit from supporting
+evidence in its context; these measure retrieval, not the assistant's final
+answer. Timings are server-side, with uncached questions and repeated warm
+queries reported separately; they are not connector or answer-generation latency.
+
+`node scripts/bench-search.mjs --root /path/to/baseline --model real` compares
+an older build. `--private-cases /path/to/cases.json --model real` uses a backup
+of the default account, never its live database or WhatsApp connection. That
+report contains case numbers and aggregate metrics, not queries or messages.
+Freeze the input database for a before/after comparison; `--compare before.json`
+fails when a formerly passing case regresses. An unavailable meaning search is
+reported and cannot silently count as a successful negative.
+
+`--compact-query` and `--context-model-experiment` are offline ablations, not
+runtime search settings. The latter evaluates query-time contextual embeddings
+on the immutable copy; it does not add a production index or model request.
 
 Off by default, and fully local: a `llama-server` sidecar bound to loopback
 does the embedding, so nothing leaves the machine. It needs llama.cpp, the

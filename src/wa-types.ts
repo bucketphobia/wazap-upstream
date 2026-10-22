@@ -496,6 +496,12 @@ export interface UnansweredChat {
 }
 
 export interface SearchOptions {
+  /** Read small, fresh conversation windows with the best hits, in the same call. */
+  includeContext?: boolean;
+  /** Tool orchestration renders windows only in its final synchronous snapshot. */
+  deferContext?: boolean;
+  /** An automatic code/quoted literal must be a whole value, not the prefix of another. */
+  literal?: string;
   /** Exclusive message cursor for older lexical matches. */
   before?: string;
   /** Epoch ms; only messages at or after it. */
@@ -519,8 +525,10 @@ export interface PrivateRule {
 
 /** One recall hit: the message plus the score it ranked by. */
 export interface RecallHit {
-  /** The fused rank score (reciprocal rank fusion of words and meaning); hits are sorted by it. */
+  /** The fused base score (reciprocal rank fusion of words and meaning), not confidence. */
   score: number;
+  /** Final contextual rank, when refined; otherwise score orders hits before variety. */
+  rank_score?: number;
   /** Raw cosine similarity to the query; null when only the words matched and the meaning did not rank it. */
   similarity: number | null;
   /** What found it: the query's words, its meaning, or both. */
@@ -538,7 +546,28 @@ export interface RecallAnswer {
   lexicalCapped: boolean;
   /** Matches from people kept #private that ranked among these, left out; absent when none were. */
   privateOmitted?: number;
+  contexts?: SearchContext[];
 }
+
+export interface SearchContext {
+  anchor_id: string;
+  /** Neighbouring sources in time order; not all necessarily answer the query. */
+  messages: Array<Pick<MessageView, "message_id" | "chat_id" | "from_me" | "sender" | "timestamp" | "type" | "text" | "quoted"> & { text_truncated?: true; text_offset?: number }>;
+  bounded: true;
+}
+
+export interface SearchAssessment {
+  state: "no_matches" | "ambiguous" | "candidates";
+  note: string;
+}
+
+/** Final synchronous read after asynchronous identity/metadata work. No search, phone fetch or model work. */
+export interface SearchRefresh {
+  rows: Array<{ source_id: string; message: MessageView }>;
+  contexts?: SearchContext[];
+  dropped: number;
+}
+export type SearchSource = Pick<MessageView, "message_id" | "text" | "transcript">;
 
 export interface HandledResult {
   chat_id: string;
@@ -824,6 +853,7 @@ export interface ChatRead extends Synced<MessageView[]> {
 
 /** A keyword search's messages, and where the storage scan limit stopped it when it did. */
 export interface SearchAnswer extends Synced<MessageView[]> {
+  contexts?: SearchContext[];
   /** Set when the scan limit stopped the search before the history ran out: older messages were not searched. */
   scanCapped?: { searchedBackTo: string };
   /** Matches from people kept #private, left out before the limit; absent when none were. */
@@ -908,6 +938,8 @@ export interface WhatsAppApi {
     limit: number,
     opts?: SearchOptions
   ): Promise<SearchAnswer>;
+  /** Refresh visible sources immediately before returning search; optional for stand-ins. */
+  refreshSearch?(messages: readonly SearchSource[], chatId: string | undefined, opts: SearchOptions, query: string): SearchRefresh;
   recall(
     query: string,
     chatId: string | undefined,

@@ -25,6 +25,8 @@ import { mediaCaptionOf } from "./media-details.js";
 import { captionTravels, mimeOfSource } from "./outgoing-media.js";
 import { getMessageView, getMessageViewAcross, resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { clockLabel } from "./messages.js";
+import { assessSearch, parseMoment, planSearch } from "./search-query.js";
+import { checkSearchSource, finalizeSearch, searchOwner, SEARCH_CHANGED } from "./search-finalize.js";
 import { RateLimiter } from "./ratelimit.js";
 import {
   SCHEDULE_MAX_AHEAD_MS,
@@ -63,6 +65,7 @@ import type {
   ScheduledView,
   SentMessage,
   SearchAnswer,
+  SearchContext,
   Synced,
   Preview,
   UnconfirmedSend,
@@ -171,9 +174,13 @@ const SEARCH_OUTPUT = {
   mode: z.enum(["hybrid", "words", "keyword_fallback"]).describe("keyword_fallback: meaning search could not run, see recall_unavailable"),
   from_resolved: z.string().optional(),
   count: z.number(),
+  assessment: z.object({ state: z.enum(["no_matches", "ambiguous", "candidates"]), note: z.string() }),
+  changed_during_read: z.boolean().optional(),
+  contexts: z.array(z.object({ anchor_id: z.string(), messages: z.array(MESSAGE_OUT), bounded: z.literal(true) })).optional(),
   messages: z.array(
     MESSAGE_OUT.extend({
       score: z.number().optional(),
+      rank_score: z.number().optional(),
       matched: z.enum(["words", "meaning", "both"]).optional(),
       similarity: z.number().nullable().optional(),
       from_index: z.boolean().optional().describe("Kept only as text: no media, reply or forward"),
@@ -446,9 +453,8 @@ Call get_status when anything fails; link_account when it says not_linked.
   An ask the user handled elsewhere: remember(chat_id, handled: true).
 - One chat: read_messages(chat_id), older with before; chat_id "status" reads
   stories. To stay on the line, wait_for_messages with the cursor it returns.
-- Find something said: search(query) matches meaning and words; match: "words"
-  for an exact string. get_message shows one message in full; get_media gives its
-  file, a photo as an image, a voice note's transcript (its file with save_to).
+- Search: search(query), then its contexts: check corrections, clarify ambiguity.
+  Never guess filters or treat rank as proof. get_message/get_media opens full sources.
 - Who someone is: find_contact(name) before drafting ("mama"). resolved gives
   the chat_id; ambiguous or not_found: ask the user, never guess. remember keeps what the user says about a person (note,
   tags, fields such as relatie), on this machine; find_contact(tag) lists a tag.
@@ -750,11 +756,12 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "search",
     title: "Search WhatsApp messages",
-    description: `Find messages by meaning and by words at once, in every chat or one: a paraphrase still hits; another language seldom does, so ask in the chat's language. match: "words" for exact words (a number, URL). since, until, from narrow it; full_text: whole texts; coverage, freshness: how much was searched.`,
+    description: `Find by meaning and words, with nearby source contexts. Use the question and known context, never guessed filters. Auto: exact codes/quoted literals; words: substrings. Check corrections; assessment flags ambiguity. Cite the supporting message.`,
     schema: {
       query: z.string().min(1),
-      before: messageId.optional().describe("Older lexical matches; requires match words"),
-      match: z.enum(["hybrid", "words"]).default("hybrid").describe('"words": only messages holding the words'),
+      before: messageId.optional().describe("Older lexical matches; auto uses words with a cursor"),
+      match: z.enum(["auto", "hybrid", "words"]).default("auto").describe('auto: questions by meaning, codes/quotes by words'),
+      include_context: z.boolean().default(true).describe("Nearby sources for the best five hits"),
       chat_id: chatId.optional(),
       limit: z.number().int().min(1).max(50).default(20),
       since: z.string().min(4).optional().describe("ISO date or time"),
@@ -764,14 +771,16 @@ const TOOLS: readonly ToolDef[] = [
     },
     outputSchema: SEARCH_OUTPUT,
     write: false,
-    handler: async ({ query, match, chat_id, limit, since, until, from, full_text, before }, ctx) => {
+    handler: async ({ query, match, chat_id, limit, since, until, from, full_text, before, include_context }, ctx) => {
       const { wa } = ctx;
-      if (before !== undefined && match !== "words") throw new WazapError("INVALID_ID", "A message cursor requires match words.");
+      const owner = searchOwner(wa);
+      const plan = planSearch(query, match, before);
       const resolvedFrom = await resolveSenderFilter(wa, from);
       const sinceMs = parseMoment(since, "since");
       const untilMs = parseMoment(until, "until", true);
       // Without a chat, someone tagged #private is left out unless from names them (src/private-contacts.ts).
-      const filters = { sinceMs, untilMs, from: resolvedFrom, before, ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}) };
+      const filters = { sinceMs, untilMs, from: resolvedFrom, before, includeContext: include_context, deferContext: typeof wa.refreshSearch === "function", literal: plan.literal,
+        ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}) };
       const scope = [
         chat_id ? `in ${chat_id}` : null,
         from ? `from ${from}` : null,
@@ -784,10 +793,10 @@ const TOOLS: readonly ToolDef[] = [
       const echo = { query, ...(resolvedFrom === undefined ? {} : { from_resolved: resolvedFrom }) };
 
       let unavailable: WazapError | null = null;
-      if (match !== "words") {
+      if (plan.match !== "words") {
         let result: Synced<RecallAnswer> | null = null;
         try {
-          result = await wa.recall(query, chat_id, limit, filters);
+          result = await wa.recall(plan.query, chat_id, limit, filters);
         } catch (err) {
           if (!(err instanceof WazapError) || !MEANING_FAILURES.has(err.code)) throw err;
           // Meaning search off, failing or still starting: the history still answers by its words.
@@ -798,25 +807,35 @@ const TOOLS: readonly ToolDef[] = [
             wa,
             result.data.hits.map((hit) => hit.message)
           );
-          const hits = result.data.hits.map((hit, i) => ({ ...hit, message: identified[i]! }));
           const fresh = await readFreshness(wa, chat_id);
+          const finalRule = !ctx.deferSearchFinalization && chat_id === undefined ? await privateRule(ctx.hub, ctx.accountId) : filters.private;
+          checkSearchSource(ctx.hub, ctx.accountId, wa, owner);
+          const rankedMessages = result.data.hits.map(({ message: _message, ...rank }, i) => ({ ...identified[i]!, ...rank }));
+          const final = ctx.deferSearchFinalization ? { messages: rankedMessages, contexts: result.data.contexts, changed: false }
+            : finalizeSearch(wa, rankedMessages, result.data.contexts, chat_id, { ...filters, private: finalRule }, plan.query);
+          const hits = final.messages.map(({ score, rank_score, similarity, matched, from_index, ...message }) => ({ score, rank_score, similarity, matched, from_index, message }));
           const capped = result.data.lexicalCapped === true;
-          const answer: IdentifiedRecallAnswer = { hits, index: result.data.index, lexicalCapped: capped };
+          const answer: IdentifiedRecallAnswer = { ...result.data, hits, contexts: final.contexts, index: result.data.index, lexicalCapped: capped };
+          const assessment = assessSearch(query, hits.map((hit) => hit.message));
           // While the index is still catching up renderRecall says so itself; the coverage line only repeats it.
           const note = [
             capped ? LEXICAL_CAP_NOTE : null,
             privateNote(result.data.privateOmitted),
             result.data.index.state === "indexing" ? null : indexCoverageNote(result.data.index),
             freshnessNote(fresh),
+            final.changed ? SEARCH_CHANGED : null,
           ]
             .filter(Boolean)
             .join(" ");
           return ok(
-            `${renderRecall(title, answer, listTextCap(full_text))}${note ? `\n${note}` : ""}`,
+            `${renderRecall(title, answer, listTextCap(full_text))}${renderSearchContexts(final.contexts)}\n${assessment.note}${note ? `\n${note}` : ""}`,
             synced(result, {
               ...echo,
               mode: "hybrid",
               count: hits.length,
+              assessment,
+              ...(final.contexts === undefined ? {} : { contexts: final.contexts }),
+              ...(final.changed ? { changed_during_read: true } : {}),
               messages: hits.map(({ message, ...rank }) => ({ ...message, ...rank })),
               scan_capped: capped,
               ...privateFields(result.data.privateOmitted),
@@ -828,25 +847,32 @@ const TOOLS: readonly ToolDef[] = [
                 capped ? LEXICAL_CAP_NOTE : null,
                 privateNote(result.data.privateOmitted),
                 freshnessNote(fresh),
+                final.changed ? SEARCH_CHANGED : null,
               ]),
             })
           );
         }
       }
 
-      const found = await wa.searchMessages(query, chat_id, limit, filters);
-      const messages = await withSenderIdentity(wa, found.data);
+      const found = await wa.searchMessages(plan.query, chat_id, limit, filters);
+      const identified = await withSenderIdentity(wa, found.data);
       const fresh = await readFreshness(wa, chat_id);
+      const finalRule = !ctx.deferSearchFinalization && chat_id === undefined ? await privateRule(ctx.hub, ctx.accountId) : filters.private;
+      checkSearchSource(ctx.hub, ctx.accountId, wa, owner);
+      const final = ctx.deferSearchFinalization ? { messages: identified, contexts: found.contexts, changed: false }
+        : finalizeSearch(wa, identified, found.contexts, chat_id, { ...filters, private: finalRule }, plan.query);
+      const messages = final.messages;
+      const assessment = assessSearch(query, messages, plan.match === "words");
       const cov = searchCoverage(wa, chat_id, { sinceMs, untilMs });
       const fallback =
         unavailable === null
           ? null
           : `Meaning search is unavailable (${unavailable.message}); these results match the words only.${unavailable.fix ? ` ${unavailable.fix}` : ""}`;
-      const note = [fallback, scanCapNote(found), privateNote(found.privateOmitted), coverageNote(cov, chat_id !== undefined), freshnessNote(fresh)]
+      const note = [fallback, scanCapNote(found), privateNote(found.privateOmitted), coverageNote(cov, chat_id !== undefined), freshnessNote(fresh), final.changed ? SEARCH_CHANGED : null]
         .filter(Boolean)
         .join(" ");
       return ok(
-        renderMessages(title, messages, new Map(), note, listTextCap(full_text)),
+        `${renderMessages(title, messages, new Map(), note, listTextCap(full_text))}${renderSearchContexts(final.contexts)}\n${assessment.note}`,
         synced(found, {
           ...echo,
           mode: unavailable === null ? "words" : "keyword_fallback",
@@ -855,6 +881,9 @@ const TOOLS: readonly ToolDef[] = [
             ? {}
             : { recall_unavailable: { code: unavailable.code, message: unavailable.message, ...(unavailable.fix ? { fix: unavailable.fix } : {}) } }),
           count: messages.length,
+          assessment,
+          ...(final.contexts === undefined ? {} : { contexts: final.contexts }),
+          ...(final.changed ? { changed_during_read: true } : {}),
           messages,
           ...scanCapFields(found),
           ...privateFields(found.privateOmitted),
@@ -865,6 +894,7 @@ const TOOLS: readonly ToolDef[] = [
             scanCapNotice(found),
             privateNote(found.privateOmitted),
             freshnessNote(fresh),
+            final.changed ? SEARCH_CHANGED : null,
           ]),
         })
       );
@@ -1413,21 +1443,6 @@ function isStatusChat(chatId: string): boolean {
   return id === "status" || id === "status@broadcast";
 }
 
-/** A date or an ISO timestamp as epoch ms; a bare date for `until` means the end of that day. */
-function parseMoment(value: string | undefined, field: string, endOfDay = false): number | undefined {
-  if (value === undefined) return undefined;
-  const bareDate = /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
-  const ms = Date.parse(bareDate ? `${value.trim()}T${endOfDay ? "23:59:59.999" : "00:00:00"}` : value);
-  if (Number.isNaN(ms)) {
-    throw new WazapError(
-      "INVALID_ID",
-      `${field} is not a date: "${value}".`,
-      'Pass "2026-09-01" or an ISO timestamp like "2026-09-01T14:00:00+03:00"'
-    );
-  }
-  return ms;
-}
-
 function newestFirst(messages: MessageView[]): string[] {
   return [...messages].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).map((m) => m.message_id);
 }
@@ -1623,6 +1638,15 @@ function weakMatches(hits: ReadonlyArray<{ matched?: string; similarity?: number
 }
 
 const WEAK_NOTE = "Weak matches only: the query may have no real answer; treat these as guesses, not facts.";
+
+function renderSearchContexts(contexts: readonly SearchContext[] | undefined): string {
+  if (contexts === undefined || contexts.length === 0) return "";
+  return "\n\n# Nearby context (bounded; chronological, not additional search hits)\n" + contexts.map((context) =>
+    `For ${context.anchor_id}:\n` + context.messages.map((message) =>
+      `- ${message.timestamp} ${message.sender.name} [${message.message_id}]: ${message.text_offset ? "… " : ""}${message.text}${message.text_truncated ? "… [truncated; get_message reads the source]" : ""}`
+    ).join("\n")
+  ).join("\n\n");
+}
 
 /**
  * Ranked hits with the date always on the line and the score that ordered

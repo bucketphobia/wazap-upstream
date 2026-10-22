@@ -49,6 +49,8 @@ import type {
   HandledResult,
   SearchAnswer,
   SearchOptions,
+  SearchRefresh,
+  SearchSource,
   SyncState,
   UnansweredChat,
   UnconfirmedSend,
@@ -59,6 +61,8 @@ import type { AccountIdentity } from "./identity.js";
 import type { AccountStorage } from "./storage.js";
 import type { MessageViews } from "./views.js";
 import type { AccountVoice } from "./voice.js";
+import { CONTEXT_SHOWN, contextRows, renderContexts } from "./search-context.js";
+import { literalMatches } from "../search-query.js";
 
 /** Unknown sends a read of one chat lists at most. */
 const UNCONFIRMED_SENDS_SHOWN = 20;
@@ -74,6 +78,10 @@ const UNANSWERED_SCAN = 30;
 
 /** Messages read_messages walks past a type filter before it answers with what it found. */
 const TYPE_FILTER_SCAN = 10_000;
+
+/** Post-filters (private sources, literal prefixes, stories) must not turn small searches into full-history scans. */
+const SEARCH_FILTER_SCAN = 2_000;
+const SEARCH_FILTER_BATCH = 64;
 
 /** Chat kinds a person can be waiting in: every one but the status feed. */
 const WAITING_KINDS: readonly ChatKind[] = ["direct", "group", "newsletter", "broadcast"];
@@ -367,11 +375,15 @@ export class AccountReads {
       const found: StoredMessage[] = [];
       let privateOmitted = 0;
       let capped: number | null = null;
+      let examined = 0;
       const start = opts.before === undefined ? undefined : db.messages.get(opts.before)?.id;
       if (opts.before !== undefined && start === undefined) throw new WazapError("MESSAGE_NOT_FOUND", "The search cursor message is no longer available.");
       for (let before: number | undefined = start; found.length < limit; ) {
-        const page = db.search.text({ query, limit, ...filter, ...(before === undefined ? {} : { before }) });
+        const batch = opts.literal !== undefined || (people !== null && author === undefined) ? Math.max(limit, SEARCH_FILTER_BATCH) : limit;
+        const page = db.search.text({ query, limit: Math.min(batch, SEARCH_FILTER_SCAN - examined), ...filter, ...(before === undefined ? {} : { before }) });
         for (const message of page.items) {
+          examined++;
+          if (opts.literal !== undefined && !literalMatches(`${message.text ?? ""}\n${message.transcript ?? ""}`, opts.literal)) continue;
           // The status feed is not a chat: a story never answers a search.
           if (message.chatJid === STATUS_JID) continue;
           // Nor does someone kept #private, unless the call names them: counted, never an entry without its words.
@@ -388,14 +400,47 @@ export class AccountReads {
           break;
         }
         if (page.nextBefore === null) break;
+        if (examined >= SEARCH_FILTER_SCAN && found.length < limit) { capped = page.nextBefore; break; }
         before = page.nextBefore;
       }
       const views = this.views.viewsOfStored(found);
       const answer: SearchAnswer = this.host.synced(people === null ? views : views.map((view) => withoutPrivateQuote(view, people, author)));
+      if (opts.includeContext && !opts.deferContext) {
+        const top = found.slice(0, CONTEXT_SHOWN);
+        const rows = new Map(top.map((message) => [message.id, contextRows(db, message, opts, people, author)]));
+        answer.contexts = renderContexts(top, rows, this.views, people, author, query);
+      }
       if (capped !== null) answer.scanCapped = { searchedBackTo: isoWithOffset(secondOfId(capped) * 1000) };
       if (privateOmitted > 0) answer.privateOmitted = privateOmitted;
       return answer;
     });
+  }
+
+  /** No await: privacy, visibility and returned words share the same final snapshot. */
+  refreshSearch(messages: readonly SearchSource[], chatId: string | undefined, opts: SearchOptions, query: string): SearchRefresh {
+    this.host.ensureConnected();
+    const db = this.storage.db;
+    const people = chatId === undefined ? this.identity.privateScope(opts.private) : null;
+    const from = this.identity.senderFilter(opts.from);
+    const author = people !== null && from !== undefined && people.names(from) ? from : undefined;
+    const stored: StoredMessage[] = [];
+    const rows: SearchRefresh["rows"] = [];
+    for (const source of messages) {
+      const message = db.messages.get(source.message_id);
+      if (message === null || message.chatJid === STATUS_JID
+        || (author === undefined && people?.message(message))
+        || message.ts < (opts.sinceMs ?? 0) || message.ts > (opts.untilMs ?? Number.MAX_SAFE_INTEGER)) continue;
+      const fresh = this.views.viewOfStored(message);
+      // An edit has invalidated the rank: leave it for a fresh search rather
+      // than attaching yesterday's semantic score to today's words.
+      if (fresh.text !== source.text || fresh.transcript !== source.transcript) continue;
+      stored.push(message);
+      rows.push({ source_id: source.message_id, message: people === null ? fresh : withoutPrivateQuote(fresh, people, author) });
+    }
+    const contexts = opts.includeContext
+      ? renderContexts(stored, new Map(stored.slice(0, CONTEXT_SHOWN).map((m) => [m.id, contextRows(db, m, opts, people, author)])), this.views, people, author, query)
+      : undefined;
+    return { rows, dropped: messages.length - rows.length, ...(contexts === undefined ? {} : { contexts }) };
   }
 
   /**

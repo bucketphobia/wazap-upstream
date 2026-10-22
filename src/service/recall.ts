@@ -28,6 +28,7 @@ import type { RecallAnswer, RecallHit, SearchOptions, Synced } from "../wa-types
 import type { AccountIdentity } from "./identity.js";
 import { pageLimit } from "./util.js";
 import type { MessageViews } from "./views.js";
+import { CONTEXT_CANDIDATES, contextRows, namedEvidence, rankWithContext, renderContexts } from "./search-context.js";
 
 /** Hybrid hits recall ranks for variety before it cuts the list to the limit. */
 const RECALL_RERANK_WINDOW = 100;
@@ -36,7 +37,7 @@ const RECALL_RERANK_WINDOW = 100;
 const RECALL_RECENCY_HALF_LIFE_MS = 30 * 86_400_000;
 
 /** How long a search waits for its query's embedding (a sidecar starting cold takes longer) before it answers by words. */
-const RECALL_QUERY_WAIT_MS = 8_000;
+const RECALL_QUERY_WAIT_MS = 2_500;
 
 /** How long the recall status reuses its count of stored vectors. */
 const VECTOR_COUNT_TTL_MS = 10_000;
@@ -77,9 +78,11 @@ export class AccountRecall {
   vectorCount: { at: number; count: number } | null = null;
   /** The last QUERY_VECTORS_KEPT query embeddings, by query text; the model never changes while the service runs. */
   private readonly queryVectors = new Map<string, number[]>();
+  /** Identical simultaneous questions share one model request, including after a caller times out. */
+  private readonly queryFlights = new Map<string, Promise<number[] | undefined>>();
   /** The sidecar starts on the first embedding call, never at boot. */
   private recallEngineP: Promise<EmbedEngine> | null = null;
-  /** RECALL_QUERY_WAIT_MS; a field so a test need not wait eight seconds. */
+  /** RECALL_QUERY_WAIT_MS; a field so a test can shorten the budget. */
   private recallQueryWaitMs = RECALL_QUERY_WAIT_MS;
 
   constructor(
@@ -148,19 +151,27 @@ export class AccountRecall {
       const hidden = new Set(people === null || author !== undefined ? [] : ranked.filter((hit) => people.message(hit.message)));
       // The window the variety rules walk stays as wide as without anyone #private, so the rest rank as they would.
       const shown = ranked.filter((hit) => !hidden.has(hit)).slice(0, window);
-      const kept = diversify(shown, (hit) => ({ chat: hit.message.chatJid, text: `${hit.message.text ?? ""} ${hit.message.transcript ?? ""}` })).slice(0, limit);
+      const contexts = new Map<number, StoredMessage[]>();
+      const candidates = opts.includeContext ? shown.slice(0, Math.max(limit, CONTEXT_CANDIDATES)) : shown;
+      if (opts.includeContext) {
+        for (const hit of candidates) contexts.set(hit.message.id, contextRows(db, hit.message, opts, people, author));
+      }
+      const rankedContexts = opts.includeContext ? rankWithContext(namedEvidence(candidates, query, contexts, this.identity), query, contexts) : candidates;
+      const kept = diversify(rankedContexts, (hit) => ({ chat: hit.message.chatJid, text: `${hit.message.text ?? ""} ${hit.message.transcript ?? ""}` })).slice(0, limit);
       // The #private hits that would have been among these: ranked at or above the lowest one kept, or all of them when fewer came.
       const floor = kept.length < limit ? -Infinity : Math.min(...kept.map((hit) => hit.score));
       const privateOmitted = [...hidden].filter((hit) => hit.score >= floor).length;
       const views = this.views.viewsOfStored(kept.map((hit) => hit.message)).map((view) => (people === null ? view : withoutPrivateQuote(view, people, author)));
       const hits = kept.map((hit, i) => ({
         score: hit.score,
+        ...(hit.contextScore === undefined ? {} : { rank_score: hit.contextScore }),
         similarity: hit.similarity,
         matched: (hit.lexicalRank !== null && hit.semanticRank !== null ? "both" : hit.lexicalRank !== null ? "words" : "meaning") as RecallHit["matched"],
         message: views[i]!,
         from_index: hit.message.raw === null,
       })) satisfies RecallAnswer["hits"];
-      return this.host.synced({ hits, index: this.recallStatus(), lexicalCapped: result.lexicalCapped, ...(privateOmitted > 0 ? { privateOmitted } : {}) });
+      return this.host.synced({ hits, index: this.recallStatus(), lexicalCapped: result.lexicalCapped, ...(privateOmitted > 0 ? { privateOmitted } : {}),
+        ...(opts.includeContext && !opts.deferContext ? { contexts: renderContexts(kept.map((hit) => hit.message), contexts, this.views, people, author, query) } : {}) });
     });
   }
 
@@ -237,7 +248,7 @@ export class AccountRecall {
   /**
    * The query's embedding, waited for at most recallQueryWaitMs: past it the
    * search answers by words (TIMEOUT), while the sidecar keeps starting and
-   * the request under way finishes for nobody, so the next search finds it up.
+   * a late success stays in the bounded vector cache for the next attempt.
    */
   private async queryVector(query: string): Promise<number[] | undefined> {
     const kept = this.queryVectors.get(query);
@@ -246,16 +257,17 @@ export class AccountRecall {
       this.queryVectors.set(query, kept);
       return kept;
     }
-    const vector = await this.embedQuery(query);
-    if (vector === undefined) return undefined;
-    this.queryVectors.set(query, vector);
-    if (this.queryVectors.size > QUERY_VECTORS_KEPT) this.queryVectors.delete(this.queryVectors.keys().next().value!);
-    return vector;
-  }
-
-  private async embedQuery(query: string): Promise<number[] | undefined> {
-    const embedding = this.recallEmbed([query], "query");
-    embedding.catch(() => {});
+    let embedding = this.queryFlights.get(query);
+    if (embedding === undefined) {
+      if (this.queryFlights.size >= QUERY_VECTORS_KEPT) throw new WazapError("RECALL_UNAVAILABLE", "The meaning search is busy; these results use words only.");
+      embedding = this.recallEmbed([query], "query").then(([vector]) => {
+        if (vector === undefined || this.host.stopped()) return undefined;
+        this.queryVectors.set(query, vector);
+        if (this.queryVectors.size > QUERY_VECTORS_KEPT) this.queryVectors.delete(this.queryVectors.keys().next().value!);
+        return vector;
+      }).finally(() => this.queryFlights.delete(query));
+      this.queryFlights.set(query, embedding);
+    }
     let timer: NodeJS.Timeout | undefined;
     const late = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -265,8 +277,7 @@ export class AccountRecall {
       timer.unref();
     });
     try {
-      const [vector] = await Promise.race([embedding, late]);
-      return vector;
+      return await Promise.race([embedding, late]);
     } finally {
       clearTimeout(timer);
     }
@@ -319,6 +330,7 @@ export class AccountRecall {
    * released whenever its start resolves.
    */
   async stopRecall(): Promise<void> {
+    this.queryVectors.clear();
     const feedStop = this.embedFeed?.stop() ?? Promise.resolve();
     if (this.recallEngineP !== null) {
       void this.recallEngineP.then((engine) => engine.stop()).catch(() => {});

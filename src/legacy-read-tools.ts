@@ -1,12 +1,14 @@
 /** Compatibility for remote connectors whose cached catalogue predates 1.0. */
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { assessSearch, parseMoment } from "./search-query.js";
+import { checkSearchSource, finalizeSearch, searchOwner, SEARCH_CHANGED } from "./search-finalize.js";
 import { resolveToolAccount } from "./account-resolve.js";
 import { resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { privateRule } from "./catchup.js";
 import { compactRecent } from "./recent-compact.js";
 import { WazapError } from "./errors.js";
-import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs, type WhatsAppApi } from "./wa-types.js";
+import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs, type SearchContext, type WhatsAppApi } from "./wa-types.js";
 import type { ToolArgs, ToolCtx, ToolDef, ToolResult } from "./tool-runtime.js";
 
 const account = {
@@ -141,28 +143,61 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
   delete search.outputSchema;
   search.handler = async (args, ctx) => {
     const accounts = [];
-    const messages: Array<MessageView & { account_id: string }> = [];
+    let messages: Array<MessageView & { account_id: string; account_rank: number }> = [];
+    let contexts: Array<SearchContext & { account_id: string }> = [];
     const bindings = selected(args, ctx);
+    const owners = bindings.map((b) => searchOwner(b.wa));
     if (args.before !== undefined && bindings.length > 1) throw new WazapError("INVALID_ID", "A search cursor belongs to one account.", "Pass account_id with before");
-    for (const binding of bindings) {
-      const found = await canonical("search").handler({ ...args, match: "words" }, { ...ctx, wa: binding.wa, accountId: binding.id });
+    const results = await Promise.all(bindings.map((binding) => canonical("search").handler(args, { ...ctx, wa: binding.wa, accountId: binding.id, deferSearchFinalization: true })));
+    for (const [i, found] of results.entries()) {
+      const binding = bindings[i]!;
       if (found.isError) return found;
       const payload = found.structuredContent!;
       const hits = payload.messages as MessageView[];
-      accounts.push({ account_id: binding.id, coverage: payload.coverage, freshness: payload.freshness, sync: payload.sync, notes: payload.notes as string[] | undefined,
+      accounts.push({ account_id: binding.id, mode: payload.mode, index: payload.index, recall_unavailable: payload.recall_unavailable,
+        changed_during_read: payload.changed_during_read,
+        from_resolved: payload.from_resolved as string | undefined,
+        coverage: payload.coverage, freshness: payload.freshness, sync: payload.sync, notes: payload.notes as string[] | undefined,
         private_omitted: payload.private_omitted as number | undefined, scan_capped: payload.scan_capped, next_before: payload.next_before });
-      messages.push(...hits.map((message) => ({ ...message, account_id: binding.id })));
+      messages.push(...hits.map((message, rank) => ({ ...message, account_id: binding.id, account_rank: rank + 1 })));
+      contexts.push(...((payload.contexts ?? []) as SearchContext[]).map((context) => ({ ...context, account_id: binding.id })));
     }
+    // One account may change while another one's identity/model work awaits.
+    // Refresh all rules, then re-read every source synchronously before merge.
+    const rules = await Promise.all(bindings.map((b) => args.chat_id === undefined ? privateRule(ctx.hub, b.id) : undefined));
+    const finalMessages: typeof messages = [];
+    const finalContexts: typeof contexts = [];
+    let changed = accounts.some((entry) => entry.changed_during_read === true);
+    for (const [i, binding] of bindings.entries()) {
+      checkSearchSource(ctx.hub, binding.id, binding.wa, owners[i]!);
+      const final = finalizeSearch(binding.wa, messages.filter((m) => m.account_id === binding.id), contexts.filter((c) => c.account_id === binding.id),
+        args.chat_id as string | undefined, { includeContext: args.include_context !== false, private: rules[i], from: accounts[i]!.from_resolved,
+          sinceMs: parseMoment(args.since as string | undefined, "since"), untilMs: parseMoment(args.until as string | undefined, "until", true) }, args.query as string);
+      finalMessages.push(...final.messages);
+      finalContexts.push(...(final.contexts ?? []).map((c) => ({ ...c, account_id: binding.id })));
+      changed ||= final.changed;
+    }
+    messages = finalMessages;
+    contexts = finalContexts;
     // Preserve the database cursor order within one account, including equal timestamps.
-    if (accounts.length > 1) messages.sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+    const modes = new Set(accounts.map((entry) => entry.mode));
+    const mode = modes.size === 1 ? accounts[0]!.mode : "mixed";
+    if (accounts.length > 1) messages.sort(mode === "words"
+      ? (a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)
+      : (a, b) => a.account_rank - b.account_rank || Date.parse(b.timestamp) - Date.parse(a.timestamp));
     const shown = messages.slice(0, args.limit as number);
-    return result({ query: args.query, mode: "words", count: shown.length, messages: shown, accounts,
-      next_before: accounts.length === 1 && shown.length === args.limit ? shown.at(-1)!.message_id : null,
-      partial: accounts.some((entry) => entry.scan_capped === true) || (accounts.length > 1 && messages.length >= (args.limit as number)),
-      notes: [...new Set(accounts.flatMap((entry) => entry.notes ?? []))],
+    const top = new Set(shown.slice(0, 5).map((m) => `${m.account_id}:${m.message_id}`));
+    const assessment = assessSearch(args.query as string, shown.map((m) => ({ ...m, chat_id: `${m.account_id}:${m.chat_id}` })), mode === "words");
+    return result({ query: args.query, mode, count: shown.length, messages: shown, accounts, assessment,
+      ...(args.include_context === false ? {} : { contexts: contexts.filter((c) => top.has(`${c.account_id}:${c.anchor_id}`)) }),
+      next_before: mode !== "hybrid" && accounts.length === 1 && shown.length === args.limit ? shown.at(-1)!.message_id : null,
+      partial: changed || accounts.some((entry) => entry.scan_capped === true) || (accounts.length > 1 && messages.length >= (args.limit as number)),
+      ...(changed ? { changed_during_read: true } : {}),
+      notes: [...new Set([...accounts.flatMap((entry) => entry.notes ?? []), ...(changed ? [SEARCH_CHANGED] : [])])],
       private_omitted: accounts.reduce((n, entry) => n + (entry.private_omitted ?? 0), 0),
       coverage: accounts.length === 1 ? accounts[0]!.coverage : null,
       freshness: accounts.length === 1 ? accounts[0]!.freshness : null,
+      ...(accounts.length === 1 && accounts[0]!.recall_unavailable !== undefined ? { recall_unavailable: accounts[0]!.recall_unavailable } : {}),
       account_id: accounts.length === 1 ? accounts[0]!.account_id : null,
       sync: accounts.some((entry) => entry.sync !== "done") ? "partial" : "done" });
   };

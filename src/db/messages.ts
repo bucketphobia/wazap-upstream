@@ -1278,6 +1278,35 @@ export class Messages {
     return pageOf(rows.map(messageFromRow), limit);
   }
 
+  /**
+   * A small conversation window around a visible message, using the chat's
+   * existing index. Never asks the phone or walks the rest of the history.
+   * Folds, tombstones, expiry and clear barriers have the same meaning here
+   * as on a chat page. The anchor is read again, not trusted from a search.
+   */
+  around(sid: string, options: { radius?: number; spanMs?: number; since?: number; until?: number } = {}): StoredMessage[] {
+    const anchor = this.get(sid);
+    if (anchor === null) return [];
+    const chat = this.identity.chat(anchor.chatJid);
+    if (chat === null) return [];
+    const radius = Math.max(0, Math.min(3, Math.floor(options.radius ?? 3)));
+    const span = Math.max(0, Math.min(30 * 60_000, options.spanMs ?? 15 * 60_000));
+    const since = Math.max(options.since ?? 0, anchor.ts - span);
+    const until = Math.min(options.until ?? NO_UPPER_BOUND, anchor.ts + span);
+    if (anchor.ts < since || anchor.ts > until) return [];
+    const family = this.identity.chatIdsOf(chat);
+    const inChat = chatCondition(family);
+    const once = foldTwinCondition(family, chat.id);
+    const side = (older: boolean): StoredMessage[] => this.c.all<MessageRow>(
+      `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
+       WHERE ${inChat.sql} AND m.id ${older ? "<" : ">"} ? AND m.id >= ? AND m.id < ?
+         AND m.ts >= ? AND m.ts <= ? AND ${VISIBLE} ${once.sql}
+       ORDER BY m.id ${older ? "DESC" : "ASC"} LIMIT ?`,
+      ...inChat.params, anchor.id, idLowerBound(since), idUpperBound(until), since, until, this.c.now(), ...once.params, radius
+    ).map(messageFromRow);
+    return [...side(true).reverse(), anchor, ...side(false)];
+  }
+
   /** Messages across every chat since a time, newest first, walked straight off the primary key. */
   recent(options: {
     since: number;

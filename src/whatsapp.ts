@@ -1082,6 +1082,10 @@ export class WhatsAppService implements WhatsAppApi {
     return this.recallIndex.recall(query, chatId, limit, opts);
   }
 
+  refreshSearch(...args: Parameters<AccountReads["refreshSearch"]>): ReturnType<AccountReads["refreshSearch"]> {
+    return this.reads.refreshSearch(...args);
+  }
+
   /** The recent exchange and the user's style in a chat, for a contact find_contact resolved. */
   syncContacts(): Promise<ContactSyncResult> {
     return this.contacts.syncContacts();

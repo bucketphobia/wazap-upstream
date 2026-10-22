@@ -74,12 +74,12 @@ test("contact search returns ambiguous candidates; exact message search ignores 
   f.arrive(DAN, "Alt transport");
   const contacts = await f.call("search_contacts", { query: "Angela" });
   assert.equal(contacts.structuredContent.count, 2);
-  const found = await f.call("search_messages", { query: "sedinta", chat_id: ANA, from: ANA, since: new Date(Date.now() - 86400000).toISOString() });
+  const found = await f.call("search_messages", { query: "sedinta", match: "words", chat_id: ANA, from: ANA, since: new Date(Date.now() - 86400000).toISOString() });
   assert.equal(found.structuredContent.messages[0].message_id, id);
   assert.equal(found.structuredContent.mode, "words");
   const exact = await f.call("get_message", { message_id: id });
   assert.equal(exact.structuredContent.text, found.structuredContent.messages[0].text);
-  const newest = await f.call("search_messages", { query: "transport", limit: 1 });
+  const newest = await f.call("search_messages", { query: "transport", match: "words", limit: 1 });
   const older = await f.call("search_messages", { query: "transport", limit: 1, before: newest.structuredContent.next_before });
   assert.equal(older.structuredContent.messages[0].message_id, id);
   assert.notEqual(newest.structuredContent.messages[0].message_id, id);
@@ -568,7 +568,8 @@ test("remote learn and server instructions use callable cached workflows; local 
   const guide = (await f.call("learn", {})).content[0].text;
   for (const name of LEGACY) assert.ok(guide.includes(name), name);
   assert.doesNotMatch(guide, /\b(?:catch_up|find_contact|search|get_media|remember|send_message|confirm_send)\b/);
-  assert.match(guide, /words,\s+not meaning/i);
+  assert.match(guide, /searches words\s+and meaning/i);
+  assert.match(guide, /contexts contains small, fresh/i);
   assert.match(guide, /candidates.*not.*obligations/i);
   const local = schemaCheckedTools(f.svc, { allowWrite: false });
   assert.match((await local.call("learn", {})).content[0].text, /catch_up/);

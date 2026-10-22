@@ -1,6 +1,6 @@
 {
   "name": "wazap-mcp",
-  "version": "1.4.7",
+  "version": "1.5.0",
   "mcpName": "io.github.razvangirgiz/wazap",
   "description": "WhatsApp for your AI agent. MCP server over Baileys: pairing-code login, several accounts, stdio or HTTP.",
   "license": "MIT",
@@ -44,6 +44,7 @@
     "icon": "node scripts/make-icon.mjs",
     "bench:db": "npm run build && node scripts/bench-db.mjs",
     "bench:tools": "npm run build && node scripts/bench-tools.mjs",
+    "bench:search": "npm run build && node scripts/bench-search.mjs",
     "fold:table": "npm run build && node scripts/gen-fold-table.mjs",
     "lint": "eslint .",
     "check": "node scripts/check.mjs",

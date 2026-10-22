@@ -24,6 +24,8 @@ export type ToolArgs = Record<string, unknown>;
 export interface ToolCtx {
   /** Give remote connectors workflows that work with their cached read names. */
   legacyReads?: boolean;
+  /** Internal only: the cached multi-account adapter finalizes all sources together after its awaits. */
+  deferSearchFinalization?: boolean;
   wa: WhatsAppApi;
   hub: AccountSource;
   allowWrite: boolean;

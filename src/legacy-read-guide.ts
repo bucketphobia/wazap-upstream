@@ -4,7 +4,7 @@ import { ERROR_GUIDE, type ErrorCode } from "./errors.js";
 export const LEGACY_READ_INSTRUCTIONS =
   "Call `learn` first and use the tool names listed by your client. This remote connection supports cached read names: " +
   "`get_recent_messages` for a bounded page, `get_unanswered` for possible replies, `search_contacts` for people and " +
-  "`search_messages` for words. Pass `all_accounts: true` on the two summary tools to cover every authorized account; " +
+  "`search_messages` for words and meaning, with nearby context in the same call. Pass `all_accounts: true` on the two summary tools to cover every authorized account; " +
   "other calls use the default unless `account_id` names one. Do not assume a tool absent from your catalogue is callable.";
 
 const READ_ERRORS = [
@@ -51,10 +51,18 @@ Disconnected or incomplete history is not evidence that nothing happened.
   outside WhatsApp may have handled the ask. mark_handled only after the user says so.
 - Find a person: search_contacts(query). Several matches require clarification;
   a self-given name is not proof of identity. get_contact gives one contact's details.
-- Find a message: search_messages(query, chat_id, since, until, from) matches words,
-  not meaning. Prefer a scoped phrase, then a shorter fragment or synonym. next_before
-  goes into before with the same query and one account. get_message opens the result;
-  read_messages(chat_id) gives context, before its oldest message_id gives older history.
+- Find a message: search_messages(query, chat_id, since, until, from) searches words
+  and meaning. Pass the natural question plus relevant context the user already gave;
+  never invent a person or date to narrow it. Quoted literals, codes and URLs use an
+  exact fast path; match: "words" forces exact text. contexts contains small, fresh
+  chronological windows for the best five hits, with source ids; include_context: false
+  skips them. Context may include other authors, within the requested dates. Results
+  are candidates: check corrections and cite the message actually supporting the answer.
+  If assessment says ambiguous, use the user's conversation context or ask one short
+  clarification; do not choose a chat from its rank alone. Empty/partial history is not
+  proof of absence. keyword_fallback and recall_unavailable say meaning did not run.
+  next_before goes into before with the same query and one account (lexical matching only).
+  get_message opens the full source; read_messages gives more context only if needed.
 - Files and photos: download_media(message_id). Inline images can be inspected;
   a returned path is on the server, not a ChatGPT download link. Do not pass save_to
   on this remote connection. read_messages(include_previews: true) adds small previews.
