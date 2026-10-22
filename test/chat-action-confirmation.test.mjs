@@ -40,6 +40,9 @@ for (const action of ["archive", "unarchive", "clear", "delete", "block", "unblo
     assert.equal(p.structuredContent.status, "preview");
     assert.equal(typeof p.structuredContent.confirmation_id, "string");
     assert.match(p.structuredContent.preview, /Ana/);
+    assert.match(p.structuredContent.preview, /Chat: Ana \(\+40 700 000 002\)\nAction:/);
+    assert.ok(!p.structuredContent.preview.includes(ANA));
+    assert.equal(p.structuredContent.target.chat_id, ANA, "display formatting never changes the frozen address");
     assert.match(p.structuredContent.preview, /default/);
     assert.equal(f.effects.length, 0, "a preview may not call a mutation socket method");
     const result = await f.call("manage_chat", f.confirmation(p));
@@ -57,6 +60,18 @@ test("confirm:true without the server's identifier cannot bypass the preview", a
   const f = fixture(t);
   const p = await f.preview("delete", { confirm: true, force: true });
   assert.equal(p.structuredContent.status, "preview");
+  assert.equal(f.effects.length, 0);
+});
+
+test("a preview with no revealed phone retains a separate target reference, never a made-up phone", async (t) => {
+  const f = fixture(t);
+  const lid = "123456789012345@lid";
+  f.sock.ev.emit("contacts.upsert", [{ id: lid, name: "Ana" }]);
+  const p = await f.preview("archive", { chat_id: lid });
+  assert.ok(!p.isError, JSON.stringify(p));
+  assert.match(p.structuredContent.preview, /Chat: Ana\nChat reference: 123456789012345@lid\n/);
+  assert.ok(!p.structuredContent.preview.includes("+123456789012345"));
+  assert.equal(p.structuredContent.chat_id, lid);
   assert.equal(f.effects.length, 0);
 });
 

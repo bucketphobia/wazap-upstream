@@ -50,7 +50,7 @@ test("a note on a contact rides along wherever the person shows, and lives in th
   const found = await call("find_contact", { name: "Dan" });
   assert.equal(found.structuredContent.contact.note, "Hermi, my own agent");
   assert.match(found.content[0].text, /note: Hermi, my own agent/);
-  assert.match((await call("list_chats", {})).content[0].text, /## Dan · Hermi, my own agent/);
+  assert.match((await call("list_chats", {})).content[0].text, /## Dan \(\+40 700 000 003\) · Hermi, my own agent/);
   assert.equal(svc.db.identity.notes(DAN).note, "Hermi, my own agent");
 
   const again = openService(WhatsAppService, { ...offlineConfig("x"), dataDir: svc.config.dataDir });

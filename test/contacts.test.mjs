@@ -412,7 +412,7 @@ test("find_contact asks for a name or a tag, and lists a tag with each person's 
   assert.deepEqual(listed.structuredContent.contacts, [
     { chat_id: "40700000061@s.whatsapp.net", name: "Ionut", number: "40700000061", saved: true, tags: ["furnizori"], fields: { role: "contabil" } },
   ]);
-  assert.match(listed.content[0].text, /Ionut — 40700000061@s\.whatsapp\.net \(40700000061\) · saved · #furnizori · role: contabil/);
+  assert.match(listed.content[0].text, /Ionut \(\+40 700 000 061\) · saved · #furnizori · role: contabil\n {2}chat_id: 40700000061@s\.whatsapp\.net/);
 
   const none = await call("find_contact", { tag: "client" });
   assert.match(none.content[0].text, /Nobody is filed under #client/);

@@ -402,7 +402,7 @@ test("the manage_group schema accepts every new action and carries value and par
     assert.equal(result.isError, undefined, `${action} ${value}`);
   }
   const listed = await call({ group_id: GROUP, action: "list_join_requests" });
-  assert.match(listed.content[0].text, /- Ana — `40700000002@s\.whatsapp\.net` \(asked .+, via invite_link\)/);
+  assert.match(listed.content[0].text, /- Ana \(\+40 700 000 002\) \(asked .+, via invite_link\)/);
   assert.equal(listed.structuredContent.join_requests[0].name, "Ana");
   await call({ group_id: GROUP, action: "approve_join_requests", participant_ids: [ANA] });
   await call({ group_id: GROUP, action: "reject_join_requests", participant_ids: [DAN] });

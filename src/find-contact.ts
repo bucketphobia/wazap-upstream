@@ -27,6 +27,7 @@
  *   account, and the user says yes to that.
  */
 import { z } from "zod";
+import { contactLabel } from "./contact-display.js";
 import type { AccountBinding } from "./account-hub.js";
 import { draftContextEnabled } from "./accounts.js";
 import { openAsk, ownThroughOf } from "./catchup-scan.js";
@@ -438,7 +439,7 @@ export function renderFindContact(structured: Record<string, unknown>): string {
         cut,
         ...contacts.map(
           (c) =>
-            `- ${c.name as string}${c.account_id ? ` (account ${c.account_id as string})` : ""} — ${c.chat_id as string}${c.number ? ` (${c.number as string})` : ""}${c.saved ? " · saved" : ""}${filedLine(c) ? ` · ${filedLine(c)}` : ""}`
+            `- ${contactLabel(c.name as string, c.chat_id as string, c.number as string | null)}${c.account_id ? ` (account ${c.account_id as string})` : ""}${c.saved ? " · saved" : ""}${filedLine(c) ? ` · ${filedLine(c)}` : ""}\n  chat_id: ${c.chat_id as string}`
         ),
         unsearched,
       ]
@@ -446,10 +447,11 @@ export function renderFindContact(structured: Record<string, unknown>): string {
         .join("\n");
     }
     case "resolved": {
-      const contact = structured.contact as { name: string; chat_id: string; account_id: string; matched: { source: string; value: string; class: string } };
+      const contact = structured.contact as { name: string; chat_id: string; number?: string | null; account_id: string; matched: { source: string; value: string; class: string } };
       const how = contact.matched.class === "exact" || contact.matched.class === "word" ? "" : `, ${contact.matched.class}`;
       const lines = [
-        `"${query.name}" is ${contact.name}: chat_id ${contact.chat_id} on account ${contact.account_id} (matched ${contact.matched.source}${how}: ${contact.matched.value}).`,
+        `"${query.name}" is ${contactLabel(contact.name, contact.chat_id, contact.number)} on account ${contact.account_id} (matched ${contact.matched.source}${how}: ${contact.matched.value}).`,
+        `chat_id: ${contact.chat_id}`,
       ];
       const filed = filedLine(structured.contact as Record<string, unknown>);
       if (filed !== null) lines.push(filed);

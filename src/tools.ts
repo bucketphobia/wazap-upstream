@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { contactLabel, formatPhone } from "./contact-display.js";
 import { legacyReadTools } from "./legacy-read-tools.js";
 import { LEGACY_READ_INSTRUCTIONS } from "./legacy-read-guide.js";
 import { previewChatAction, confirmChatAction } from "./chat-action-drafts.js";
@@ -981,7 +982,7 @@ const TOOLS: readonly ToolDef[] = [
         "## Participants",
         ...info.participants.map(
           (p) =>
-            `- ${p.name}${p.is_admin ? " (admin)" : ""}${looksUnnamed({ chat_id: p.contact_id, name: p.name }) ? " [unnamed]" : ""} — \`${p.contact_id}\``
+            `- ${contactLabel(p.name, p.contact_id)}${p.is_admin ? " (admin)" : ""}${looksUnnamed({ chat_id: p.contact_id, name: p.name }) ? " [unnamed]" : ""}\n  contact_id: ${p.contact_id}`
         ),
       ]
         .filter((line): line is string => line !== null)
@@ -1422,7 +1423,8 @@ function renderChats(chats: ChatSummary[], filter: string): string {
       c.archived ? "archived" : null,
       c.left ? "left" : null,
     ].filter(Boolean);
-    lines.push(`## ${c.name}${flags.length ? ` [${flags.join(", ")}]` : ""}${c.note ? ` · ${c.note}` : ""}`);
+    const name = c.type === "group" ? c.name : contactLabel(c.name, c.chat_id, c.phone);
+    lines.push(`## ${name}${flags.length ? ` [${flags.join(", ")}]` : ""}${c.note ? ` · ${c.note}` : ""}`);
     lines.push(`- **chat_id**: \`${c.chat_id}\``);
     if (c.last_message) {
       lines.push(
@@ -1706,7 +1708,7 @@ function renderStories(
   for (const m of stories) {
     if (m.sender.id !== author) {
       author = m.sender.id;
-      lines.push(`## ${m.sender.name} — \`${m.sender.id}\``);
+      lines.push(`## ${contactLabel(m.sender.name, m.sender.id, m.sender.phone)}`);
     }
     const label = labels.get(m.message_id);
     lines.push(`- ${m.age} · ${truncate(m.text, textCap)}${label ? ` (${label})` : ""} · id: \`${m.message_id}\``);
@@ -1741,7 +1743,7 @@ function renderContactCard(c: ContactSummary): string {
   const lines = [
     `# ${c.name}`,
     `- **contact_id**: \`${c.contact_id}\``,
-    c.number ? `- **number**: ${c.number}` : null,
+    c.number ? `- **number**: ${formatPhone(c.number)}` : null,
     c.note ? `- **note**: ${c.note}` : null,
     c.tags?.length ? `- **tags**: ${c.tags.map((t) => `#${t}`).join(" ")}` : null,
     ...Object.entries(c.fields ?? {}).map(([key, value]) => `- **${key}**: ${value}`),
@@ -1759,7 +1761,7 @@ function renderJoinRequests(requests: JoinRequest[]): string[] {
     const details = [r.requested_at ? `asked ${r.requested_at}` : null, r.method ? `via ${r.method}` : null]
       .filter((part): part is string => part !== null)
       .join(", ");
-    return `- ${r.name} — \`${r.id}\`${details ? ` (${details})` : ""}`;
+    return `- ${contactLabel(r.name, r.id)}${details ? ` (${details})` : ""}\n  id: ${r.id}`;
   });
 }
 

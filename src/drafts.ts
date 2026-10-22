@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { contactLabel } from "./contact-display.js";
 import type { SendRecord, Sends } from "./db/index.js";
 import { styleCheckLines, type StyleCheck } from "./draft-style.js";
 import { WazapError } from "./errors.js";
@@ -383,9 +384,7 @@ export function receiptText(payload: DraftPayload): string {
 
 /** The resolved recipient the way the preview and the sent line show it. */
 export function describeTarget(to: OutgoingTarget): string {
-  if (to.number) return `${to.name} (${formatNumber(to.number)})`;
-  if (to.chat_id.endsWith("@g.us")) return `${to.name} (group)`;
-  return to.name;
+  return contactLabel(to.name, to.chat_id, to.number);
 }
 
 export function formatToLine(to: OutgoingTarget): string {
@@ -491,16 +490,4 @@ function mediaLabel(payload: Extract<DraftPayload, { kind: "media" }>): string {
     return url;
   }
   return "file";
-}
-
-/** +40 722 123 456 from stored digits, so the preview matches the send skill. */
-function formatNumber(digits: string): string {
-  const raw = digits.startsWith("+") ? digits.slice(1) : digits;
-  if (!/^\d+$/.test(raw) || raw.length < 4) return digits.startsWith("+") ? digits : `+${digits}`;
-  const rest =
-    raw
-      .slice(2)
-      .match(/.{1,3}/g)
-      ?.join(" ") ?? raw.slice(2);
-  return `+${raw.slice(0, 2)} ${rest}`;
 }

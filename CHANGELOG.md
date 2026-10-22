@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.2
+
+- Show formatted phone numbers beside people’s names in contact and chat lists, resolved contact results, stories, group members, join requests and chat-action previews. A paired LID uses its known number; an unresolved LID or group id is never interpreted as a phone. Number-only names are not repeated.
+- Keep routing ids and E.164 numbers unchanged in structured output, and explicit references available for text-only clients. Server instructions tell assistants to show names and phones instead of internal ids. Chat confirmations still bind to the original frozen target.
+- Reuse one small formatter for previews and reads; no new dependency, lookup, schema migration or network request.
+
 ## 1.5.1
 
 - Keep the remote catalogue at the current 23 tools (15 without writes). Cached read aliases remain callable and schema-checked but no longer duplicate summaries, search, files or transcripts in `tools/list`. Guides prefer current names and explain the cached fallback; the old account-list call also resolves through status.

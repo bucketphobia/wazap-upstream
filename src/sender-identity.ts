@@ -8,6 +8,7 @@
  */
 
 import { WazapError } from "./errors.js";
+import { contactLabel } from "./contact-display.js";
 import { isGroupId } from "./ids.js";
 import { phoneOf } from "./messages.js";
 import { realName } from "./service/identity.js";
@@ -73,6 +74,7 @@ function isIdOrPhone(value: string): boolean {
 interface NamedCandidate {
   id: string;
   name: string;
+  number: string | null;
 }
 
 /**
@@ -97,7 +99,7 @@ export async function resolveSenderFilter(wa: WhatsAppApi, from: string | undefi
     const key = number ?? id;
     if (seen.has(key)) return;
     seen.add(key);
-    named.push({ id, name });
+    named.push({ id, name, number });
   };
 
   const contacts = (await wa.searchContacts?.(value, 10).catch(() => undefined)) ?? [];
@@ -123,7 +125,7 @@ export async function resolveSenderFilter(wa: WhatsAppApi, from: string | undefi
   }
   throw new WazapError(
     "INVALID_ID",
-    `"${value}" names more than one person: ${pool.map((n) => `${n.name} (${n.id})`).join(", ")}.`,
+    `"${value}" names more than one person: ${pool.map((n) => contactLabel(n.name, n.id, n.number)).join(", ")}.`,
     'Pass "from" as the contact_id or phone number of the one you mean'
   );
 }

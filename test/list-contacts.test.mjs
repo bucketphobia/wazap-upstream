@@ -245,7 +245,8 @@ test("the tool answers metadata and no message words, with defaults, and the acc
   assert.equal(body.account_id, "default");
   const all = JSON.stringify(answer);
   assert.doesNotMatch(all, /parola|4321/, "never a word of a message");
-  assert.match(answer.content[0].text, /^# Address book — recent \(2 of 2\)\n- Ana Pop — \+40722000001 · last in \d{4}-\d{2}-\d{2} \d{2}:\d{2}\n- Bogdan — \+40722000002 · no chat$/);
+  assert.match(answer.content[0].text, /^# Address book — recent \(2 of 2\)\n- Ana Pop — \+40 722 000 001 · last in \d{4}-\d{2}-\d{2} \d{2}:\d{2}\n- Bogdan — \+40 722 000 002 · no chat$/);
+  assert.equal(body.contacts[0].phone, "+40722000001", "the integration still receives E.164, without spaces");
 
   const refused = await call("list_contacts", { cursor: "nope" });
   assert.equal(refused.isError, true);

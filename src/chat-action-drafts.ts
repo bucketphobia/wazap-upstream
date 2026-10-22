@@ -1,6 +1,6 @@
 /** Bounded, credential-owned previews for chat mutations. Restarting forgets approvals. */
 import { createHash, randomUUID } from "node:crypto";
-import { DRAFT_TTL_MS } from "./drafts.js";
+import { describeTarget, DRAFT_TTL_MS } from "./drafts.js";
 import { WazapError } from "./errors.js";
 import type { ToolArgs, ToolCtx } from "./tool-runtime.js";
 import type { ChatAction, ChatActionOptions, ChatActionResult, OutgoingTarget, WhatsAppApi } from "./wa-types.js";
@@ -102,7 +102,8 @@ export async function previewChatAction(args: ToolArgs, ctx: ToolCtx): Promise<R
     action === "block" ? "This account will block this person." : action === "unblock" ? "This account will unblock this person." :
       action === "pin_message" || action === "unpin_message" ? "Every member of this chat can see this change." : "This changes the linked account's chat state.";
   const duration = action === "mute" ? `\nDuration: ${options.muteHours ?? 8} hours` : action === "pin_message" ? `\nDuration: ${options.pinHours ?? 168} hours` : "";
-  const preview = `Account: ${ctx.accountId}\nChat: ${target.name} <${target.chat_id}>\nAction: ${action}${duration}\n${scope}` +
+  const reference = target.number ? "" : `\nChat reference: ${target.chat_id}`;
+  const preview = `Account: ${ctx.accountId}\nChat: ${describeTarget(target)}${reference}\nAction: ${action}${duration}\n${scope}` +
     (options.messageId ? `\nMessage: ${options.messageId}\n${messageText}` : "");
   return { status: "preview", confirmation_id: draft.id, chat_id: target.chat_id, action, target: { ...target }, preview,
     expires_at: new Date(draft.expires).toISOString(), ...(options.messageId ? { message_id: options.messageId } : {}),

@@ -50,6 +50,7 @@
  * address book is empty, never does.
  */
 import { z } from "zod";
+import { formatPhone } from "./contact-display.js";
 import { ADDRESS_BOOK_MAX_PAGE, type AccountDb, type AddressBookKey, type AddressBookOrder } from "./db/index.js";
 import { privateRule } from "./catchup.js";
 import { WazapError } from "./errors.js";
@@ -163,7 +164,7 @@ export function renderContactList(list: ContactList, order: AddressBookOrder): s
   }
   const lines = [`# Address book — ${order} (${list.contacts.length} of ${list.total})`];
   if (!list.address_book_synced) lines.push(`Only the people of your chats so far. ${NOT_ARRIVED}`);
-  for (const c of list.contacts) lines.push(`- ${c.name} — ${c.phone} · ${lastLine(c)}`);
+  for (const c of list.contacts) lines.push(`- ${c.name} — ${formatPhone(c.phone)} · ${lastLine(c)}`);
   if (list.next !== null) lines.push(`More: pass cursor "${list.next}".`);
   return lines.join("\n");
 }

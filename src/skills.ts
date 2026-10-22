@@ -140,6 +140,7 @@ export function skillInstructions(skills: readonly Skill[], options: Instruction
   const accounts = accountsLine(options.accounts);
   const intro =
     "Call `learn` first: it returns every tool, the id formats and every error code with what to do about it. " +
+    "Show people by name and formatted phone when known; internal ids are for tool calls. Never turn LID or group ids into phone numbers. " +
     "With several WhatsApp accounts, `get_status` lists them and every tool takes `account_id`: without it, a chat or message only one account knows picks that account, `catch_up` and `find_contact` cover them all, other reads use the default, and a write to a chat no account knows fails AMBIGUOUS_ACCOUNT. " +
     "An agent that should act as messages arrive calls `wait_for_messages` in a loop with the cursor it returns, instead of polling." +
     (accounts === null ? "" : ` ${accounts}`) + (options.legacyReads ? ` ${LEGACY_READ_INSTRUCTIONS}` : "");

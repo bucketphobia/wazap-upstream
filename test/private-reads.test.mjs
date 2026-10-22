@@ -203,7 +203,7 @@ test("list_chats shows the last message of a #private person's chat, and theirs 
   assert.deepEqual([last.get(GROUP).text, last.get(GROUP).private], ["[private]", true], "what she wrote last in a group");
   assert.deepEqual([last.get("120363000000000002@g.us").text, last.get("120363000000000002@g.us").private], ["eu, scuze", undefined]);
   assert.deepEqual([last.get(DAN).text, last.get(DAN).private], ["factura e plătită", undefined]);
-  assert.match(listed.content[0].text, /## Ana\n- \*\*chat_id\*\*: `40700000002@s\.whatsapp\.net`\n- \*\*last\*\*: me: \[private\] \(/);
+  assert.match(listed.content[0].text, /## Ana \(\+40 700 000 002\)\n- \*\*chat_id\*\*: `40700000002@s\.whatsapp\.net`\n- \*\*last\*\*: me: \[private\] \(/);
 
   const read = await call("read_messages", { chat_id: ANA });
   assert.deepEqual(read.structuredContent.messages.map((m) => m.text), ["ai găsit avocat?", "îți trimit banii pentru avocat mâine"], "named, her chat reads whole");
@@ -242,7 +242,7 @@ test("the stories of someone #private keep their author, time and kind, without 
   assert.equal(result.content.filter((block) => block.type === "image").length, 1);
   assert.match(result.content[0].text, /1 preview attached/);
   assert.doesNotMatch(result.content[0].text, /without a preview/, "hers is not a photo that failed");
-  assert.match(result.content[0].text, /## Ana — `40700000002@s\.whatsapp\.net`\n- \d+m ago · \[private\] · id: /);
+  assert.match(result.content[0].text, /## Ana \(\+40 700 000 002\)\n- \d+m ago · \[private\] · id: /);
   const images = await call("read_messages", { chat_id: "status", types: ["image"] });
   assert.equal(images.structuredContent.count, 2, "what kind stays: types still finds hers");
 });
