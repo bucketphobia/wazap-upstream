@@ -77,6 +77,14 @@ export class Search {
       }
       narrowsRows = true;
     }
+    if (filter.tag !== undefined) {
+      const ids = this.identity.chatIdsTagged(filter.tag);
+      if (ids.length === 0) return null;
+      const tagged = chatCondition(ids);
+      conditions.push(tagged.sql);
+      params.push(...tagged.params);
+      narrowsRows = true;
+    }
     if (filter.since !== undefined) {
       conditions.push("m.ts >= ?");
       params.push(filter.since);
@@ -102,13 +110,13 @@ export class Search {
   /**
    * What a search over `filter` runs across: how many visible messages, in how
    * many chats, from when to when, leaving out the kinds of chat named. Without
-   * a time or sender filter the counts are the ones the triggers keep on each
+   * a time, sender or tag filter the counts are the ones the triggers keep on each
    * chat (less the few expired messages the sweep has not reached), and the
    * bounds are read off the primary key: no pass over the rows. With one, it
    * is one pass over the filtered rows. `exact` forces that pass, for checks.
    */
   coverage(filter: MessageFilter & { excludeKinds?: readonly ChatKind[]; exact?: boolean }): SearchCoverage {
-    if (filter.exact !== true && filter.since === undefined && filter.until === undefined && filter.from === undefined) {
+    if (filter.exact !== true && filter.since === undefined && filter.until === undefined && filter.from === undefined && filter.tag === undefined) {
       return this.keptCoverage(filter.chat, filter.excludeKinds ?? []);
     }
     const resolved = this.resolveFilter(filter);

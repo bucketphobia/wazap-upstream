@@ -994,7 +994,7 @@ export class WhatsAppService implements WhatsAppApi {
     this.lastInboundAt = Math.max(this.lastInboundAt ?? 0, ts);
   }
 
-  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string } = {}): Promise<Synced<ChatSummary[]>> {
+  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string; tag?: string } = {}): Promise<Synced<ChatSummary[]>> {
     return this.reads.listChats(filter, limit, opts);
   }
 
@@ -1029,7 +1029,7 @@ export class WhatsAppService implements WhatsAppApi {
     return this.reads.searchMessages(query, chatId, limit, opts);
   }
 
-  searchCoverage(chatId: string | undefined, opts: { sinceMs?: number; untilMs?: number } = {}): SearchCoverage | null {
+  searchCoverage(chatId: string | undefined, opts: { sinceMs?: number; untilMs?: number; tag?: string } = {}): SearchCoverage | null {
     return this.reads.searchCoverage(chatId, opts);
   }
 
@@ -1126,6 +1126,10 @@ export class WhatsAppService implements WhatsAppApi {
 
   updateContactDetails(contactId: string, edit: ContactDetailsEdit): Promise<ContactSummary> {
     return this.contacts.updateContactDetails(contactId, edit);
+  }
+
+  updateManyContactDetails(contactIds: readonly string[], edit: ContactDetailsEdit): Promise<ContactSummary[]> {
+    return this.contacts.updateManyContactDetails(contactIds, edit);
   }
 
   waitForMessages(opts: WaitOptions): Promise<WaitResult> {

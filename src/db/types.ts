@@ -295,6 +295,8 @@ export interface MessageFilter {
   since?: number;
   /** Inclusive, epoch ms. */
   until?: number;
+  /** A stored (normalized) tag: only the direct chats of the people filed under it. */
+  tag?: string;
 }
 
 export interface TextSearchInput extends MessageFilter {

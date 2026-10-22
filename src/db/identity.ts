@@ -171,6 +171,19 @@ export class Identity {
     return [id, ...this.c.all<{ id: number }>("SELECT id FROM contacts WHERE merged_into = ?", id).map((row) => row.id)];
   }
 
+  /** The direct chats of the people filed under `tag`, with every chat still folding into one of them. */
+  chatIdsTagged(tag: string): number[] {
+    return this.c
+      .all<{ id: number }>(
+        `SELECT c.id FROM chats c CROSS JOIN chats p ON p.id = coalesce(c.merged_into, c.id)
+         CROSS JOIN contacts k ON k.id = p.contact_id
+         WHERE p.kind = 'direct' AND coalesce(k.merged_into, k.id) IN
+           (SELECT n.contact_id FROM contact_notes n, json_each(n.tags) t WHERE t.value = ?)`,
+        tag
+      )
+      .map((row) => row.id);
+  }
+
   contact(jid: string): ContactRecord | null {
     const id = this.contactIdOf(jid);
     return id === null ? null : this.contactById(id);

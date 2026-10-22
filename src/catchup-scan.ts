@@ -101,6 +101,8 @@ export interface CatchupHost {
   ownJid(): string;
   nameOf(jid: string): string;
   noteOf(jid: string): string | undefined;
+  /** The tags the user filed a person under; undefined when none. */
+  tagsOf?(jid: string): string[] | undefined;
   /** A jid that addresses nobody (see ids.ts isNoiseJid). */
   isNoise(jid: string): boolean;
   /** A group the account left. */
@@ -123,6 +125,7 @@ export interface WaitingEntry {
   chat: string;
   name: string;
   note?: string;
+  tags?: string[];
   group: boolean;
   business: boolean;
   /** A person not in the address book, never named by the user. */
@@ -175,6 +178,7 @@ export interface DirectEntry {
   chat: string;
   name: string;
   note?: string;
+  tags?: string[];
   count: number;
   media: Partial<Record<DigestMedia, number>>;
   polls: number;
@@ -882,9 +886,10 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
     const jid = contactId === null ? null : (contacts.get(contactId)?.jid ?? null);
     return jid === null ? fallback : host.nameOf(jid);
   };
-  const noteOf = (jid: string): { note?: string } => {
+  const noteOf = (jid: string): { note?: string; tags?: string[] } => {
     const note = host.noteOf(jid);
-    return note === undefined || note === "" ? {} : { note };
+    const tags = host.tagsOf?.(jid);
+    return { ...(note === undefined || note === "" ? {} : { note }), ...(tags === undefined || tags.length === 0 ? {} : { tags }) };
   };
   const personFlags = (chat: ChatRecord): { saved: boolean; business: boolean; unknown: boolean } => {
     const contact = chat.contactId === null ? undefined : contacts.get(chat.contactId);

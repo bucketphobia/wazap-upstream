@@ -16,6 +16,7 @@ import { listInAccount } from "../list-contacts.js";
 import { isGroupId, isNoiseJid } from "../ids.js";
 import { IMPORT_META } from "../legacy-import/index.js";
 import { log, logError } from "../logger.js";
+import { normalizeTag } from "../private-contacts.js";
 import { realName } from "./identity.js";
 import { orNullAfter, PROFILE_LOOKUP_MS } from "./util.js";
 
@@ -85,11 +86,6 @@ function statusTextOf(entry: { [protocol: string]: unknown } | undefined): strin
     return (status as { status?: string | null }).status ?? null;
   }
   return typeof status === "string" ? status : null;
-}
-
-/** A tag is a lowercase token: "#Client  Ro" files as "client-ro". */
-function normalizeTag(raw: string): string {
-  return raw.trim().toLowerCase().replace(/^#+/, "").replace(/\s+/g, "-");
 }
 
 function requireTag(raw: string): string {
@@ -175,7 +171,8 @@ export class AccountContacts {
    * value hits too, which is how "contabil" finds the person filed under
    * `role: contabil`. With `tag` only contacts carrying it come back, so
    * "everyone tagged furnizori" is one call. People known only through their
-   * local filing — never synced as contacts — are candidates as well.
+   * local filing — never synced as contacts — are candidates as well. A tag's
+   * people come newest conversation first.
    */
   searchContacts(query: string, limit: number, opts: { tag?: string } = {}): Promise<ContactSummary[]> {
     return this.host.guarded(async () => {
@@ -188,7 +185,7 @@ export class AccountContacts {
       if (tag === "") {
         throw new WazapError("INVALID_ID", `"${opts.tag}" is not a usable tag.`, 'Pass a label like "client"');
       }
-      const matches: ContactSummary[] = [];
+      const matches: Array<{ summary: ContactSummary; last: number }> = [];
       for (const { contact, notes } of this.storage.db.identity.listContacts()) {
         const person = contact.phoneJid ?? contact.lid;
         if (person === null || isGroupId(person) || isNoiseJid(person)) continue;
@@ -207,10 +204,12 @@ export class AccountContacts {
           tags.some((t) => t.includes(needle)) ||
           Object.entries(notes?.fields ?? {}).some(([key, value]) => key.includes(needle) || value.toLowerCase().includes(needle));
         if (!hit) continue;
-        matches.push(this.views.contactSummary(person));
-        if (matches.length >= limit) break;
+        // A tag's people are listed by their last direct message, newest first, so all of them are read before the cut.
+        matches.push({ summary: this.views.contactSummary(person), last: tag === undefined ? 0 : (this.storage.db.identity.chat(person)?.lastTs ?? 0) });
+        if (tag === undefined && matches.length >= limit) break;
       }
-      return matches;
+      if (tag !== undefined) matches.sort((a, b) => b.last - a.last);
+      return matches.slice(0, limit).map((match) => match.summary);
     });
   }
 
@@ -370,8 +369,16 @@ export class AccountContacts {
    * be a saved contact; filing a chat partner works too.
    */
   updateContactDetails(contactId: string, edit: ContactDetailsEdit): Promise<ContactSummary> {
+    return this.updateManyContactDetails([contactId], edit).then(([card]) => card!);
+  }
+
+  /**
+   * The same edit filed on several people at once, all or none: every person
+   * and every limit is checked before anything is written.
+   */
+  updateManyContactDetails(contactIds: readonly string[], edit: ContactDetailsEdit): Promise<ContactSummary[]> {
     return this.host.guarded(async () => {
-      const jid = this.identity.personJid(contactId);
+      const jids = [...new Set(contactIds.map((contactId) => this.identity.personJid(contactId)))];
       const addTags = (edit.addTags ?? []).map((t) => requireTag(t));
       const removeTags = (edit.removeTags ?? []).map((t) => requireTag(t));
       const set: Record<string, string> = {};
@@ -400,21 +407,26 @@ export class AccountContacts {
         );
       }
       const db = this.storage.db;
-      const current = db.identity.notes(jid);
-      const tagCount =
-        new Set([...(current?.tags ?? []), ...addTags].filter((t) => !removeTags.includes(t))).size;
-      const fieldCount = new Set(
-        [...Object.keys(current?.fields ?? {}), ...Object.keys(set)].filter((k) => !removeFields.has(k))
-      ).size;
-      if (tagCount > MAX_CONTACT_TAGS) {
-        throw new WazapError("TEXT_TOO_LONG", `A contact holds at most ${MAX_CONTACT_TAGS} tags.`);
+      for (const jid of jids) {
+        const current = db.identity.notes(jid);
+        const tagCount =
+          new Set([...(current?.tags ?? []), ...addTags].filter((t) => !removeTags.includes(t))).size;
+        const fieldCount = new Set(
+          [...Object.keys(current?.fields ?? {}), ...Object.keys(set)].filter((k) => !removeFields.has(k))
+        ).size;
+        const who = jids.length === 1 ? "A contact" : this.identity.displayName(jid);
+        if (tagCount > MAX_CONTACT_TAGS) {
+          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_TAGS} tags.`);
+        }
+        if (fieldCount > MAX_CONTACT_FIELDS) {
+          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_FIELDS} details.`);
+        }
       }
-      if (fieldCount > MAX_CONTACT_FIELDS) {
-        throw new WazapError("TEXT_TOO_LONG", `A contact holds at most ${MAX_CONTACT_FIELDS} details.`);
-      }
-      db.identity.updateFields(jid, { addTags, removeTags, set, removeFields: [...removeFields] });
+      db.transaction(() => {
+        for (const jid of jids) db.identity.updateFields(jid, { addTags, removeTags, set, removeFields: [...removeFields] });
+      });
       this.host.notesChanged();
-      return this.views.contactSummary(jid);
+      return jids.map((jid) => this.views.contactSummary(jid));
     });
   }
 

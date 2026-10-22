@@ -28,7 +28,7 @@ import { draftContextFor, styleCheckFor, type DraftContext, type StyleCheck } fr
 import { isGroupId, isNoiseJid, STATUS_JID } from "../ids.js";
 import { decodeChat } from "../store.js";
 import { formatAge, isoWithOffset, mentionedJids, protoNumber, quotedSenderJid, viewText } from "../messages.js";
-import { withoutPrivateQuote, withoutWords } from "../private-contacts.js";
+import { normalizeTag, withoutPrivateQuote, withoutWords } from "../private-contacts.js";
 import { frozenReceiptText } from "../drafts.js";
 import { STORY_TTL_MS } from "./ingest.js";
 import { leftGroup, pageLimit } from "./util.js";
@@ -112,7 +112,7 @@ export class AccountReads {
     private readonly accountRecord: AccountRecord
   ) {}
 
-  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string } = {}): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }> {
+  listChats(filter: ChatFilter, limit: number, opts: { private?: PrivateRule; cursor?: string; tag?: string } = {}): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }> {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
       await this.host.waitForSync();
@@ -122,9 +122,13 @@ export class AccountReads {
       await this.identity.learnLidPhones(lidChats.map((chat) => chat.jid));
       await this.host.foldsSettled();
       const db = this.storage.db;
+      const tag = opts.tag === undefined ? undefined : normalizeTag(opts.tag);
+      const tagged = tag === undefined ? null : new Set(db.identity.chatIdsTagged(tag));
+      // A cursor holds on to the list it came from: the filter, and the tag when there is one.
+      const listing = tag === undefined ? filter : `${filter}#${tag}`;
       const entries = db.identity
         .listChats()
-        .filter((chat) => this.views.listed(chat) && this.views.matchesChatFilter(chat, filter))
+        .filter((chat) => this.views.listed(chat) && this.views.matchesChatFilter(chat, filter) && (tagged === null || tagged.has(chat.id)))
         .map((chat) => ({ chat, proto: chat.proto === null ? null : decodeChat(Buffer.from(chat.proto).toString("base64")) }));
       const activity = (entry: (typeof entries)[number]): number => {
         const described = protoNumber(entry.proto?.conversationTimestamp);
@@ -138,10 +142,10 @@ export class AccountReads {
         try {
           if (!/^[A-Za-z0-9_-]{1,512}$/.test(opts.cursor)) throw new Error();
           const parsed: unknown = JSON.parse(Buffer.from(opts.cursor, "base64url").toString("utf8"));
-          if (!Array.isArray(parsed) || parsed.length !== 4 || parsed[0] !== filter || !parsed.slice(1).every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error();
+          if (!Array.isArray(parsed) || parsed.length !== 4 || parsed[0] !== listing || !parsed.slice(1).every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error();
           after = parsed.slice(1) as number[];
         } catch {
-          throw new WazapError("INVALID_ID", "Invalid list_chats cursor, or its filter changed.", "Start listing again without a cursor");
+          throw new WazapError("INVALID_ID", "Invalid list_chats cursor, or its filter or tag changed.", "Start listing again without a cursor");
         }
       }
       const ordered = entries.sort((a, b) => compare(key(a), key(b))).filter(entry => after === null || compare(key(entry), after) > 0);
@@ -149,7 +153,7 @@ export class AccountReads {
       const people = this.identity.privateScope(opts.private);
       const chats = selected.map(entry => this.views.chatSummary(entry.chat, entry.proto, people));
       const nextCursor = ordered.length > limit && selected.length > 0
-        ? Buffer.from(JSON.stringify([filter, ...key(selected.at(-1)!)])).toString("base64url") : null;
+        ? Buffer.from(JSON.stringify([listing, ...key(selected.at(-1)!)])).toString("base64url") : null;
       return { ...this.host.synced(chats), nextCursor };
     });
   }
@@ -366,6 +370,7 @@ export class AccountReads {
       const filter = {
         ...(scope === undefined ? {} : { chat: scope }),
         ...(from === undefined ? {} : { from }),
+        ...(opts.tag === undefined ? {} : { tag: normalizeTag(opts.tag) }),
         ...(opts.sinceMs === undefined ? {} : { since: opts.sinceMs }),
         ...(opts.untilMs === undefined ? {} : { until: opts.untilMs }),
       };
@@ -448,7 +453,7 @@ export class AccountReads {
    * of the chat) inside the time filters, the status feed left out. Null when
    * the database cannot say; a coverage miss never takes a search down.
    */
-  searchCoverage(chatId: string | undefined, opts: { sinceMs?: number; untilMs?: number } = {}): SearchCoverage | null {
+  searchCoverage(chatId: string | undefined, opts: { sinceMs?: number; untilMs?: number; tag?: string } = {}): SearchCoverage | null {
     try {
       const db = this.storage.readyDb();
       if (db === null) return null;
@@ -456,6 +461,7 @@ export class AccountReads {
       const cov = db.search.coverage({
         excludeKinds: ["status"],
         ...(scope === undefined ? {} : { chat: scope }),
+        ...(opts.tag === undefined ? {} : { tag: normalizeTag(opts.tag) }),
         ...(opts.sinceMs === undefined ? {} : { since: opts.sinceMs }),
         ...(opts.untilMs === undefined ? {} : { until: opts.untilMs }),
       });
@@ -630,6 +636,7 @@ export class AccountReads {
       ownJid: () => this.identity.ownJid(),
       nameOf: (jid) => this.identity.displayName(jid),
       noteOf: (jid) => this.identity.noteFor(jid),
+      tagsOf: (jid) => this.identity.tagsFor(jid),
       isNoise: (jid) => isNoiseJid(jid),
       leftGroup: (chat) => {
         try {

@@ -834,6 +834,14 @@ export class Contacts {
             consider({ ...match, inflected: roleInflected }, role.source, role.value);
           }
         }
+        // Any other detail names them by its whole value only: "AP-123" finds who was filed with {"caz": "AP-123"}.
+        if (!near) {
+          for (const field of person.fields) {
+            if (field.words.length === query.length && field.words.every((word, index) => word === query[index]!.word)) {
+              consider({ class: "exact", inflected: false, resolvable: true }, "field", `${field.key}: ${field.value}`);
+            }
+          }
+        }
       }
       const match = best as ContactCandidate["match"] | null;
       if (match === null) continue;

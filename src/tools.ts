@@ -77,8 +77,8 @@ import type {
 
 export { anyAccountAllowsWrites } from "./account-resolve.js";
 
-/** Explained once, in the server's instructions and in learn; each tool only names it. */
-const ACCOUNT_ID = z.string().min(1).describe("Account id");
+/** Explained once, in the server's instructions and in learn; each tool only names it, with no description of its own. */
+const ACCOUNT_ID = z.string().min(1);
 
 /** A message in an answer: the keys every one has, and the rest as they come (learn describes them). */
 const MESSAGE_OUT = z.object({ message_id: z.string(), chat_id: z.string(), text: z.string(), timestamp: z.string() }).passthrough();
@@ -95,6 +95,7 @@ const NOTES = z.array(z.string()).optional().describe("Caveats to act on or tell
 const LIST_CHATS_OUTPUT = {
   next_cursor: z.string().nullable().optional(),
   filter: z.string(),
+  tag: z.string().optional(),
   count: z.number(),
   chats: z.array(
     z
@@ -243,8 +244,8 @@ const MANAGE_GROUP_OUTPUT = {
 };
 
 const REMEMBER_OUTPUT = {
-  chat_id: z.string(),
-  name: z.string(),
+  chat_id: z.string().optional(),
+  name: z.string().optional(),
   note: z.string().optional(),
   tags: z.array(z.string()).optional(),
   fields: z.record(z.string()).optional(),
@@ -252,6 +253,7 @@ const REMEMBER_OUTPUT = {
   is_my_contact: z.boolean().optional(),
   is_business: z.boolean().optional(),
   handled: z.object({ ask_id: z.string().nullable(), ask_text: z.string().nullable() }).optional().describe("The ask taken off the waiting list; null when nothing was open"),
+  people: z.array(OPEN_OBJECT).optional().describe("Several chat_ids: each one's card"),
   account_id: z.string(),
 };
 
@@ -431,6 +433,8 @@ const includePreviews = z
   .default(false)
   .describe("Attach a small image of each photo, up to 12");
 
+/** A tag as remember files it, "#" and case ignored. */
+const tagFilter = z.string().min(1).max(40).optional().describe("Only chats with people filed under this tag");
 const fullText = z.boolean().optional().describe("Each message's text whole; a list cuts long ones otherwise");
 
 /** Previews are 5-15 KB each; a dozen keep one answer small and the first call under the client's timeout. */
@@ -563,14 +567,15 @@ const TOOLS: readonly ToolDef[] = [
     description: `Conversations, most recently active first: chat_id, name, type, unread count, last message, and whether archived, pinned, muted or left. Use it to find a chat_id.`,
     schema: {
       filter: z.enum(["all", "unread", "groups", "individual", "archived"]).default("all").describe('"all" leaves out archived'),
+      tag: tagFilter,
       limit: z.number().int().min(1).max(100).default(20),
       include_pictures: z.boolean().default(false).describe("Add picture_url, each chat's profile photo (links expire)"),
       cursor: z.string().max(512).optional().describe("Opaque next_cursor from the preceding page; keep the same filter"),
     },
     outputSchema: LIST_CHATS_OUTPUT,
     write: false,
-    handler: async ({ filter, limit, include_pictures, cursor }, ctx) => {
-      const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId), cursor });
+    handler: async ({ filter, tag, limit, include_pictures, cursor }, ctx) => {
+      const result = await ctx.wa.listChats(filter, limit, { private: await privateRule(ctx.hub, ctx.accountId), cursor, ...(tag === undefined ? {} : { tag }) });
       let chats: Array<ChatSummary & { picture_url?: string | null }> = result.data;
       if (include_pictures && ctx.wa.profilePictures) {
         // A #private person's chat shows who, not their face.
@@ -578,7 +583,7 @@ const TOOLS: readonly ToolDef[] = [
         const pictures = await ctx.wa.profilePictures(open).catch(() => ({}) as Record<string, string | null>);
         chats = chats.map((chat) => ({ ...chat, picture_url: pictures[chat.chat_id] ?? null }));
       }
-      return ok(renderChats(result.data, filter), synced(result, { filter, count: chats.length, chats, next_cursor: result.nextCursor ?? null }));
+      return ok(renderChats(result.data, filter, tag), synced(result, { filter, ...(tag === undefined ? {} : { tag }), count: chats.length, chats, next_cursor: result.nextCursor ?? null }));
     },
   }),
 
@@ -672,7 +677,7 @@ const TOOLS: readonly ToolDef[] = [
     title: "Remember something about a person",
     description: `Keep what the user says about someone, locally, never on WhatsApp: a note, tags, details find_contact matches ({"relatie": "mama"}), or handled: true for an ask dealt with elsewhere. #private keeps their words out of what you did not ask about them by name; #no-catchup keeps them out of catch_up.`,
     schema: {
-      chat_id: chatId,
+      chat_id: z.union([chatId, z.array(chatId).min(1).max(50)]).describe("Several: tags and fields only"),
       note: z.string().max(200).optional().describe('"" removes it'),
       add_tags: z.array(z.string().min(1).max(40)).max(30).optional().describe('e.g. ["client"]'),
       remove_tags: z.array(z.string().min(1).max(40)).optional(),
@@ -695,6 +700,18 @@ const TOOLS: readonly ToolDef[] = [
       const details = add_tags !== undefined || remove_tags !== undefined || fields !== undefined || remove_fields !== undefined;
       if (!details && note === undefined && handled === undefined) {
         throw new WazapError("INVALID_ID", "Nothing to remember.", "Pass note, add_tags, remove_tags, fields, remove_fields or handled: true");
+      }
+      if (Array.isArray(chat_id)) {
+        if (note !== undefined || handled !== undefined) {
+          throw new WazapError("INVALID_ID", "A note or a handled mark is for one person.", "Pass one chat_id for them, and the list for tags and details");
+        }
+        const edit = { addTags: add_tags, removeTags: remove_tags, fields, removeFields: remove_fields };
+        // All or none: a service that cannot file several at once is asked one by one, which stops at the first refusal.
+        const cards = wa.updateManyContactDetails
+          ? await wa.updateManyContactDetails(chat_id, edit)
+          : await chat_id.reduce<Promise<ContactSummary[]>>(async (done, id) => [...(await done), await wa.updateContactDetails(id, edit)], Promise.resolve([]));
+        const people = cards.map(({ contact_id, ...card }) => ({ chat_id: contact_id, ...card }));
+        return ok(`Filed ${cards.length} ${cards.length === 1 ? "person" : "people"}:\n${cards.map((card) => `- ${contactLabel(card.name, card.contact_id, card.number)}${filedLabel(card)}`).join("\n")}`, { people });
       }
       const lines: string[] = [];
       let card: ContactSummary | undefined;
@@ -763,11 +780,12 @@ const TOOLS: readonly ToolDef[] = [
       since: z.string().min(4).optional().describe("ISO date or time"),
       until: z.string().min(4).optional().describe("ISO date or time"),
       from: z.string().min(1).optional().describe('"me", a number, an id, or a name only one person has'),
+      tag: tagFilter,
       full_text: fullText,
     },
     outputSchema: SEARCH_OUTPUT,
     write: false,
-    handler: async ({ query, match, chat_id, limit, since, until, from, full_text, before, include_context }, ctx) => {
+    handler: async ({ query, match, chat_id, limit, since, until, from, tag, full_text, before, include_context }, ctx) => {
       const { wa } = ctx;
       const owner = searchOwner(wa);
       const plan = planSearch(query, match, before);
@@ -776,9 +794,11 @@ const TOOLS: readonly ToolDef[] = [
       const untilMs = parseMoment(until, "until", true);
       // Without a chat, someone tagged #private is left out unless from names them (src/private-contacts.ts).
       const filters = { sinceMs, untilMs, from: resolvedFrom, before, includeContext: include_context, deferContext: typeof wa.refreshSearch === "function", literal: plan.literal,
+        ...(tag === undefined ? {} : { tag }),
         ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}) };
       const scope = [
         chat_id ? `in ${chat_id}` : null,
+        tag ? `with people tagged ${tag}` : null,
         from ? `from ${from}` : null,
         since ? `since ${since}` : null,
         until ? `until ${until}` : null,
@@ -859,12 +879,12 @@ const TOOLS: readonly ToolDef[] = [
         : finalizeSearch(wa, identified, found.contexts, chat_id, { ...filters, private: finalRule }, plan.query);
       const messages = final.messages;
       const assessment = assessSearch(query, messages, plan.match === "words");
-      const cov = searchCoverage(wa, chat_id, { sinceMs, untilMs });
+      const cov = searchCoverage(wa, chat_id, { sinceMs, untilMs, ...(tag === undefined ? {} : { tag }) });
       const fallback =
         unavailable === null
           ? null
           : `Meaning search is unavailable (${unavailable.message}); these results match the words only.${unavailable.fix ? ` ${unavailable.fix}` : ""}`;
-      const note = [fallback, scanCapNote(found), privateNote(found.privateOmitted), coverageNote(cov, chat_id !== undefined), freshnessNote(fresh), final.changed ? SEARCH_CHANGED : null]
+      const note = [fallback, scanCapNote(found), privateNote(found.privateOmitted), coverageNote(cov, chat_id !== undefined || tag !== undefined), freshnessNote(fresh), final.changed ? SEARCH_CHANGED : null]
         .filter(Boolean)
         .join(" ");
       return ok(
@@ -928,7 +948,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "find_contact",
     title: "Find who the user means",
-    description: `Who a name, nickname, relationship ("mama"), group, number or id means, before drafting. resolved: contact.chat_id, with number, note, tags, details and, in a write session, context. ambiguous or not_found: ask the user; never send to a guess. A name on several accounts: see fix. tag: its people.`,
+    description: `Who a name, nickname, relationship ("mama"), filed detail ("AP-123"), group, number or id means, before drafting. resolved: contact.chat_id, with number, note, tags, details and, when writing, context. ambiguous or not_found: ask the user; never guess. Several accounts: see fix. tag: its people.`,
     schema: {
       name: z
         .string()
@@ -1411,9 +1431,10 @@ export const registerTools = createToolRegistrar([
   ...legacyReadTools(TOOLS).map((definition) => ({ ...definition, legacyRead: true })),
 ]);
 
-function renderChats(chats: ChatSummary[], filter: string): string {
-  if (chats.length === 0) return `No chats found (filter: ${filter}).`;
-  const lines = [`# WhatsApp chats — ${filter} (${chats.length})`, ""];
+function renderChats(chats: ChatSummary[], filter: string, tag?: string): string {
+  const scope = tag === undefined ? filter : `${filter}, tagged ${tag}`;
+  if (chats.length === 0) return `No chats found (filter: ${scope}).`;
+  const lines = [`# WhatsApp chats — ${scope} (${chats.length})`, ""];
   for (const c of chats) {
     const flags = [
       c.type === "group" ? "group" : null,
@@ -1424,7 +1445,7 @@ function renderChats(chats: ChatSummary[], filter: string): string {
       c.left ? "left" : null,
     ].filter(Boolean);
     const name = c.type === "group" ? c.name : contactLabel(c.name, c.chat_id, c.phone);
-    lines.push(`## ${name}${flags.length ? ` [${flags.join(", ")}]` : ""}${c.note ? ` · ${c.note}` : ""}`);
+    lines.push(`## ${name}${flags.length ? ` [${flags.join(", ")}]` : ""}${filedLabel(c)}`);
     lines.push(`- **chat_id**: \`${c.chat_id}\``);
     if (c.last_message) {
       lines.push(
@@ -1487,12 +1508,19 @@ function previewGap(messages: MessageView[], previews: Preview[], asked: boolean
   return `${missing} photo${missing === 1 ? "" : "s"} without a preview (over ${MAX_PREVIEWS} per call, expired, not JPEG, or out of time): call again for more.`;
 }
 
-/** The sender's name, with the user's note on them the first time they appear in this rendering. */
+/** What the user filed about a person, after their name: " · #tag #tag · note", or "". */
+function filedLabel(person: { note?: string; tags?: string[] }): string {
+  const tags = person.tags?.length ? ` · ${person.tags.map((tag) => `#${tag}`).join(" ")}` : "";
+  return `${tags}${person.note ? ` · ${person.note}` : ""}`;
+}
+
+/** The sender's name, with what the user filed about them the first time they appear in this rendering. */
 function senderLabel(m: AnyMessage, introduced: Set<string>): string {
   if (m.from_me) return "me";
-  if (!m.sender.note || introduced.has(m.sender.id)) return m.sender.name;
+  const filed = filedLabel(m.sender);
+  if (filed === "" || introduced.has(m.sender.id)) return m.sender.name;
   introduced.add(m.sender.id);
-  return `${m.sender.name} · ${m.sender.note}`;
+  return `${m.sender.name}${filed}`;
 }
 
 const JOIN_NEXT = 'Show this to the user; after their yes, call manage_group again with action "join", the same invite or message_id and confirm: true.';

@@ -11,7 +11,7 @@ import { asWazapError, WazapError } from "../errors.js";
 import { STATUS_JID } from "../ids.js";
 import { log, logError } from "../logger.js";
 import { searchableText } from "../messages.js";
-import { withoutPrivateQuote } from "../private-contacts.js";
+import { normalizeTag, withoutPrivateQuote } from "../private-contacts.js";
 import { diversify } from "../recall/variety.js";
 import {
   EMBED_MODELS,
@@ -141,6 +141,7 @@ export class AccountRecall {
         recencyHalfLifeMs: RECALL_RECENCY_HALF_LIFE_MS,
         ...(scope === undefined ? {} : { chat: scope }),
         ...(from === undefined ? {} : { from }),
+        ...(opts.tag === undefined ? {} : { tag: normalizeTag(opts.tag) }),
         ...(opts.sinceMs === undefined ? {} : { since: opts.sinceMs }),
         ...(opts.untilMs === undefined ? {} : { until: opts.untilMs }),
       });

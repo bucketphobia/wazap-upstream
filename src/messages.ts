@@ -1290,6 +1290,8 @@ export interface MessageViewContext {
   nameFor: (jid: string) => string;
   /** The user's note on a canonical jid, if any. */
   noteFor?: (jid: string) => string | undefined;
+  /** The tags the user filed a canonical jid under, if any. */
+  tagsFor?: (jid: string) => string[] | undefined;
   /** Our own canonical jid. */
   ownId: string;
   /** Canonical chat this message belongs to. */
@@ -1338,6 +1340,7 @@ export function buildMessageView(raw: WAMessage, ctx: MessageViewContext): Messa
       name: ctx.nameFor(sender),
       ...(phoneOf(sender) ? { phone: phoneOf(sender) } : {}),
       ...(ctx.noteFor?.(sender) ? { note: ctx.noteFor(sender) } : {}),
+      ...(ctx.tagsFor?.(sender) ? { tags: ctx.tagsFor(sender) } : {}),
     },
     type: a.type,
     text: spoken === undefined ? text : `${text} "${spoken}"`,

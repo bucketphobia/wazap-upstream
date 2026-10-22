@@ -647,8 +647,8 @@ test("a person tagged #private is never quoted: waiting, then, people, mentions,
   const group = result.structuredContent.groups.find((entry) => entry.chat === GROUP);
   assert.equal(group.n, 4, "the group still counts every message");
   assert.equal(group.hot, undefined, "Dan's \"ok\" is too short to quote, and the rest is private");
-  assert.match(text(result), /- Ana · since [^\n]* · private · 40700000002@s\.whatsapp\.net/);
-  assert.match(text(result), /- Ela · 1 new · \d\d:\d\d · private · 40700000004@s\.whatsapp\.net/);
+  assert.match(text(result), /- Ana #private · since [^\n]* · private · 40700000002@s\.whatsapp\.net/);
+  assert.match(text(result), /- Ela #private · 1 new · \d\d:\d\d · private · 40700000004@s\.whatsapp\.net/);
 });
 
 test("a #private person's unheard voice notes are counted in the footer, never named for transcription", async () => {
@@ -1246,9 +1246,9 @@ test("every shape catch_up answers passes a client's validation of its output sc
   arrive(PHARMACY, { imageMessage: { mimetype: "image/jpeg", caption: "Rețeta dvs. este pregătită, o găsiți la ghișeul 2" } }, { at: Date.now() - 4 * HOUR });
   arrive(PHARMACY, "Program: 8:00 - 20:00", { at: Date.now() - 4 * HOUR + 1000 });
   arrive(MIHAI, "am ajuns acasă, totul e în regulă", { at: Date.now() - 4 * HOUR });
-  await own.call("remember", { chat_id: MIHAI, note: "vărul meu" });
+  await own.call("remember", { chat_id: MIHAI, note: "vărul meu", add_tags: ["familie"] });
   await own.call("remember", { chat_id: ANA, add_tags: ["#private"] });
-  await own.call("remember", { chat_id: DAN, note: "coleg de birou" });
+  await own.call("remember", { chat_id: DAN, note: "coleg de birou", add_tags: ["birou"] });
   await own.call("remember", { chat_id: BOT, add_tags: ["#no-catchup"] });
   arrive(BOT, "Raport: gata", { at: Date.now() - 3 * HOUR });
   const mine = arrive(GROUP, "am trimis oferta", { fromMe: true, at: Date.now() - 7 * HOUR });

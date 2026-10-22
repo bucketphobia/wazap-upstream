@@ -204,4 +204,10 @@ export class AccountIdentity {
   noteFor(jid: string): string | undefined {
     return this.host.readyDb()?.identity.notes(jid)?.note ?? undefined;
   }
+
+  /** The tags the user filed a person under, sorted; undefined when there are none. */
+  tagsFor(jid: string): string[] | undefined {
+    const tags = this.host.readyDb()?.identity.notes(jid)?.tags ?? [];
+    return tags.length === 0 ? undefined : [...tags].sort();
+  }
 }

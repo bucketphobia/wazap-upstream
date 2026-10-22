@@ -37,6 +37,11 @@ import type { MessageView } from "./wa-types.js";
 
 export const PRIVATE_TAG = "private";
 
+/** A tag is a lowercase token: "#Client  Ro" files as "client-ro". */
+export function normalizeTag(raw: string): string {
+  return raw.trim().toLowerCase().replace(/^#+/, "").replace(/\s+/g, "-");
+}
+
 /** What stands in for the words of a message kept #private: never empty, like every message's text. */
 export const PRIVATE_TEXT = "[private]";
 

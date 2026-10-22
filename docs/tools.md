@@ -10,17 +10,17 @@ code. The [README](../README.md#the-23-tools) has the one-line table.
 | `learn` | read | The guide to every tool, id format and error code, as text. Call it first. |
 | `get_status` | read | Connection status, sync state, linked account, how fresh the history is, webhook delivery, versions, data dir, and `health`: what WhatsApp says about the account itself (a reachout timelock, a ban, a session taken over, its cap on first messages to new people), with until when, and `link`: an outage under way (`down_since`, `alerted`), the last one, sleeps the server woke from and sockets its watchdog replaced. Top-level fields are the default account; `accounts` lists every configured one and `default` names it. `include_picture: true` adds `picture_url`, the account's own profile photo (a WhatsApp link that expires; `null` when there is none or it cannot be read). Optional `account_id` on this and every other tool. |
 | `link_account` | read | Pair an account that already exists (`wazap account add`). Returns the code to type into the phone. Registered in read-only mode too. |
-| `list_chats` | read | Conversations newest-first; filter `all`/`unread`/`groups`/`individual`/`archived`. `include_pictures: true` adds `picture_url` per chat (a link that expires; none for `#private`). |
+| `list_chats` | read | Conversations newest-first; filter `all`/`unread`/`groups`/`individual`/`archived`; `tag` keeps the chats of people filed under it ([Working by tag](#working-by-tag)). `include_pictures: true` adds `picture_url` per chat (a link that expires; none for `#private`). |
 | `read_messages` | read | Messages in a chat; `before` pages further back, pulling older history from the phone; `types` narrows to one or more message types, e.g. `["call"]`; `include_previews` attaches a small image of each photo; `full_text: true` shows each message's text whole instead of cut at 500 characters (300 for a story). `chat_id: "status"` reads the stories of the last `hours`, which show nowhere else. |
 | `catch_up` | read | What the user missed, in one call and within a token budget, across every linked account: who is waiting on a reply, mentions, replies and open polls, missed calls, people, groups condensed, stories. Pages with a cursor. See [Catching up](#catching-up). |
-| `search` | read | Messages by meaning and by words at once, over everything the account keeps, so a paraphrase still hits (another language seldom does); `match: "words"` keeps only messages holding the words. `chat_id`, `since`, `until` and `from` narrow it, and the answer says how much it searched. `full_text: true` shows each text whole instead of cut at 500 characters. Without `chat_id`, someone tagged `#private` is left out and counted in `private_omitted`. Without [semantic recall](recall.md#semantic-recall) it matches words and says so. |
+| `search` | read | Messages by meaning and by words at once, over everything the account keeps, so a paraphrase still hits (another language seldom does); `match: "words"` keeps only messages holding the words. `chat_id`, `since`, `until`, `from` and `tag` narrow it, and the answer says how much it searched. `full_text: true` shows each text whole instead of cut at 500 characters. Without `chat_id`, someone tagged `#private` is left out and counted in `private_omitted`. Without [semantic recall](recall.md#semantic-recall) it matches words and says so. |
 | `get_message` | read | One message in full, its text never cut, with its quoted message, each reaction with who left it, and who voted for each option of a poll or answered an event. On your own messages, `delivery` says whether it was sent, delivered, read or played, and in a group who read it and when. |
-| `find_contact` | read | Who a name, nickname, relationship ("mama"), group name, number or id means. Resolved: the `chat_id`, number, note, tags and details, plus the recent exchange and how you write there in a session that can send. Otherwise the candidates that tell people apart, to ask you. `tag` lists everyone filed under a tag. See [Finding people](#finding-people). |
+| `find_contact` | read | Who a name, nickname, relationship ("mama"), group name, number or id means. Resolved: the `chat_id`, number, note, tags and details, plus the recent exchange and how you write there in a session that can send. Otherwise the candidates that tell people apart, to ask you. `tag` lists everyone filed under a tag, newest conversation first. See [Finding people](#finding-people). |
 | `list_contacts` | read | The phone's address book on one account, a page at a time (up to 500, `next` as `cursor`): each person's saved name, number in E.164, `chat_id`, `contact_id`, and when the last direct message was and which way it went. `order: "recent"` (default) puts whoever you talked to last first; `address_book` keeps the phone's order. No message words. See [The address book](#the-address-book). |
 | `get_group_info` | read | Participants, admins, announcement mode, who may edit the info or add members, join approval, disappearing messages, community, invite link (when you are admin). |
 | `get_media` | read | A message's media: a voice note or audio as its transcript, a photo attached as an image, any file saved to disk (`save_to` picks the directory). Transcription runs on the local or the API provider; with `save_to` a recording comes as its file, with a transcript only if one was already made, and when no transcript can be made the file comes instead, with `transcript_unavailable` saying why. A copy [kept when the media arrived](data.md#kept-media) answers first, even with the link down, and `source` says which: `kept` or `whatsapp`. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, then return it with a cursor for the next call. `addressed_to_me` wakes only for direct messages, @-mentions and replies. |
-| `remember` | local | Keep what the user says about a person, on this machine only: a note, tags, details (`relatie`, `nickname`, "role": "contabil") that `find_contact` matches, and `handled: true` to take an ask off `catch_up`'s waiting list until they write again. `#private` keeps their words out of what the assistant did not ask about them by name ([Keeping someone private](#keeping-someone-private)). Nothing changes on WhatsApp. |
+| `remember` | local | Keep what the user says about a person, on this machine only: a note, tags, details (`relatie`, `nickname`, "role": "contabil") that `find_contact` matches, and `handled: true` to take an ask off `catch_up`'s waiting list until they write again. A list of `chat_id`s files the same tags and details on all of them at once, or on none. `#private` keeps their words out of what the assistant did not ask about them by name ([Keeping someone private](#keeping-someone-private)). Nothing changes on WhatsApp. |
 | `send_message` | write | Draft a message: text (a reply, @-mentions), media from a path or URL (`as`: document, voice note or GIF), a poll (`options`), a location (`latitude`, `longitude`) or a forward (`forward`). Does not send. A text draft to someone you write to often carries `style_check`: where it does not read like you. `send_at` (with `time_zone`) drafts it for later; see [Scheduling a message](#scheduling-a-message). |
 | `confirm_send` | write | Send a draft after the user has seen the preview and said yes. A draft is sent at most once; see [Sending once](#sending-once). A draft with `send_at` is scheduled instead. |
 | `edit_message` | write | Edit your own message, within WhatsApp's 15-minute window. |
@@ -315,9 +315,25 @@ filed on them (note, tags, details). A number, however it is written
 ("+40 722 001 111", "0722-001-111"), or an id (a sender's `id` from a message)
 is looked up as such: `resolved` with `matched.source` `number` or `id`, or
 `not_found` telling the agent to check the number.
+A detail's whole value names its person too: filed with `{"caz": "AP-123"}`,
+they are what `find_contact({ name: "AP-123" })` resolves to.
 `find_contact({ tag: "client" })` lists everyone filed under a tag instead,
-each with their `chat_id`: up to `limit` (50), shared between the accounts, with
-`omitted` counting on each account whoever the limit left out.
+each with their `chat_id`, newest conversation first: up to `limit` (50), shared
+between the accounts, with `omitted` counting on each account whoever the limit
+left out.
+
+### Working by tag
+
+What `remember` files shows wherever the person does: `list_chats`, the sender
+of a message in `read_messages` and `search`, and `catch_up` carry their `tags`
+beside the `note`, so an assistant knows who someone is without asking again.
+A tag is also a scope: `list_chats({ tag: "client" })` lists only those
+people's chats, newest first, with their unread counts and a cursor, and
+`search({ query, tag: "client" })` searches only their direct chats. To file
+many people at once, pass `remember` a list:
+`remember({ chat_id: ["+40722001111", "+40722002222"], add_tags: ["client"], fields: {"source": "crm"} })`.
+A number is enough to reach a person, so another system that knows the number
+needs no WhatsApp id.
 
 **Draft context.** A resolved contact also carries what a message to them is
 written after: the last 8 messages both ways (each cut to 200 characters,

@@ -284,6 +284,8 @@ export interface ChatSummary {
   phone?: string;
   name: string;
   note?: string;
+  /** A one-to-one chat: the tags the user filed the person under, sorted. */
+  tags?: string[];
   type: ChatType;
   unread_count: number;
   /** `private`: written by someone tagged #private, or in their chat, in a list that did not ask for them; `text` holds no words. */
@@ -303,6 +305,8 @@ export interface MessageSender {
   phone?: string;
   /** The user's own note on this person, when there is one. */
   note?: string;
+  /** The tags the user filed this person under, sorted, when there are any. */
+  tags?: string[];
 }
 
 export interface MessageView {
@@ -510,6 +514,8 @@ export interface SearchOptions {
   untilMs?: number;
   /** "me", or a contact / chat id: only messages that person sent. */
   from?: string;
+  /** Only the direct chats of the people filed under this tag. */
+  tag?: string;
   /** Without a chat, the #private rule (src/private-contacts.ts): their messages are left out and counted, unless `from` names them. */
   private?: PrivateRule;
 }
@@ -917,11 +923,11 @@ export interface WhatsAppApi {
   hasChat(jid: string): boolean;
   hasMessage(id: string): boolean;
   /** What search ran across by words; optional, so a stand-in need not count. */
-  searchCoverage?(chatId: string | undefined, opts?: { sinceMs?: number; untilMs?: number }): SearchCoverage | null;
+  searchCoverage?(chatId: string | undefined, opts?: { sinceMs?: number; untilMs?: number; tag?: string }): SearchCoverage | null;
   hasDraft(id: string): boolean;
   link(phone: string): Promise<PairingInfo>;
   /** With `private`, a last message from someone tagged #private, or in their chat, comes without its words. */
-  listChats(filter: ChatFilter, limit: number, opts?: { private?: PrivateRule; cursor?: string }): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }>;
+  listChats(filter: ChatFilter, limit: number, opts?: { private?: PrivateRule; cursor?: string; tag?: string }): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }>;
   readMessages(chatId: string, limit: number, before?: string, types?: MessageType[]): Promise<ChatRead>;
   getRecentMessages(
     hours: number,
@@ -970,6 +976,8 @@ export interface WhatsAppApi {
    */
   styleCheck?(chatJid: string, text: string, options?: { private?: PrivateRule }): StyleCheck | null;
   updateContactDetails(contactId: string, edit: ContactDetailsEdit): Promise<ContactSummary>;
+  /** updateContactDetails on several people at once, all or none. */
+  updateManyContactDetails?(contactIds: readonly string[], edit: ContactDetailsEdit): Promise<ContactSummary[]>;
   getGroupInfo(groupId: string): Promise<GroupInfo>;
   downloadMedia(messageId: string, saveTo?: string): Promise<MediaResult>;
   transcribeAudio(messageId: string, language?: string, opts?: TranscribeOptions): Promise<TranscribeResult>;

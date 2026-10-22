@@ -119,6 +119,7 @@ const waitingEntry = z.object({
   chat: z.string(),
   name: z.string(),
   note: z.string().optional(),
+  tags: z.array(z.string()).optional(),
   group: z.literal(true).optional(),
   from: z.string().optional().describe("In a group: who asks"),
   business: z.literal(true).optional(),
@@ -171,6 +172,7 @@ const directEntry = z.object({
   chat: z.string(),
   name: z.string(),
   note: z.string().optional(),
+  tags: z.array(z.string()).optional(),
   n: z.number().describe("New messages"),
   at,
   media,
@@ -316,6 +318,11 @@ function age(ms: number, now: number): string {
 /** Whitespace, line breaks included, as single spaces: what someone else wrote stays on its line. */
 function flat(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** The tags the user filed someone under, after their name: " #client #autopeloc", or "". Stored tags hold no whitespace. */
+function tagsLabel(tags: readonly string[] | undefined): string {
+  return tags?.length ? ` ${tags.map((tag) => `#${tag}`).join(" ")}` : "";
 }
 
 function cut(text: string, max: number): string {
@@ -501,7 +508,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
       quoteId: entry.private || (entry.ask.type === "voice" && !entry.ask.transcribed) ? null : entry.ask.id,
       thenId: entry.thenId ?? null,
       line: (quote) => {
-        const who = `${entry.name}${entry.note ? ` (${entry.note})` : ""}${entry.group ? " [group]" : ""}${entry.business ? " [business]" : entry.unknown ? " [not saved]" : ""}`;
+        const who = `${entry.name}${tagsLabel(entry.tags)}${entry.note ? ` (${entry.note})` : ""}${entry.group ? " [group]" : ""}${entry.business ? " [business]" : entry.unknown ? " [not saved]" : ""}`;
         const parts = [
           `- ${who}`,
           ...(entry.from ? [`${entry.from} asks`] : []),
@@ -527,6 +534,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
         chat: entry.chat,
         name: entry.name,
         ...(entry.note ? { note: entry.note } : {}),
+        ...(entry.tags ? { tags: entry.tags } : {}),
         ...(entry.group ? { group: true, from: entry.from } : {}),
         ...(entry.business ? { business: true } : {}),
         ...(entry.unknown ? { unknown: true } : {}),
@@ -616,7 +624,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
       quoteId: entry.quoteId,
       thenId: null,
       line: (quote) => {
-        const who = `${entry.name}${entry.note ? ` (${entry.note})` : ""}${entry.business ? " [business]" : entry.unknown ? " [not saved]" : ""}${entry.muted ? " [muted]" : ""}`;
+        const who = `${entry.name}${tagsLabel(entry.tags)}${entry.note ? ` (${entry.note})` : ""}${entry.business ? " [business]" : entry.unknown ? " [not saved]" : ""}${entry.muted ? " [muted]" : ""}`;
         const more = quote !== null && entry.count > 1 ? ` (+${entry.count - 1} more)` : "";
         return `- ${who} · ${entry.count} new · ${clock(entry.newestTs, now)}${media ? ` · ${media}` : ""}${entry.private ? " · private" : ""}${quoteSuffix(quote, true)}${more} · ${entry.chat}`;
       },
@@ -625,6 +633,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
         chat: entry.chat,
         name: entry.name,
         ...(entry.note ? { note: entry.note } : {}),
+        ...(entry.tags ? { tags: entry.tags } : {}),
         n: entry.count,
         at: clock(entry.newestTs, now),
         ...(Object.keys(entry.media).length > 0 ? { media: entry.media } : {}),

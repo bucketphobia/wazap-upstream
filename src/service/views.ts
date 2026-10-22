@@ -30,6 +30,7 @@ interface ViewLookups {
   marks: ReturnType<AccountDb["messages"]["marksOf"]>;
   nameFor: (jid: string, pushName?: string) => string;
   noteFor: (jid: string) => string | undefined;
+  tagsFor: (jid: string) => string[] | undefined;
   contactIdFor: (jid: string) => number | null;
 }
 
@@ -146,6 +147,7 @@ export class MessageViews {
     const marks = this.host.db().messages.marksOf(messages.map((message) => message.id));
     const names = new Map<string, string>();
     const notes = new Map<string, string | undefined>();
+    const tags = new Map<string, string[] | undefined>();
     const contactIds = new Map<string, number | null>();
     const lookups: ViewLookups = {
       marks,
@@ -162,6 +164,10 @@ export class MessageViews {
         if (!notes.has(jid)) notes.set(jid, this.identity.noteFor(jid));
         return notes.get(jid);
       },
+      tagsFor: (jid) => {
+        if (!tags.has(jid)) tags.set(jid, this.identity.tagsFor(jid));
+        return tags.get(jid);
+      },
       contactIdFor: (jid) => {
         if (!contactIds.has(jid)) contactIds.set(jid, this.host.db().identity.contactIdOf(jid));
         return contactIds.get(jid) ?? null;
@@ -176,6 +182,7 @@ export class MessageViews {
     const db = this.host.db();
     const nameOf = lookups?.nameFor ?? ((jid: string, pushName?: string) => this.identity.displayName(jid, pushName));
     const noteOf = lookups?.noteFor ?? ((jid: string) => this.identity.noteFor(jid));
+    const tagsOf = lookups?.tagsFor ?? ((jid: string) => this.identity.tagsFor(jid));
     const chatJid = message.chatJid;
     const sender = raw.key.fromMe
       ? this.identity.ownJid()
@@ -188,6 +195,7 @@ export class MessageViews {
       canonical: (jid) => this.identity.canonical(jid),
       nameFor: (jid) => nameOf(jid, jid === sender ? (raw.pushName ?? undefined) : undefined),
       noteFor: (jid) => noteOf(jid),
+      tagsFor: (jid) => tagsOf(jid),
       ownId: this.identity.ownJid(),
       chatId: chatJid,
       edited: message.editedAt !== null,
@@ -253,6 +261,7 @@ export class MessageViews {
     const sender = message.fromMe ? this.identity.ownJid() : (message.senderJid ?? message.chatJid);
     const phone = phoneOf(sender);
     const note = this.identity.noteFor(sender);
+    const tags = this.identity.tagsFor(sender);
     return this.withSenderContact({
       message_id: message.sid,
       chat_id: message.chatJid,
@@ -262,6 +271,7 @@ export class MessageViews {
         name: this.identity.displayName(sender),
         ...(phone !== undefined ? { phone } : {}),
         ...(note !== undefined ? { note } : {}),
+        ...(tags !== undefined ? { tags } : {}),
       },
       type: message.type as MessageType,
       text: this.viewTextOf(message),
@@ -312,6 +322,7 @@ export class MessageViews {
     const hidden = last !== null && people !== null && (people.chat(chat) || people.sender(last.senderId));
     const muteEnd = chat.mutedUntil ?? 0;
     const note = this.identity.noteFor(jid);
+    const tags = chat.kind === "direct" ? this.identity.tagsFor(jid) : undefined;
     const phone = chat.kind === "direct" ? phoneOf(jid) : undefined;
     const summary: ChatSummary = {
       chat_id: jid,
@@ -329,6 +340,7 @@ export class MessageViews {
           }
         : null,
       ...(note ? { note } : {}),
+      ...(tags === undefined ? {} : { tags }),
       archived: chat.archived,
       pinned: Boolean(chat.pinned),
       muted_until: muteEnd > Date.now() ? isoWithOffset(muteEnd) : null,
