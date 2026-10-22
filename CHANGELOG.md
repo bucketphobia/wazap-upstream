@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0
+
+- **Who someone is shows wherever they do.** The tags filed with `remember` ride beside the person in `list_chats`, a message's `sender` in `read_messages` and `search`, and `catch_up` (`waiting`, `direct`), next to the note: `Ana (+40 700 000 002) · #client · dosar deschis`.
+- **A tag is a scope.** `list_chats({ tag })` lists only the chats of the people filed under it, newest first and paged; its cursor is bound to the tag. `search({ tag })` searches only their direct chats, by meaning and by words, and its coverage counts the same scope. The `#private` rules are unchanged.
+- **File several people at once.** `remember` takes a list of `chat_id`s for tags and details, filed on all of them or, when one is refused, on none. A note and `handled` stay one person at a time; a list answers with `people`, so `chat_id` and `name` in `remember`'s output are now optional.
+- **A detail finds its person.** `find_contact({ name: "AP-123" })` resolves whoever was filed with `{"caz": "AP-123"}`: the detail's whole value, never a part of it. `find_contact({ tag })` lists newest conversation first.
+- **A smaller catalogue.** `account_id` no longer repeats "Account id" on every tool; the server's instructions explain it once. tools/list is 5,934 tokens, down from 5,996. No schema migration or runtime dependency change.
+
 ## 1.5.2
 
 - Show formatted phone numbers beside people’s names in contact and chat lists, resolved contact results, stories, group members, join requests and chat-action previews. A paired LID uses its known number; an unresolved LID or group id is never interpreted as a phone. Number-only names are not repeated.
