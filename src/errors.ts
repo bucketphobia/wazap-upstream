@@ -37,6 +37,10 @@ export type ErrorCode =
   | "DRAFT_NOT_FOUND"
   | "DRAFT_EXPIRED"
   | "DRAFT_STALE"
+  | "CHAT_ACTION_NOT_FOUND"
+  | "CHAT_ACTION_EXPIRED"
+  | "CHAT_ACTION_STALE"
+  | "CHAT_ACTION_OUTCOME_UNKNOWN"
   | "CURSOR_EXPIRED"
   | "SEND_OUTCOME_UNKNOWN"
   | "SEND_BLOCKED"
@@ -109,6 +113,10 @@ export const ERROR_GUIDE: Record<ErrorCode, string> = {
   DRAFT_EXPIRED: "The draft expired after 15 minutes: draft again, show the new preview and wait for a new yes; the old yes does not carry over.",
   DRAFT_STALE:
     "The talk moved on, so nothing was sent: draft again with send_message, show the new preview and ask for a yes to it.",
+  CHAT_ACTION_NOT_FOUND: "Unknown/foreign preview: manage_chat without confirmation_id, show it, get a new yes.",
+  CHAT_ACTION_EXPIRED: "Preview expired after 15 minutes: preview again and ask for a new yes.",
+  CHAT_ACTION_STALE: "Account, target or conversation changed: preview again and ask for a new yes; nothing changed.",
+  CHAT_ACTION_OUTCOME_UNKNOWN: "May have happened: inspect state; never retry automatically or without a new explicit request.",
   CURSOR_EXPIRED: "The catch_up cursor expired: call catch_up without it; nothing was lost.",
   SEND_OUTCOME_UNKNOWN:
     "It may or may not have arrived: never confirm or draft it again unasked. read_messages shows it once WhatsApp echoes it; not there yet does not mean it failed.",

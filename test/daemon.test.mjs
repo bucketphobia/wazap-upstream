@@ -261,7 +261,7 @@ test("--http publishes its own port and takes the internal token as a full-acces
       assert.equal((await health.json()).ok, true);
 
       // No read token, so the endpoint is open; the internal token is what unlocks writes.
-      assert.equal(await httpToolCount(info.port, null), READ_TOOL_COUNT + 6, "remote readers also get the six cached-catalogue read adapters");
+      assert.equal(await httpToolCount(info.port, null), READ_TOOL_COUNT, "remote readers see only the current catalogue");
       assert.equal(await httpToolCount(info.port, info.token), TOOL_COUNT, "the internal token gets everything");
     },
     ["serve", "--http", "--port", "0"]

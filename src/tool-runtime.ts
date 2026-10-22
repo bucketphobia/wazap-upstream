@@ -8,6 +8,8 @@ import { draftStale, SessionDrafts } from "./drafts.js";
 import { asWazapError, WazapError } from "./errors.js";
 import { RateLimiter } from "./ratelimit.js";
 import { requireDraftOwner } from "./send-guard.js";
+import { requireChatAction, staleChatAction } from "./chat-action-drafts.js";
+import { publishToolCatalogue } from "./tool-catalogue.js";
 import type { WhatsAppApi } from "./wa-types.js";
 
 export type ContentBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -62,7 +64,7 @@ export interface ToolHints {
 }
 
 export interface ToolDef {
-  /** Only listed for remote connectors that need the cached read catalogue. */
+  /** Callable for cached remote connectors, never advertised by tools/list. */
   legacyRead?: boolean;
   name: string;
   title: string;
@@ -160,9 +162,11 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
       const session = (server as { server?: { getClientVersion?(): { name?: string } | undefined } }).server;
       return localClient(extra?._meta?.[CLIENT_META_KEY] ?? session?.getClientVersion?.()?.name);
     };
+    const registered: ToolDef[] = [];
     for (const def of defs) {
       if (def.write && !opts.allowWrite) continue;
       if (def.legacyRead && !opts.legacyReads) continue;
+      registered.push(def);
       const own = buckets.get(def.name);
       server.registerTool(
         def.name,
@@ -200,6 +204,13 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
             }
             own?.take();
             let resolveArgs = parsed;
+            if (def.name === "manage_chat" && parsed.confirmation_id !== undefined) {
+              const id = stringArg(parsed, "confirmation_id") ?? "";
+              const ref = requireChatAction(id, draftOwner, stringArg(parsed, "account_id"));
+              if (ref.work === undefined && sessionDrafts.movedOn(id, call)) throw staleChatAction();
+              sessionDrafts.retried(id, call);
+              resolveArgs = { ...parsed, account_id: ref.accountId };
+            }
             if (def.name === "confirm_send") {
               const draftId = stringArg(parsed, "draft_id") ?? "";
               // An assistant that drafted, did something else and now confirms is
@@ -246,6 +257,8 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
             });
             const draftId = result.structuredContent?.status === "draft" ? result.structuredContent.draft_id : undefined;
             if (typeof draftId === "string") sessionDrafts.note(draftId, call);
+            const confirmationId = result.structuredContent?.status === "preview" ? result.structuredContent.confirmation_id : undefined;
+            if (def.name === "manage_chat" && typeof confirmationId === "string") sessionDrafts.note(confirmationId, call);
             return attachAccountId(result, resolved.id);
           } catch (err) {
             const id = resolved?.id ?? stringArg(parsed, "account_id");
@@ -258,5 +271,6 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
         }
       );
     }
+    publishToolCatalogue(server, registered, opts.allowLocalFiles !== false);
   };
 }

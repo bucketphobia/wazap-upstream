@@ -38,7 +38,7 @@ An empty argument list means the tool requires nothing.
 own validator checks it; the seven without one are the six of the integration
 contract and `learn` (`test/output-schema.test.mjs`). A refusal is an error result carrying
 `{ error, message, fix }`, with `account_id` added when the tool declares an
-output schema; `error` is one of the 49 codes, and `learn` documents every one
+output schema; `error` is one of the 53 codes, and `learn` documents every one
 of them. Guarded by: `test/tools.test.mjs`.
 
 **What "stable" means here.** A new optional argument, a new value in an enum

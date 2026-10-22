@@ -222,7 +222,7 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     const images: ToolResult["content"] = inline_base64 ? [{ type: "image", data: inline_base64, mimeType: file.mime }] : [];
     return result({ ...file, message_id: messageId, account_id: found.binding.id }, images);
   };
-  return [search, download, transcribe,
+  return [search, download, transcribe, alias("list_accounts", "get_status"),
     {
       name: "search_contacts", title: "Search contacts (compatibility)", description: "Compatibility read: contacts matching a name or number. Refresh the catalogue to use find_contact.",
       schema: { ...account, query: z.string().min(2), limit: z.number().int().min(1).max(50).default(10) }, write: false, hints: readHints,

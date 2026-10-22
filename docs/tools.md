@@ -26,14 +26,37 @@ code. The [README](../README.md#the-23-tools) has the one-line table.
 | `edit_message` | write | Edit your own message, within WhatsApp's 15-minute window. |
 | `react_to_message` | write | Add or remove an emoji reaction. |
 | `delete_message` | write | `for_everyone: true` retracts your own message, within WhatsApp's 2-day window, and in a group where you are admin someone else's message too. `for_everyone: false` deletes any message for the linked account only, at any age. |
-| `manage_chat` | write | Archive, pin, mute (8h by default), mark read/unread; pin a message for everyone (24h, 7 days or 30 days) or star it; clear or delete the chat for the linked account; block or unblock a person. |
+| `manage_chat` | write | Preview archive, pin, mute (8h default), message pins/stars, clear/delete, block and their undo actions; confirm with the preview id. `mark_read` alone remains direct for read-receipt integrations. |
 | `manage_group` | write | Create a group; join one from an invite link or message (without `confirm: true` it only shows the group); add, remove, promote, demote, leave, rename, set or remove the group photo, invite links, list, approve or reject join requests, and change the settings. Every member sees a change at once. |
 | `scheduled_messages` | write | The account's scheduled messages: `list` (waiting ones soonest first, then the week's sent, missed, failed and cancelled ones) or `cancel` one by `schedule_id` before it goes. Not registered in a session without writes. See [Scheduling a message](#scheduling-a-message). |
 | `reminder` | local | A reminder about a chat, kept on this machine and posted to the user's webhook when due: `create` (`chat_id`, `note`, `after_hours` or `due_at`, `condition` `always` or `no_reply`), `list`, `cancel`. Nothing is sent on WhatsApp. See [Reminders](#reminders). |
 
+### Confirming a chat change
+
+`manage_chat(chat_id, action, ...)` returns `status: "preview"`, the resolved
+account and chat, the effect, `confirmation_id` and a 15-minute expiry. It does not
+archive, block, delete, pin, mute or otherwise mutate the chat. Show the preview;
+after approval call `manage_chat` with the returned `chat_id`, `action`,
+`confirmation_id` and the same `account_id`. Omit the message and duration options:
+they are frozen in the preview. A different target, action or identity is refused.
+
+The confirmation is scoped to its authenticated identity, account, linked owner
+and service instance. A new connection using the same remote credential can
+confirm; a different credential cannot. A restart invalidates pending previews.
+Other tool calls in that session make an unattempted preview stale. Write policy
+and target identity are checked again before execution; message actions also
+refuse a changed source text. Repeated or concurrent confirms share one attempt.
+`CHAT_ACTION_OUTCOME_UNKNOWN` means inspect state and do not retry automatically.
+
+`clear` and `delete` remove the account's chat history and local index; every
+member sees a message pin. The preview states that scope. The existing
+`mark_read` action remains direct for integrations that send read receipts and
+must only be called when the user asks. This gate requires a separate preview and
+confirmation call; it cannot independently prove that a human approved the preview.
+
 ### Sending once
 
-Nothing reaches WhatsApp until `confirm_send`, and a draft goes out at most
+A drafted message does not reach WhatsApp until `confirm_send`, and a draft goes out at most
 once, even across a crash. Drafts are kept in the account database for 15
 minutes, at most 20 per MCP session and 200 per account, each with the WhatsApp
 message id it will be sent under. Confirming a draft again answers the same receipt with
@@ -452,6 +475,8 @@ trace, so an agent can decide whether to retry, ask the user, or stop.
 | `RATE_LIMITED` | Too many writes, or too many read marks, which have a budget of their own; `fix` says how long to wait. |
 | `ACCOUNT_RESTRICTED` | WhatsApp restricts or banned the account, and nothing was sent. Do not retry: `get_status` says what and until when under `health`. Under a reachout timelock only a first message to someone never written to is refused; existing chats go on. |
 | `DRAFT_NOT_FOUND` / `DRAFT_EXPIRED` | The draft is unknown, from another identity (another session on stdio, another credential on HTTP), sent more than 15 minutes ago, or expired unsent. Draft again. |
+| `CHAT_ACTION_NOT_FOUND` / `CHAT_ACTION_EXPIRED` / `CHAT_ACTION_STALE` | Preview absent, foreign, expired or superseded. Preview again and get a new approval. |
+| `CHAT_ACTION_OUTCOME_UNKNOWN` | A chat action was attempted; its outcome is unknown. The same confirmation never executes again; inspect state before a new explicit request. |
 | `SEND_OUTCOME_UNKNOWN` | The message reached the socket and then the send failed, so WhatsApp may have it. The draft is never sent again; check the chat before drafting anew. |
 | `SEND_BLOCKED` | The account's send rules refuse this recipient. `wazap config send` changes them; the agent must not route around. |
 | `INVALID_TIME` | `send_at` or `due_at` is unreadable, in the past, under a minute or over 365 days ahead, in a zone that does not exist, or at a time the clocks skip; a scheduled draft's time passed before its yes; or a draft for later names a URL, or replies to or forwards a message on an account that keeps no history. |
@@ -464,16 +489,15 @@ trace, so an agent can decide whether to retry, ask the user, or stop.
 
 ### Cached remote connectors
 
-Remote HTTP sessions also register read-only compatibility adapters for client
-catalogues saved before 1.0. These preserve message search, contact candidates,
-recent conversation pages, unanswered candidates and media reads. Local clients
-keep the current compact catalogue. Refresh a remote client's tools to use the
-current names and workflows described above.
+Remote HTTP sessions retain unlisted compatibility handlers for catalogues saved
+before 1.0. Every fresh `tools/list` advertises only the current tools: historical
+aliases do not duplicate search, summaries, files or transcripts in the list.
+The SDK still validates the arguments of unlisted compatibility calls, which keep
+the same read permissions and rate limits. Refresh the client's catalogue to use
+the current names; a client that has not refreshed can keep calling its cached reads.
 
-Remote `learn`, read workflow prompts and the session instructions use the cached
-names for message lookups, contact candidates, summaries, media and transcripts.
-They do not require a client to call a
-new name absent from its saved catalogue. Local `learn` keeps the current guide.
+Remote `learn`, prompts and session instructions prefer the current workflows and
+include a short fallback mapping for clients that still only expose the old names.
 
 Compatibility reads use the same account, privacy and filesystem restrictions.
 Recent pages are bounded by message count; their opaque cursors last 15 minutes

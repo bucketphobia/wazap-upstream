@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+- Keep the remote catalogue at the current 23 tools (15 without writes). Cached read aliases remain callable and schema-checked but no longer duplicate summaries, search, files or transcripts in `tools/list`. Guides prefer current names and explain the cached fallback; the old account-list call also resolves through status.
+- `manage_chat` now previews every mutation except the integration's existing direct `mark_read` receipt. Show the resolved account, chat, effect and frozen options, then confirm with `confirmation_id`, `chat_id` and `action`. Previews expire after 15 minutes and are bound to the credential, account, linked owner and service instance. Target and policy changes are checked before execution; concurrent/repeated confirmations share one attempt, and unknown outcomes are never automatically retried.
+- Add adversarial and real HTTP SDK coverage for preview isolation, stale or altered confirmations, expiry, policy/owner changes during asynchronous checks, bounded storage and replay handling. No schema migration or runtime dependency change.
+
 ## 1.5.0
 
 - **Natural questions work through cached connectors too.** `search_messages`

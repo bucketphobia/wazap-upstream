@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { legacyReadTools } from "./legacy-read-tools.js";
-import { LEGACY_READ_GUIDE } from "./legacy-read-guide.js";
+import { LEGACY_READ_INSTRUCTIONS } from "./legacy-read-guide.js";
+import { previewChatAction, confirmChatAction } from "./chat-action-drafts.js";
 import type { AccountSource } from "./account-hub.js";
 import { renderGetStatus } from "./account-resolve.js";
 import { draftContextEnabled } from "./accounts.js";
@@ -436,16 +437,16 @@ const MAX_PREVIEWS = 12;
 
 const GUIDE = `# wazap: WhatsApp for your AI agent
 
-Call get_status when anything fails; link_account when it says not_linked.
+Use get_status on errors.
 
 ## Ids and accounts
 - chat_id: \`<digits>@s.whatsapp.net\` for a person, \`<id>@g.us\` for a group, or
   a phone number in international format. Pass ids back exactly as given.
 - message_id: the full id from read_messages, search or catch_up.
-- account_id: the account a call is about; get_status
-  lists them. Optional everywhere. Without it, a chat or message only one account
-  knows picks that account; catch_up and find_contact cover every account; other
-  reads use the default; a write to a chat no account knows fails AMBIGUOUS_ACCOUNT.
+- account_id: get_status lists accounts. Optional: a chat/message unique to one
+  account picks it; catch_up/find_contact cover all; other reads use the default.
+  A write to a chat no account knows fails AMBIGUOUS_ACCOUNT; pass account_id.
+
 
 ## Workflows
 - Catch up: catch_up() gives who waits on a reply, mentions, calls, people,
@@ -453,40 +454,34 @@ Call get_status when anything fails; link_account when it says not_linked.
   An ask the user handled elsewhere: remember(chat_id, handled: true).
 - One chat: read_messages(chat_id), older with before; chat_id "status" reads
   stories. To stay on the line, wait_for_messages with the cursor it returns.
-- Search: search(query), then its contexts: check corrections, clarify ambiguity.
+- Search: search(query) finds words and meaning with contexts: check corrections, clarify ambiguity.
   Never guess filters or treat rank as proof. get_message/get_media opens full sources.
-- Who someone is: find_contact(name) before drafting ("mama"). resolved gives
-  the chat_id; ambiguous or not_found: ask the user, never guess. remember keeps what the user says about a person (note,
-  tags, fields such as relatie), on this machine; find_contact(tag) lists a tag.
+- Find people: find_contact(name) resolves chat_id; ambiguous or not_found means
+  ask, never guess. remember stores notes, tags and details locally.
 - #private: a person's words come only when a call names them: their chat_id,
   a message_id of theirs, search's from; a group's chat_id reads whole. Elsewhere
   their entries say private, with no words, and search counts private_omitted.
   Fetch them only when asked.
-- Send: send_message drafts text, media, a poll, a location or a forward, and
-  sends nothing. Show the preview; after the user's yes, confirm_send(draft_id)
-  is the only call that sends. A draft lasts 15 minutes. Fix style_check.warnings
-  before showing a draft the user did not dictate. To mention someone, pass
-  mention_ids and write @<number> in the text. unnamed_recipient: the name shown
-  is not a saved contact; say so.
-- At once, no draft: react_to_message, edit_message, delete_message, manage_chat,
-  manage_group. Say what will change and wait for a yes. delete_message with
-  for_everyone: false removes a message for the linked account only;
-  delete_message takes someone else's message for everyone only in a group where
-  the account is admin. manage_group join previews an invite until confirm: true.
-  Most group actions (settings, list_join_requests, set_picture) need admin:
-  get_group_info first.
+- Send: send_message drafts; show its preview, then confirm_send(draft_id) on
+  the user's yes. Expires in 15 minutes. Fix style_check.warnings unless dictated.
+  Mentions: mention_ids plus @<number> in text. unnamed_recipient is not saved.
+- Chat changes: manage_chat previews every action except mark_read. Show its
+  preview; after a yes, call it with chat_id, action and confirmation_id only.
+  Options are frozen; a confirmation lasts 15 minutes and runs at most once.
+  mark_read keeps its direct read-receipt contract; do it only when asked.
+- Direct changes: react_to_message, edit_message, delete_message, manage_group:
+  explain the effect and get a yes. delete_message for_everyone: false is local;
+  delete_message takes someone else's message for everyone only in a group
+  where the account is admin.
+  manage_group join previews until confirm: true. get_group_info first for admin
+  actions, including settings, list_join_requests and set_picture.
+
 
 ## Message shape
-text is never empty: media and notices read as "[image] caption", "[voice
-message · 0:42]", "[deleted]", "[poll] question". A transcribed voice note
-carries transcript. sender: {id, name, phone, is_saved, contact_name, pushname,
-name_source}; with is_saved false the name is self-given. An unknown sender reads
-"unknown (lid …1234)", never lid digits. mentions: [{id, name}]; reactions and
-votes ride on their message, get_message says who. The user's own messages carry
-delivery: {status, read_by, delivered_to}, as far as receipts reached this device.
-A call has type "call" and call: {kind, direction, outcome, duration_seconds}. A
-notice has type "system" and system: {action, actor, targets, value}: report a
-membership change from it, never from who posted nearby. timestamp is ISO 8601.
+Media may carry transcript. An unsaved sender name is unverified.
+mentions: [{id, name}]. get_message
+includes reactions, votes and receipts. Calls: kind/direction/outcome/duration_seconds;
+system: action/actor/targets/value. timestamp is ISO 8601.
 
 ## Errors
 A failure is { error, message, fix }. Per code:
@@ -514,7 +509,7 @@ const TOOLS: readonly ToolDef[] = [
     schema: {},
     write: false,
     // Prose, once: the guide is not repeated as structured content.
-    handler: async (_args, ctx) => ({ content: [{ type: "text", text: ctx.legacyReads ? LEGACY_READ_GUIDE : GUIDE }] }),
+    handler: async (_args, ctx) => ({ content: [{ type: "text", text: GUIDE + (ctx.legacyReads ? `\n\n${LEGACY_READ_INSTRUCTIONS}` : "") }] }),
   }),
 
   tool({
@@ -1202,7 +1197,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "manage_chat",
     title: "Manage a WhatsApp chat",
-    description: `Change a chat on WhatsApp at once, with no draft: archive, pin, mute, mark_read or mark_unread; pin_message (for everyone) or star_message on a message_id; clear or delete it for the linked account; block a person. Say what will change and wait for a yes.`,
+    description: `Preview archive, pin, mute, pin_message, star_message, clear, delete, block and undo. After approval repeat chat_id/action with confirmation_id, without options. Expires in 15m; one attempt. mark_read runs directly.`,
     schema: {
       chat_id: chatId,
       action: z
@@ -1230,14 +1225,16 @@ const TOOLS: readonly ToolDef[] = [
         .union([z.literal(24), z.literal(168), z.literal(720)])
         .optional()
         .describe("pin_message: 168 by default"),
+      confirmation_id: z.string().min(1).max(64).optional().describe("From preview; omit message/duration options"),
     },
     write: true,
-    handler: async ({ chat_id, action, mute_hours, message_id, pin_hours }, { wa }) => {
-      const result = await wa.manageChat(chat_id, action, {
-        muteHours: mute_hours,
-        messageId: message_id,
-        pinHours: pin_hours,
-      });
+    handler: async (args, ctx) => {
+      if (args.confirmation_id === undefined && args.action !== "mark_read") {
+        const preview = await previewChatAction(args, ctx);
+        return ok(`Not applied.\n${preview.preview}\n\n${preview.next}`, preview);
+      }
+      const result = args.confirmation_id !== undefined ? await confirmChatAction(args, ctx) :
+        await ctx.wa.manageChat(args.chat_id as string, "mark_read");
       return ok(result.applied, result as unknown as Record<string, unknown>);
     },
   }),

@@ -34,7 +34,7 @@ function fixture(t) {
 const allText = (answer) => JSON.stringify(answer);
 const photo = (width, height) => Buffer.from(jpeg.encode({ width, height, data: Buffer.alloc(width * height * 4, 220) }, 60).data);
 
-test("remote HTTP lists every cached read name and the advertised SDK schema can call each", async (t) => {
+test("remote HTTP hides compatibility names but cached SDK calls remain validated", async (t) => {
   const f = fixture(t);
   const sid = f.arrive(ANA, "Poți trimite lista de pasageri?");
   const image = f.arrive(DAN, { imageMessage: { mimetype: "image/jpeg", fileLength: 100 } });
@@ -50,8 +50,12 @@ test("remote HTTP lists every cached read name and the advertised SDK schema can
   t.after(() => client.close());
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { Authorization: "Bearer synthetic-reader" } } }));
   const names = (await client.listTools()).tools.map((tool) => tool.name);
-  for (const name of LEGACY) assert.ok(names.includes(name), name);
+  for (const name of LEGACY) assert.ok(!names.includes(name), `${name} stays out of the catalogue`);
+  for (const name of ["search", "catch_up", "find_contact", "get_media"]) assert.ok(names.includes(name), name);
   assert.ok(!names.includes("send_message"));
+  assert.equal(names.length, 15, "remote catalogue has no extra compatibility tools");
+  assert.ok(!names.includes("list_accounts"));
+  assert.ok((await client.callTool({ name: "list_accounts", arguments: {} })).structuredContent.accounts.length > 0);
   const calls = [
     ["search_messages", { query: "pasageri" }], ["search_contacts", { query: "Angela" }],
     ["get_recent_messages", { hours: 24, limit: 3, compact: true }], ["get_unanswered", { max_age_hours: 72, limit: 5 }],
@@ -563,14 +567,16 @@ test("compact reads keep missed calls, bracketed words and quotes, without mergi
   assert.equal(direct.messages[0].call.outcome, "missed");
 });
 
-test("remote learn and server instructions use callable cached workflows; local learn keeps the modern guide", async (t) => {
+test("remote learn and instructions prefer the current catalogue and explain callable cached fallbacks", async (t) => {
   const f = fixture(t);
   const guide = (await f.call("learn", {})).content[0].text;
   for (const name of LEGACY) assert.ok(guide.includes(name), name);
-  assert.doesNotMatch(guide, /\b(?:catch_up|find_contact|search|get_media|remember|send_message|confirm_send)\b/);
-  assert.match(guide, /searches words\s+and meaning/i);
-  assert.match(guide, /contexts contains small, fresh/i);
-  assert.match(guide, /candidates.*not.*obligations/i);
+  assert.ok(Buffer.byteLength(guide) / 4 <= 2000, "remote learn stays within 2000 tokens");
+  assert.match(guide, /catch_up/);
+  assert.match(guide, /Compatibility names remain callable but are not advertised/);
+  assert.match(guide, /words and meaning with contexts/i);
+  assert.match(guide, /check corrections, clarify ambiguity/i);
+  assert.match(guide, /get_unanswered/);
   const local = schemaCheckedTools(f.svc, { allowWrite: false });
   assert.match((await local.call("learn", {})).content[0].text, /catch_up/);
   const stop = new AbortController();
@@ -583,11 +589,11 @@ test("remote learn and server instructions use callable cached workflows; local 
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`), { requestInit: { headers: { Authorization: "Bearer synthetic-guide-reader" } } }));
   const instructions = client.getInstructions();
   assert.match(instructions, /get_recent_messages/);
-  assert.doesNotMatch(instructions, /\b(?:catch_up|find_contact)\b/);
+  assert.match(instructions, /catch_up/);
   for (const name of ["whatsapp-inbox", "whatsapp-recall", "whatsapp-groups"]) {
     const prompt = await client.getPrompt({ name });
     const body = prompt.messages[0].content.text;
     assert.match(body, /get_recent_messages/);
-    assert.doesNotMatch(body, /\b(?:catch_up|find_contact|get_media|remember)\b/);
+    assert.match(body, /Compatibility names remain callable but are not advertised/);
   }
 });

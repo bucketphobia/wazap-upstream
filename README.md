@@ -125,7 +125,7 @@ What every argument means, and every error code, is in
 | `edit_message` | write | Edit your own message, within WhatsApp's 15-minute window. |
 | `react_to_message` | write | Add or remove an emoji reaction. |
 | `delete_message` | write | Delete for everyone (your own message, or anyone's in a group you admin), or only on this account. |
-| `manage_chat` | write | Archive, pin, mute, mark read or unread, star, clear, delete, block. |
+| `manage_chat` | write | Preview archive, pin, mute, star, clear, delete, block and undo actions; confirm the preview to apply once. `mark_read` remains direct. |
 | `manage_group` | write | Create, join, rename, add, remove, promote, invite links, join requests, settings, leave. |
 | `scheduled_messages` | write | List the scheduled messages (sent, missed, failed too) or cancel one before it goes. |
 | `reminder` | local | "Remind me if Ana has not answered in 2 days": set, list or cancel; posted to your webhook when due. |

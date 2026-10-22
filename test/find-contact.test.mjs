@@ -103,8 +103,7 @@ test("find_contact is the current lookup in every session, while remote clients 
     assert.deepEqual(tool.outputSchema.required.sort(), ["query", "status"]);
     assert.ok(tool.description.length <= 300, `${tool.description.length} characters`);
     assert.ok(!session.tools.some((entry) => ["get_contact", "sync_contacts"].includes(entry.name)), "other retired contact tools stay gone");
-    const legacy = session.tools.find((entry) => entry.name === "search_contacts");
-    assert.equal(legacy.annotations.readOnlyHint, true, "cached remote catalogues retain contact candidates");
+    assert.ok(!session.tools.some((entry) => entry.name === "search_contacts"), "compatibility candidates are callable but unlisted");
   }
   await s.close();
   await readOnly.close();
