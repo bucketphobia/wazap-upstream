@@ -329,6 +329,7 @@ export class Vectors {
       !cache.ready(input.model, input.vector?.length) ||
       this.c.db.isTransaction ||
       input.chat !== undefined ||
+      input.tag !== undefined ||
       input.from !== undefined ||
       input.since !== undefined ||
       input.until !== undefined ||
