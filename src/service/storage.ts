@@ -10,9 +10,13 @@
 import { existsSync, readdirSync, renameSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { AccountRecord } from "../accounts.js";
+import { accountPolicy, type AccountRecord } from "../accounts.js";
 import type { AccountPaths, Config } from "../config.js";
 import { AccountDb, purgePreMigrationBackups, StorageError } from "../db/index.js";
+import { IOS_ERROR, importIos, readIosReport } from "../ios-import/index.js";
+import { initializeIosBinding, sealIosBindingBeforeOwnerChange, IOS_SELECTION_REQUIRED } from "../ios-import/binding.js";
+import { IosSourceError } from "../ios-import/source.js";
+import { readTranscribeSettings } from "../transcribe/index.js";
 import { WazapError } from "../errors.js";
 import { LidRegistry } from "../identity.js";
 import { IMPORT_META, importBetaArchive, importLegacyAccount, scrubQuote, type ImportReport } from "../legacy-import/index.js";
@@ -70,6 +74,7 @@ function legacyFilesPresent(dataDir: string, paths: AccountPaths): boolean {
 /** What the boot touches beyond the database: the service's, read at each call. */
 export interface StorageHost {
   stopped(): boolean;
+  connected(): boolean;
   /** What the service mirrors from a database it starts reading. */
   adoptDatabase(db: AccountDb): void;
   /** A stop or a crash cut these short: settled when the database opens. */
@@ -96,6 +101,11 @@ export class AccountStorage {
   private lastStorageInfo: StorageInfo | undefined;
   storageFault: WazapError | null = null;
   private storageBoot: Promise<void> | null = null;
+  private iosAbort: AbortController | null = null;
+  private ownerChanging = false;
+  private ownerClaim: Promise<void> | null = null;
+  private iosStopping = false;
+  private iosImport: Promise<unknown> | null = null;
   expiryTimer: ReturnType<typeof setTimeout> | null = null;
   /** The daily pass over the legacy files, the beta archive and set-aside databases. */
   legacyTimer: ReturnType<typeof setInterval> | null = null;
@@ -125,7 +135,7 @@ export class AccountStorage {
    * still importing its earlier files, and when the database failed.
    */
   get db(): AccountDb {
-    if (this.storageState === "preparing") throw this.preparingError();
+    if (this.ownerChanging || this.storageState === "preparing") throw this.preparingError();
     if (this.accountDb === null || this.storageState === "failed") {
       throw this.storageFault ?? new WazapError("SERVICE_ERROR", "The account database is not open.");
     }
@@ -138,7 +148,7 @@ export class AccountStorage {
   /** The database when it answers reads and takes writes, or null: preparing, failed, stopped. */
   readyDb(): AccountDb | null {
     const db = this.accountDb;
-    return db !== null && db.isOpen && this.storageState === "ready" ? db : null;
+    return !this.ownerChanging && db !== null && db.isOpen && this.storageState === "ready" ? db : null;
   }
 
   preparingError(): WazapError {
@@ -194,11 +204,23 @@ export class AccountStorage {
    * earlier import read stay unread, and the record of what was moved to
    * legacy/ goes with whichever database serves next, so its week still runs.
    */
-  claimDatabase(owner: string): void {
+  async claimDatabase(owner: string): Promise<void> {
+    const previous = this.ownerClaim;
+    const claim = (async () => {
+      if (previous !== null) await previous;
+      await this.claimOwner(owner);
+    })();
+    this.ownerClaim = claim;
+    try { await claim; }
+    finally { if (this.ownerClaim === claim) this.ownerClaim = null; }
+  }
+
+  private async claimOwner(owner: string): Promise<void> {
     const db = this.accountDb;
     if (db === null || !db.isOpen || this.storageState === "failed") return;
     try {
       db.bindOwner(owner);
+      if (this.config.importIos) initializeIosBinding(db);
       return;
     } catch (err) {
       if (!(err instanceof StorageError) || err.code !== "OWNER_MISMATCH") {
@@ -206,13 +228,21 @@ export class AccountStorage {
         return;
       }
     }
-    const imported = db.getMeta(IMPORT_META.state) !== null;
-    const legacy = legacyRecordOf(db);
-    db.close();
-    let at = Date.now();
-    while (["", "-wal", "-shm"].some((suffix) => existsSync(join(this.paths.root, `wazap.${at}.previous-owner.sqlite${suffix}`)))) at++;
-    const aside = join(this.paths.root, `wazap.${at}.previous-owner.sqlite`);
+    this.ownerChanging = true;
+    this.storageState = "preparing";
+    this.stopImport();
     try {
+      // Persist an ownership barrier before replacing a database, including unbound old folders.
+      if (this.config.importIos) sealIosBindingBeforeOwnerChange(db);
+      await this.finishImport(30_000);
+      await this.storageBoot?.catch(() => {});
+      if (this.host.stopped() || !db.isOpen) return;
+      const imported = db.getMeta(IMPORT_META.state) !== null;
+      const legacy = legacyRecordOf(db);
+      db.close();
+      let at = Date.now();
+      while (["", "-wal", "-shm"].some((suffix) => existsSync(join(this.paths.root, `wazap.${at}.previous-owner.sqlite${suffix}`)))) at++;
+      const aside = join(this.paths.root, `wazap.${at}.previous-owner.sqlite`);
       const restore = setAsideFor(this.paths.root, owner);
       for (const suffix of ["", "-wal", "-shm"]) {
         if (existsSync(`${this.databasePath}${suffix}`)) renameSync(`${this.databasePath}${suffix}`, `${aside}${suffix}`);
@@ -237,8 +267,13 @@ export class AccountStorage {
       this.storageState = this.legacyPending(next) ? "preparing" : "ready";
       // The next bootStorage() prepares the database now in place.
       this.storageBoot = null;
+      this.iosImport = null;
+      this.iosAbort = null;
+      this.iosStopping = false;
     } catch (err) {
       this.storageFail(err);
+    } finally {
+      this.ownerChanging = false;
     }
   }
 
@@ -255,6 +290,91 @@ export class AccountStorage {
       throw err;
     });
     return this.storageBoot;
+  }
+
+  /** Stop scheduling immediately; an accepted upload may still persist its result. */
+  stopImport(): void {
+    this.iosStopping = true;
+  }
+
+  /** Drain accepted uploads for a bounded grace, then cancel native providers before closing storage. */
+  async finishImport(timeoutMs: number): Promise<void> {
+    this.stopImport();
+    const running = this.iosImport;
+    if (running === null) return;
+    let settled = false;
+    const completion = running.catch(() => {}).then(() => { settled = true; });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([completion, new Promise<void>(resolve => { timer = setTimeout(resolve, Math.max(0, timeoutMs)); })]);
+    clearTimeout(timer);
+    if (!settled) this.iosAbort?.abort();
+    // Both file providers honor AbortSignal. Let cancellation and checkpoint writes settle before db.close().
+    await completion;
+  }
+
+  private noteIosFailure(db: AccountDb, err: unknown): void {
+    if (this.host.stopped() || !db.isOpen) return;
+    // Archive/provider contents never belong in logs or status.
+    const sqliteCode = typeof err === "object" && err !== null && "errcode" in err ? err.errcode : null;
+    const reason =
+      err instanceof IosSourceError
+        ? err.reason
+        : err instanceof WazapError && err.message === IOS_SELECTION_REQUIRED
+        ? "archive_selection_required"
+        : sqliteCode === 26
+        ? "source_not_database"
+        : sqliteCode === 11
+          ? "source_corrupt"
+          : sqliteCode === 1
+            ? "source_schema_unsupported"
+            : sqliteCode === 5
+              ? "source_busy"
+              : err instanceof WazapError && err.message === "The iPhone archive changed since this import began."
+                ? "source_changed"
+                : err instanceof WazapError &&
+                    err.message === "Link the target account before importing an iPhone archive."
+                  ? "owner_missing"
+                  : err instanceof WazapError && err.message === "iPhone import needs WAZAP_PERSIST_HISTORY=1."
+                    ? "history_disabled"
+                    : "import_failed";
+    db.setMeta(IOS_ERROR, reason);
+    log(`iPhone import stopped (${reason}). Use wazap import ios --reset to clear its saved progress.`);
+  }
+
+  /** One background voice pass per boot, only after the real connection opens. */
+  startImportVoice(): void {
+    if (!this.config.importIos || this.config.command !== "serve") return;
+    const db = this.readyDb();
+    if (
+      db === null ||
+      this.iosImport !== null ||
+      this.iosStopping ||
+      !this.host.connected() ||
+      db.getMeta(IOS_ERROR) !== null
+    )
+      return;
+    const source = join(this.paths.root, "import", "ChatStorage.sqlite");
+    if (!this.config.persistHistory || !existsSync(source)) return;
+    let settings;
+    try {
+      settings = readTranscribeSettings(process.env, this.config.dataDir);
+    } catch (err) {
+      this.noteIosFailure(db, err);
+      return;
+    }
+    const permitted = settings.auto && !(settings.provider === "openai" && accountPolicy(this.accountRecord, this.config).readOnly && !settings.allowApi);
+    if (!permitted || settings.provider === null) return;
+    // Keep the settled promise too: reconnecting must not repeat a pass in the same boot.
+    this.iosImport = importIos({
+      db,
+      source,
+      media: join(this.paths.root, "import"),
+      background: true,
+      afterTranscript: () => this.host.embedFeed()?.kick(),
+      settings,
+      signal: (this.iosAbort ??= new AbortController()).signal,
+      stopping: () => this.iosStopping,
+    }).catch((err) => this.noteIosFailure(db, err));
   }
 
   private async bootStorageOnce(): Promise<void> {
@@ -280,6 +400,28 @@ export class AccountStorage {
         this.host.adoptDatabase(db);
       }
       await this.importLateBeta(db);
+      const iosSource = join(this.paths.root, "import", "ChatStorage.sqlite");
+      if (this.config.importIos && existsSync(iosSource)) {
+        try {
+          if (!this.config.persistHistory)
+            throw new WazapError("INVALID_ID", "iPhone import needs WAZAP_PERSIST_HISTORY=1.");
+          this.storageState = "preparing";
+          // A normal return may intentionally leave an actionable migration refusal.
+          db.setMeta(IOS_ERROR, null);
+          this.iosImport = importIos({
+            db,
+            source: iosSource,
+            textOnly: true,
+            signal: (this.iosAbort ??= new AbortController()).signal,
+            stopping: () => this.iosStopping,
+          });
+          await this.iosImport;
+        } catch (err) {
+          this.noteIosFailure(db, err);
+        } finally {
+          this.iosImport = null;
+        }
+      }
       if (this.host.stopped() || !db.isOpen) return;
       if (!this.config.persistHistory) {
         try {
@@ -485,10 +627,16 @@ export class AccountStorage {
 
   private readStorageInfo(db: AccountDb): StorageInfo {
     if (this.storageState === "preparing") {
+      const ios = readIosReport(db);
+      if (ios !== null && ios.state !== "done") return { state: "preparing", progress: `iPhone ${ios.state}`, ios_import: ios };
       const progress = importProgress(db);
       return progress === null ? { state: "preparing" } : { state: "preparing", progress: `${progress.phase} (${progress.step} of ${progress.steps})` };
     }
     const info: StorageInfo = { state: db.getMeta(IMPORT_UNVERIFIED_META) === null ? "ready" : "imported-unverified" };
+    const ios = readIosReport(db);
+    if (ios !== null) info.ios_import = ios;
+    const iosError = db.getMeta(IOS_ERROR);
+    if (iosError) info.ios_import_error = iosError;
     const schedule = legacySchedule(db);
     if (schedule !== null && schedule.deletedAt === null) {
       info.legacy_files = schedule.kept !== null ? { kept: schedule.kept } : { deleted_after: isoWithOffset(schedule.movedAt + LEGACY_TTL_MS) };

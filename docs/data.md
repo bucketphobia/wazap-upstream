@@ -255,3 +255,15 @@ secure erasure of heap pages, backups or filesystem snapshots. Explicit exports,
 independent quotes/forwards and data already returned or sent are not recalled.
 While wazap is stopped or suspended, disk cleanup waits until it runs again. Old
 unrecorded deletions cannot be reconstructed. See [the audit report](security-audit.md).
+
+## Import an iPhone archive
+
+Import an extracted iPhone WhatsApp database into an already linked account with
+`wazap import ios`, or opt in to automatic folder-drop imports with
+`WAZAP_IMPORT_IOS=1` (off by default). History persistence is required; existing
+messages win and source files are never modified.
+
+See [Import an iPhone archive](iphone-import.md) for source preparation, CLI and
+Docker/Unraid instructions, voice consent, progress reports and recovery. Keep
+`accounts/<id>/ios-import-binding.json` with the complete account directory when
+moving or restoring data; it ties archive selection to the linked owner.

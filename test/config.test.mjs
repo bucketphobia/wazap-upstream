@@ -174,3 +174,23 @@ test("the link-method flags land on the config: --qr picks QR, --code and --phon
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("automatic iPhone import defaults off and requires an explicit true setting", () => {
+  const previous = process.env.WAZAP_IMPORT_IOS;
+  const dir = mkdtempSync(join(tmpdir(), "wazap-ios-optin-config-"));
+  try {
+    for (const value of [undefined, "", "0", "off", "false", "typo", "1", "on", "true", " YES "]) {
+      if (value === undefined) delete process.env.WAZAP_IMPORT_IOS;
+      else process.env.WAZAP_IMPORT_IOS = value;
+      assert.equal(
+        parseCli(["serve", "--data-dir", dir]).config.importIos,
+        ["1", "on", "true", " YES "].includes(value),
+        String(value)
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.WAZAP_IMPORT_IOS;
+    else process.env.WAZAP_IMPORT_IOS = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

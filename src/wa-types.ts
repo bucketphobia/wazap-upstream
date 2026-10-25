@@ -184,6 +184,8 @@ export interface StatusDiagnostics {
 }
 
 export interface StorageInfo {
+  ios_import?: import("./ios-import/index.js").IosReport;
+  ios_import_error?: string;
   /**
    * `preparing`: importing the earlier message files, once after an upgrade;
    * tools answer NOT_CONNECTED meanwhile. `imported-unverified`: served from

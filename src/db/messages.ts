@@ -264,6 +264,7 @@ export class Messages {
     const now = this.c.now();
     let chat = this.identity.chat(input.chatJid);
     const existing = chat === null ? null : this.identity.findByKey(chat, input.fromMe, input.keyId);
+    if (existing !== null && input.insertOnly) return { outcome: "existing", id: existing.id, sid: existing.sid };
     if (existing !== null) return this.mergeExisting(existing, input, expiresAt, editedAt, now);
 
     if (chat !== null && chat.clearedThroughTs !== null && ts <= chat.clearedThroughTs) {

@@ -316,7 +316,7 @@ test("a different number linking sets the previous owner's database aside instea
   };
   link(ME);
   const first = openService(WhatsAppService, offlineConfig("x", { dataDir, persistHistory: true }));
-  first.storage.claimDatabase(ME);
+  await first.storage.claimDatabase(ME);
   first.db.messages.upsert({ chatJid: PEER, keyId: "OLD", fromMe: false, ts: Date.now() - 60_000, type: "text", text: "istoria altui număr" });
   await first.stop();
 
@@ -324,7 +324,7 @@ test("a different number linking sets the previous owner's database aside instea
   link(other);
   const { svc } = serviceOn(dataDir);
   t.after(() => svc.stop());
-  svc.storage.claimDatabase(other);
+  await svc.storage.claimDatabase(other);
   assert.equal(svc.db.getMeta("owner"), other);
   assert.equal(svc.hasMessage(`false_${PEER}_OLD`), false, "the new number starts empty");
   const aside = fs.readdirSync(storage.root).filter((name) => /^wazap\.\d+\.previous-owner\.sqlite$/.test(name));

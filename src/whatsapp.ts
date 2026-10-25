@@ -299,6 +299,7 @@ export class WhatsAppService implements WhatsAppApi {
     this.storage = new AccountStorage(
       {
         stopped: () => this.stopped,
+        connected: () => this.status === "connected",
         adoptDatabase: (db) => this.adoptDatabase(db),
         recoverSends: (db) => this.sends.recoverSends(db),
         recoverTranscriptions: (db) => this.voice.recoverTranscriptions(db),
@@ -601,7 +602,7 @@ export class WhatsAppService implements WhatsAppApi {
         // They read again: the advice about unreadable credentials is over before the boot that follows.
         this.credentialsRead();
         this.account = linked;
-        this.storage.claimDatabase(linked.id);
+        await this.storage.claimDatabase(linked.id);
       }
       await this.storage.bootStorage();
       // A stop during the boot (a logout, a removal) must not be followed by a socket.
@@ -613,7 +614,7 @@ export class WhatsAppService implements WhatsAppApi {
         if (since === null) return;
         linked = since;
         this.account = linked;
-        this.storage.claimDatabase(linked.id);
+        await this.storage.claimDatabase(linked.id);
         // A claim that swapped the database prepares the one it put in place.
         await this.storage.bootStorage();
         if (this.stopped) return;
@@ -659,6 +660,7 @@ export class WhatsAppService implements WhatsAppApi {
 
   private async stopOnce(): Promise<void> {
     this.stopped = true;
+    this.storage.stopImport();
     this.health.dispose();
     this.linkWatch.dispose(true);
     if (this.storage.expiryTimer) clearTimeout(this.storage.expiryTimer);
@@ -682,7 +684,10 @@ export class WhatsAppService implements WhatsAppApi {
     await this.ingest.historyIdle();
     // Before the database closes: a run under way gets a while to store the transcript it is paying for,
     // then gives its claim back, so the note waits for the next start rather than being uploaded twice.
-    await this.voice.transcribeWorker.finish(this.voice.transcribeSource, STOP_TRANSCRIBE_WAIT_MS);
+    await Promise.all([
+      this.voice.transcribeWorker.finish(this.voice.transcribeSource, STOP_TRANSCRIBE_WAIT_MS),
+      this.storage.finishImport(STOP_TRANSCRIBE_WAIT_MS),
+    ]);
     this.voice.transcribeWorker.unregister(this.voice.transcribeSource);
     await this.recallIndex.stopRecall();
     await this.keep.stop();
@@ -1540,6 +1545,7 @@ export class WhatsAppService implements WhatsAppApi {
         void this.loadBlocklist(sock, generation);
         void this.checkReachout(sock, generation);
         this.keep.connected();
+        this.storage.startImportVoice();
       } else if (connection === "close") {
         const verdict = classifyClose(lastDisconnect?.error);
         if (verdict.kind === "logged_out") {

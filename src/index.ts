@@ -14,6 +14,7 @@ import {
   runStatus,
   runTranscribe,
 } from "./cli.js";
+import { runIosImport } from "./ios-import/cli.js";
 import { runBackup } from "./backup-cli.js";
 import { BAILEYS_VERSION, WAZAP_VERSION, parseCli, pickDefaultAction, settingWarnings } from "./config.js";
 import { migrateLayout } from "./migrate.js";
@@ -61,6 +62,7 @@ Usage:
   wazap account add <id> [--name <name>] [--json]          Add an account slot; --json: {account_id, created, enabled}, 0 if it exists
   wazap account remove|enable|disable|default <id>         Change an account, or delete its local data
   wazap account list                                       List accounts in this data dir
+  wazap import ios <ChatStorage.sqlite> [--media <dir>] [--account <id>] [--dry-run] [--reset] [--json]
   wazap backup <path> [--account <id>] [--force]           Copy an account database to <path>; the messages in it are not encrypted
   wazap migrate rollback                                   Undo a flat-layout move into accounts/
 
@@ -195,6 +197,9 @@ async function main(): Promise<void> {
       return;
     case "account":
       await runAccount(config);
+      return;
+    case "import":
+      await runIosImport(config);
       return;
     case "backup":
       await runBackup(config);

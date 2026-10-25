@@ -275,6 +275,7 @@ export class MessageViews {
       },
       type: message.type as MessageType,
       text: this.viewTextOf(message),
+      ...(message.transcript !== null ? { transcript: message.transcript } : {}),
       timestamp: isoWithOffset(message.ts),
       age: formatAge(message.ts),
       has_media: false,

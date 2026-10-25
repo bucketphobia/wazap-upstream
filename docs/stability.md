@@ -14,7 +14,7 @@ breaking.
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
 | Storage | forward-only migrations, released migrations frozen, the pre-migration copy | new schema versions | the SQLite schema as a format for other tools |
-| Settings | the 33 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
+| Settings | the 34 `WAZAP_*` in `.env.example` and `docs/settings.md` | new settings | anything not listed there |
 
 ## 1. The MCP surface
 
@@ -235,8 +235,8 @@ code or the tests supports a third-party reader.
 
 ## 6. Settings
 
-Stable: the 33 `WAZAP_*` listed in `.env.example` and in the settings table of
-`docs/settings.md` — `WAZAP_DATA_DIR`, `WAZAP_READ_ONLY`, `WAZAP_PERSIST_HISTORY`,
+Stable: the 34 `WAZAP_*` listed in `.env.example` and in the settings table of
+`docs/settings.md` — `WAZAP_DATA_DIR`, `WAZAP_READ_ONLY`, `WAZAP_PERSIST_HISTORY`, `WAZAP_IMPORT_IOS`,
 `WAZAP_HOST`, `WAZAP_PORT`, `WAZAP_READ_TOKEN`, `WAZAP_WRITE_TOKEN`,
 `WAZAP_PUBLIC_URL`, `WAZAP_OAUTH_PASSWORD`, `WAZAP_TRUST_PROXY`,
 `WAZAP_TRANSCRIBE`, `WAZAP_TRANSCRIBE_API_KEY`, `WAZAP_TRANSCRIBE_AUTH`, `WAZAP_TRANSCRIBE_ALLOW_API`,

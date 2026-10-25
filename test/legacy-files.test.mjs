@@ -90,7 +90,7 @@ function dateAsides(root) {
 async function bootAt(t, dataDir, at, config = {}, claim = undefined) {
   t.mock.method(Date, "now", () => at);
   const svc = serviceOn(dataDir, config);
-  if (claim !== undefined) svc.storage.claimDatabase(claim);
+  if (claim !== undefined) await svc.storage.claimDatabase(claim);
   await svc.bootStorage();
   await svc.stop();
   t.mock.restoreAll();

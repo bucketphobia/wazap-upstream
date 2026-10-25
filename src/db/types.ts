@@ -75,6 +75,8 @@ export interface ChatInput {
 
 /** A message is identified by its chat (any spelling), its direction and its WhatsApp key. */
 export interface MessageInput {
+  /** Archive imports may insert a new identity, never modify an existing row. */
+  insertOnly?: boolean;
   chatJid: string;
   keyId: string;
   fromMe: boolean;
@@ -113,6 +115,7 @@ export const MESSAGE_FLAGS = Object.freeze({
 });
 
 export type UpsertOutcome =
+  | "existing"
   /** A new row. */
   | "inserted"
   /** An existing row took the new version. */

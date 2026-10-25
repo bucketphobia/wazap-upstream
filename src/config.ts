@@ -32,7 +32,8 @@ export type Command =
   | "webhook"
   | "account"
   | "backup"
-  | "migrate";
+  | "migrate"
+  | "import";
 
 export interface Config {
   dataDir: string;
@@ -41,6 +42,8 @@ export interface Config {
   syncFullHistory: boolean;
   /** Persist chats and messages under the data dir so they survive a restart. */
   persistHistory: boolean;
+  /** Opt-in folder-drop iPhone imports and automatic archive work. */
+  importIos: boolean;
   /**
    * Strict retention: disappearing messages expire locally, and starting with
    * history off discards caches an earlier history-on run left. Off by default.
@@ -75,6 +78,8 @@ export interface Config {
   /** Positionals after the command: the client for `connect`, the setting for `config`. */
   args: string[];
   dryRun: boolean;
+  importMedia?: string;
+  importReset?: boolean;
   /** `backup` only: replace a file already at the destination. */
   force: boolean;
   /** `status` only: probe WhatsApp, and print the report as JSON. */
@@ -199,6 +204,7 @@ const COMMAND_ARGS: Record<Command, readonly number[]> = {
   account: [1, 2],
   backup: [1],
   migrate: [1],
+  import: [2],
 };
 
 const COMMANDS = Object.keys(COMMAND_ARGS) as readonly Command[];
@@ -351,6 +357,8 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       allowPositionals: true,
       options: {
         "data-dir": { type: "string" },
+        media: { type: "string" },
+        reset: { type: "boolean" },
         "read-only": { type: "boolean" },
         http: { type: "boolean" },
         host: { type: "string" },
@@ -425,6 +433,7 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       readOnly: values["read-only"] === true || readOnlySetting(process.env.WAZAP_READ_ONLY),
       syncFullHistory: false,
       persistHistory: asBool(process.env.WAZAP_PERSIST_HISTORY, true),
+      importIos: asBool(process.env.WAZAP_IMPORT_IOS, false),
       retention: asBool(process.env.WAZAP_RETENTION, false),
       mediaKeep: mediaKeepSettings(process.env),
       transport: values.http === true || httpFromEnv ? "http" : "stdio",
@@ -453,6 +462,8 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       explicitCommand: first !== undefined,
       args,
       dryRun: values["dry-run"] === true,
+      importMedia: values.media,
+      importReset: values.reset === true,
       force: values.force === true,
       live: values.live === true,
       json: values.json === true,

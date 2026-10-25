@@ -233,6 +233,44 @@ export class AccountDb {
     });
   }
 
+  /** Bounded, ordered reads within an internal metadata namespace. */
+  scanMeta(prefix: string, after = "", limit = 500): Array<{ key: string; value: string }> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+      throw new StorageError("INVALID_INPUT", "Metadata pages must contain between 1 and 500 records.");
+    const points = Array.from(prefix);
+    let upper: string | undefined;
+    while (points.length > 0) {
+      const last = points.pop()!.codePointAt(0)!;
+      if (last < 0x10ffff) {
+        upper = points.join("") + String.fromCodePoint(last + 1);
+        break;
+      }
+    }
+    return upper === undefined
+      ? this.connection.all(
+          "SELECT key,value FROM meta WHERE key>=? AND key>? ORDER BY key LIMIT ?",
+          prefix,
+          after,
+          limit
+        )
+      : this.connection.all(
+          "SELECT key,value FROM meta WHERE key>=? AND key>? AND key<? ORDER BY key LIMIT ?",
+          prefix,
+          after,
+          upper,
+          limit
+        );
+  }
+
+  /** Removes one bounded page atomically, including inside an existing caller transaction. */
+  deleteMetaKeys(keys: readonly string[]): void {
+    if (keys.length > 500)
+      throw new StorageError("INVALID_INPUT", "At most 500 metadata records may be removed at once.");
+    this.connection.write(() => {
+      for (const key of keys) this.connection.run("DELETE FROM meta WHERE key=?", key);
+    });
+  }
+
   /**
    * Ties the file to one WhatsApp account. The first call records the owner;
    * a later call naming someone else refuses, so one account's history never
