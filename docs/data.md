@@ -264,6 +264,6 @@ Import an extracted iPhone WhatsApp database into an already linked account with
 messages win and source files are never modified.
 
 See [Import an iPhone archive](iphone-import.md) for source preparation, CLI and
-Docker/Unraid instructions, voice consent, progress reports and recovery. Keep
+Docker instructions, voice consent, progress reports and recovery. Keep
 `accounts/<id>/ios-import-binding.json` with the complete account directory when
 moving or restoring data; it ties archive selection to the linked owner.

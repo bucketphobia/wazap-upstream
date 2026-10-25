@@ -324,7 +324,7 @@ What the 1.x line promises not to break is in [docs/stability.md](docs/stability
 | [docs/accounts.md](docs/accounts.md) | Several WhatsApp accounts, several MCP clients on one server |
 | [docs/voice.md](docs/voice.md) | Voice notes as text: whisper.cpp locally, or an OpenAI-compatible API |
 | [docs/recall.md](docs/recall.md) | Semantic search with a local embedding model |
-| [docs/iphone-import.md](docs/iphone-import.md) | Import an extracted iPhone archive: CLI, Docker/Unraid, automatic startup and voice |
+| [docs/iphone-import.md](docs/iphone-import.md) | Import an extracted iPhone archive: CLI, Docker, automatic startup and voice |
 | [docs/data.md](docs/data.md) | The data directory, `wazap backup`, retention, deleted and disappearing messages |
 | [docs/send-rules.md](docs/send-rules.md) | Read-only mode, per-account send rules, rate limits |
 | [docs/self-host.md](docs/self-host.md) | HTTP mode, systemd, Docker, tunnels, proxy trust, OAuth |

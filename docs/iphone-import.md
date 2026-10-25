@@ -112,7 +112,7 @@ errors remain preserved and visible; turning it off does not undo imported rows.
 Shutdown still drains work already accepted. After upgrading from a build with
 automatic import enabled implicitly, set `WAZAP_IMPORT_IOS=1` to resume that behavior.
 
-## Docker and Unraid
+## Docker
 
 Keep the full existing `/data` mount. The default account's folder-drop path is:
 
@@ -120,7 +120,7 @@ Keep the full existing `/data` mount. The default account's folder-drop path is:
 /data/accounts/default/import/ChatStorage.sqlite
 ```
 
-In the Unraid container settings, add `WAZAP_IMPORT_IOS` with value `1` and keep
+In the container environment, set `WAZAP_IMPORT_IOS=1` and keep
 `WAZAP_PERSIST_HISTORY=1`. Keep your provider settings; `WAZAP_TRANSCRIBE_AUTO=on`
 is valid for automatic voice work. Read-only accounts using an API also need
 `WAZAP_TRANSCRIBE_ALLOW_API=1`.
@@ -132,15 +132,15 @@ account database when moving or restoring the container's data.
 
 For a manual import, stop the normal container and use a one-off container with
 its same data directory. A command cannot run inside a stopped container.
-The example below runs from the Unraid host terminal. Replace both example host
+The example below runs from the Docker host terminal. Replace both example host
 paths and `YOUR_WAZAP_IMAGE` with your actual paths and the image containing this
 importer. The container user needs write access to appdata and read access to the
 extracted archive; the archive mount stays read-only.
 
 ```sh
 docker run --rm --network none \
-  --mount type=bind,src=/mnt/user/appdata/wazap,dst=/data \
-  --mount type=bind,src=/mnt/user/backups/iphone-extracted,dst=/archive,readonly \
+  --mount type=bind,src=/srv/wazap,dst=/data \
+  --mount type=bind,src=/srv/iphone-export,dst=/archive,readonly \
   YOUR_WAZAP_IMAGE \
   import ios /archive/ChatStorage.sqlite --account default --dry-run --json
 ```
@@ -149,7 +149,7 @@ Remove only `--dry-run` to perform the text import. Then start the normal contai
 again. This example deliberately has no `--media` and needs no network. If you
 adapt it for API transcription, allow network access and supply the same provider
 and policy settings as your regular container, including `WAZAP_READ_ONLY` and
-`WAZAP_TRANSCRIBE_ALLOW_API`. Unraid template environment values are not
+`WAZAP_TRANSCRIBE_ALLOW_API`. Your regular container's environment values are not
 automatically inherited by a separate container.
 
 ## Add voice transcription
