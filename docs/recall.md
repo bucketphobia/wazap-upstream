@@ -136,12 +136,14 @@ legacy choice among equal scores without scanning all vectors a second time.
 
 The `WAZAP_RECALL_CACHE_MAX_MB` limit covers vector bytes, shared message IDs, and three reusable sorted-slot
 indexes (56 bytes of shared bookkeeping per reserved slot). The warm allocation
-includes 10% headroom, or 1,024 slots when larger, clamped to the limit. Supported
-runtimes grow shared buffers without another vector copy. On older runtimes,
-copies yield in bounded steps and refuse growth whose temporary peak exceeds the
-limit. JavaScript Maps, worker heaps, SQLite page cache and runtime overhead are
-additional: the setting is not a process RSS limit. A size or allocation failure
-releases the cache and remains latched until restart; requests keep using SQLite.
+includes 10% headroom, or 1,024 slots when larger, clamped to the limit. Shared
+buffers grow without another vector copy. The limit applies per account, not per
+process: with N accounts the caches can take up to N times the limit, and the
+pools up to 4N workers. JavaScript Maps, worker heaps, SQLite page cache and
+runtime overhead are additional: the setting is not a process RSS limit. A size or
+allocation failure releases the cache and remains latched until restart; its
+change tracking is dropped so message writes no longer pay for it, and requests
+keep using SQLite.
 
 Dirty embeddings reconcile in background batches; a query encountering a large
 backlog uses SQLite immediately. Queries and reconciliation share one queue so
@@ -151,12 +153,17 @@ invalidates the cache when another connection commits, including during a scan.
 The next warm uses current data. No persistent schema migration is needed.
 
 Cache failures are logged without message content, release shared storage, and
-allow at most three background recovery attempts (1, 2 and 4 second delays).
+allow at most three consecutive background recovery attempts (1, 2 and 4 second
+delays). The attempts come back once a search is served from the recovered cache,
+so a failure that recurs after every warm still ends in failed. A write from
+another connection during a warm uses no attempt; such warms retry with a growing
+delay (up to 64 times the base) until a search is served. Any error inside the cache
+fails the cache the same way; it never reaches the search or the server.
 Warm operations have a 60-second deadline and worker responses a 15-second
 deadline. Recall status includes advisory `cache` state, reason, shared bytes,
-recovery count and `capFallbacks`; a cache failure does not disable SQLite recall.
-Chat, sender and time filters, pending clear purges and cold caches also retain
-that path.
+the attempts spent in the current recovery and `capFallbacks`; a cache failure
+does not disable SQLite recall. Any filter, pending clear purges and cold caches
+also retain that path.
 
 For provider-free desktop acceptance, build and commit first, then run:
 
