@@ -26,6 +26,7 @@ import {
   type ChatRow,
   type MessageRow,
 } from "./rows.js";
+import { NEXT_CHANGE_SEQ } from "./schema.js";
 import { styleOf, type StyleStats } from "./style.js";
 import { MESSAGE_FLAGS } from "./types.js";
 import type {
@@ -54,6 +55,13 @@ import type {
  * this, and a retraction then scrubs every quote of the retracted message.
  */
 export type ScrubQuote = (raw: Uint8Array, quotedSid: string) => Uint8Array | null;
+
+/**
+ * A hash of the content a protobuf carries, without what varies between copies
+ * of one message (messages.content_hash); supplied by the service for the same
+ * reason as ScrubQuote. Null when the bytes do not decode.
+ */
+export type ContentHasher = (raw: Uint8Array) => string | null;
 
 const MAX_PAGE = 1_000;
 /** How far back styleFor reads the user's own messages, and how many it needs in a chat before it reads the account instead. */
@@ -133,13 +141,19 @@ const FLAGS_EXPR = `(:flags | CASE WHEN :from_me = 1 AND EXISTS (SELECT 1 FROM s
 export const STORED_SEQ_TOP = `max(
   coalesce((SELECT stored_seq FROM messages INDEXED BY messages_stored WHERE stored_seq IS NOT NULL ORDER BY stored_seq DESC LIMIT 1), 0),
   coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'stored_seq_high'), 0))`;
+/** The newest change_seq handed out, 0 before any: the top new_since fixes when a call starts. */
+const CHANGE_SEQ_TOP = `max(
+  coalesce((SELECT change_seq FROM messages INDEXED BY messages_changed WHERE change_seq IS NOT NULL ORDER BY change_seq DESC LIMIT 1), 0),
+  coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'change_seq_high'), 0))`;
+/** MESSAGE_FROM driven off the change_seq index. */
+const CHANGED_FROM = MESSAGE_FROM.replace("messages m ", "messages m INDEXED BY messages_changed ");
 /** The stored_seq a message stored now takes: one past every one handed out. */
 const NEXT_STORED_SEQ = `(${STORED_SEQ_TOP} + 1)`;
 const UPSERT_SQL = `
 INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, quoted_sid, quoted_from_me, quoted_key_id, status,
-  edited_at, expires_at, text, transcript, transcript_info, raw, flags, stored_seq)
+  edited_at, expires_at, text, transcript, transcript_info, raw, content_hash, flags, stored_seq)
 VALUES (:id, :chat_id, :key_id, :from_me, :sender_id, :ts, :type, :quoted_sid, :quoted_from_me, :quoted_key_id, :status,
-  :edited_at, :expires_at, :text, :transcript, :transcript_info, :raw, ${FLAGS_EXPR}, ${NEXT_STORED_SEQ})
+  :edited_at, :expires_at, :text, :transcript, :transcript_info, :raw, :content_hash, ${FLAGS_EXPR}, ${NEXT_STORED_SEQ})
 ON CONFLICT(chat_id, from_me, key_id) DO UPDATE SET
   flags = messages.flags | excluded.flags,
   -- A stub standing in for a message (one that could not be decrypted) replaced by it: the message reaches the account now.
@@ -148,6 +162,7 @@ ON CONFLICT(chat_id, from_me, key_id) DO UPDATE SET
   type = CASE WHEN ${FRESH} THEN excluded.type ELSE messages.type END,
   text = CASE WHEN ${FRESH} THEN coalesce(excluded.text, messages.text) ELSE messages.text END,
   raw = CASE WHEN ${FRESH} THEN coalesce(excluded.raw, messages.raw) ELSE messages.raw END,
+  content_hash = CASE WHEN ${FRESH} THEN coalesce(excluded.content_hash, messages.content_hash) ELSE messages.content_hash END,
   quoted_sid = CASE WHEN ${FRESH} THEN coalesce(excluded.quoted_sid, messages.quoted_sid) ELSE messages.quoted_sid END,
   quoted_from_me = CASE WHEN ${FRESH} AND excluded.quoted_key_id IS NOT NULL THEN excluded.quoted_from_me
     ELSE messages.quoted_from_me END,
@@ -226,7 +241,8 @@ export class Messages {
   constructor(
     private readonly c: Connection,
     private readonly identity: Identity,
-    private readonly scrubQuote: ScrubQuote | null = null
+    private readonly scrubQuote: ScrubQuote | null = null,
+    private readonly hashContent: ContentHasher | null = null
   ) {}
 
   /**
@@ -330,7 +346,7 @@ export class Messages {
       text: input.text ?? null,
       transcript: input.transcript ?? null,
       transcript_info: input.transcript ? transcriptInfoJson(input.transcriptInfo) : null,
-      raw: this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null),
+      ...this.rawColumns(input),
       flags: flagBits(input.flags),
     });
     return { outcome: "inserted", id, sid };
@@ -372,7 +388,7 @@ export class Messages {
       text: input.text ?? null,
       transcript: input.transcript ?? null,
       transcript_info: input.transcript ? transcriptInfoJson(input.transcriptInfo) : null,
-      raw: this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null),
+      ...this.rawColumns(input),
       flags: flagBits(input.flags),
     });
     return { outcome: stale ? "stale" : "updated", id: existing.id, sid: existing.sid };
@@ -423,6 +439,12 @@ export class Messages {
     return gone === undefined ? raw : this.scrubQuote(raw, quotedSid);
   }
 
+  /** The protobuf as stored (a quote of a deleted message scrubbed) and the hash of its content. */
+  private rawColumns(input: MessageInput): { raw: Uint8Array | null; content_hash: string | null } {
+    const raw = this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null);
+    return { raw, content_hash: raw === null ? null : (this.hashContent?.(raw) ?? null) };
+  }
+
   /** Every live quote of `messageId`, however its address was spelled, loses its embedded copy of it. */
   private scrubQuotesOf(messageId: number): void {
     if (this.scrubQuote === null) return;
@@ -435,7 +457,11 @@ export class Messages {
       target.from_me
     );
     for (const row of quoting) {
-      this.c.run("UPDATE messages SET raw = ? WHERE id = ?", this.scrubQuote(row.raw, row.quoted_sid), row.id);
+      const scrubbed = this.scrubQuote(row.raw, row.quoted_sid);
+      if (scrubbed !== null && Buffer.from(scrubbed).equals(row.raw)) continue;
+      this.c.run("UPDATE messages SET raw = ?, content_hash = ? WHERE id = ?", scrubbed, scrubbed === null ? null : (this.hashContent?.(scrubbed) ?? null), row.id);
+      // A row stored without a hash never reads as changed by the trigger; this copy of the quote going is a change.
+      this.c.run(`UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = ?`, row.id);
     }
   }
 
@@ -444,7 +470,7 @@ export class Messages {
     const paths = this.c.all<{ path: string }>("SELECT path FROM media WHERE message_id = ?", messageId).map((r) => r.path);
     this.c.run("DELETE FROM media WHERE message_id = ?", messageId);
     this.c.run(
-      "UPDATE messages SET deleted_at = ?, text = NULL, transcript = NULL, transcript_info = NULL, raw = NULL WHERE id = ? AND deleted_at IS NULL",
+      "UPDATE messages SET deleted_at = ?, text = NULL, transcript = NULL, transcript_info = NULL, raw = NULL, content_hash = NULL WHERE id = ? AND deleted_at IS NULL",
       at,
       messageId
     );
@@ -1276,6 +1302,46 @@ export class Messages {
       limit + 1
     );
     return pageOf(rows.map(messageFromRow), limit);
+  }
+
+  /** The newest change_seq handed out; a new_since call fixes it first and reads no further. */
+  changeTop(): number {
+    return this.c.get<{ top: number }>(`SELECT ${CHANGE_SEQ_TOP} AS top`)?.top ?? 0;
+  }
+
+  /**
+   * Messages whose change_seq is in (after, top], oldest change first, across
+   * every chat but the status feed: the current state of each, a tombstone
+   * included. Hidden as a page hides them (expired, behind a clear barrier),
+   * except that a deletion made before the message's deadline stays listed
+   * after it; the expiry sweep's own tombstone is not. A message under two
+   * spellings of a folding chat is listed once, from the chat it reads as, the
+   * deleted copy ahead of the live one and, between equals, the lower id.
+   * Physical deletes leave nothing to list. `limit` is the caller's page, one
+   * past it already counted, and is never cut.
+   */
+  changedSince(after: number, top: number, limit: number): Array<{ seq: number; message: StoredMessage }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE) {
+      throw new StorageError("INVALID_INPUT", `A change page holds 1 to ${MAX_PAGE} messages, not ${limit}.`);
+    }
+    const canonical = "coalesce(c.merged_into, c.id)";
+    const rank = (row: string): string => `((${row}.deleted_at IS NOT NULL) * 2 + (${row}.chat_id = ${canonical}))`;
+    const rows = this.c.all<MessageRow & { change_seq: number }>(
+      `SELECT ${MESSAGE_COLUMNS}, m.change_seq FROM ${CHANGED_FROM}
+       WHERE m.change_seq > ? AND m.change_seq <= ?
+         AND (m.expires_at IS NULL OR m.expires_at > ? OR m.deleted_at < m.expires_at)
+         AND m.ts > coalesce(c.cleared_through_ts, 0) AND coalesce(ck.kind, c.kind) <> 'status'
+         AND NOT EXISTS (SELECT 1 FROM messages t
+           WHERE t.chat_id IN (SELECT id FROM chats WHERE id = ${canonical} OR merged_into = ${canonical})
+             AND t.chat_id <> m.chat_id AND t.from_me = m.from_me AND t.key_id = m.key_id
+             AND (${rank("t")} > ${rank("m")} OR (${rank("t")} = ${rank("m")} AND t.id < m.id)))
+       ORDER BY m.change_seq LIMIT ?`,
+      after,
+      top,
+      this.c.now(),
+      limit
+    );
+    return rows.map((row) => ({ seq: row.change_seq, message: messageFromRow(row) }));
   }
 
   /**

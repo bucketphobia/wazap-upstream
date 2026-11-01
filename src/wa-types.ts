@@ -337,6 +337,8 @@ export interface MessageView {
   /** On an event: who answered going, maybe and not going. */
   event_responses?: EventResponses;
   edited: boolean;
+  /** Deleted, for everyone or only here: only new_since lists a message in this state, with the words "[deleted]". */
+  deleted?: true;
   /** On the account's own messages: how far it got. Absent while WhatsApp has confirmed nothing. */
   delivery?: Delivery;
   /** In a broad read, from someone tagged #private: who, when and what kind, no words (src/private-contacts.ts). */
@@ -425,6 +427,20 @@ export interface SystemEvent {
    * a pin or a keep points at, or how many messages a shared history holds.
    */
   value?: string;
+}
+
+/** What new_since answers: messages past a change_seq cursor, in the order they changed. */
+export interface NewSinceResult {
+  /** Random, fixed when the numbering was created: a cursor kept with another epoch means start again from 0. */
+  epoch: string;
+  after: number;
+  /** Pass as `after` next: the last message listed while more remain, else top. */
+  through: number;
+  /** The newest change_seq when the call started. */
+  top: number;
+  more: boolean;
+  /** Each carries `key`, which does not change when a lid's pairing changes `message_id`. */
+  messages: Array<MessageView & { key: string }>;
 }
 
 export interface RecentConversation {
@@ -936,6 +952,8 @@ export interface WhatsAppApi {
     types?: MessageType[],
     opts?: { private?: PrivateRule }
   ): Promise<Synced<RecentConversation[]>>;
+  /** Messages that arrived or changed after the change_seq cursor `after`, across every chat but stories; #private people's words stay out. */
+  newSince(after: number, limit: number, opts?: { private?: PrivateRule }): Promise<Synced<NewSinceResult>>;
   recentMessageRefs(options: RecentReadOptions): Promise<Synced<RecentMessageRefs[]>>;
   readRecentMessages(ref: RecentMessageRefs, limit: number, options: RecentReadOptions): Promise<Synced<RecentMessagePage>>;
   searchMessages(

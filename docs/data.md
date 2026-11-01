@@ -78,6 +78,17 @@ only small bounded caches stay in the process.
   database, so they survive a restart and follow the number: a different
   number linking sets them aside with the rest. A sent one keeps no words; a
   closed one, and a fired, skipped or cancelled reminder, goes a week later.
+- **Every message has a change number** (schema 7, `change_seq`), the order
+  messages were stored or changed in, which `new_since` reads. An upgrade
+  numbers what the file already held, oldest first, in one step; after that a
+  message takes the next number when it is stored and whenever its words, an
+  edit, its transcript, its deletion, its quote copy or the chat it sits under
+  change. The number only grows, and a message removed for good (a cleared
+  chat, expiry) leaves a gap, never a repeat. The upgrade rewrites every message
+  row inside one transaction: keep free space of roughly the file's size on top
+  of the pre-migration copy. It is atomic; a failure leaves the file at version
+  6. A random `change_epoch` in the file tells a `new_since` consumer which
+  numbering its cursor belongs to; a copy of the data directory keeps it.
 - **A schema upgrade copies the file first.** When a start finds a database an
   older wazap wrote, it writes `wazap.<old version>.pre-migration.sqlite` beside
   it — the file as it was, whole — and only then migrates. If the copy cannot be

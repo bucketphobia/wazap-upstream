@@ -71,7 +71,7 @@ import { StorageError } from "./errors.js";
 import { Events } from "./events.js";
 import { Identity } from "./identity.js";
 import { Merger } from "./merge.js";
-import { Messages, type ScrubQuote } from "./messages.js";
+import { Messages, type ContentHasher, type ScrubQuote } from "./messages.js";
 import { Search } from "./search.js";
 import { Schedule } from "./schedule.js";
 import { Sends } from "./sends.js";
@@ -87,7 +87,7 @@ export { mergeNotes } from "./merge.js";
 export { foldText, DEFAULT_SCAN_CAP, DEFAULT_TRIGRAM_CAP } from "./search.js";
 export { contentHash, hybridTokens, hybridWords, int8Similarity, quantizeVector, unitVector, RRF_K } from "./vectors.js";
 export { isSqliteExperimentalWarning } from "./sqlite.js";
-export type { FlagDetector, RecentExchangeItem, ScrubQuote } from "./messages.js";
+export type { ContentHasher, FlagDetector, RecentExchangeItem, ScrubQuote } from "./messages.js";
 export { messageStyle, styleOf, type MessageStyle, type StyleStats } from "./style.js";
 export { FLAGS_BACKFILL_META, FLAGS_BACKFILL_WINDOW_MS } from "./messages.js";
 export { MESSAGE_FLAGS } from "./types.js";
@@ -159,6 +159,8 @@ export async function backupDatabase(path: string, destination: string): Promise
 export interface AccountDbOptions extends ConnectionOptions {
   /** Strips a quoted message's embedded copy from a quoting message's protobuf; see ScrubQuote. */
   scrubQuote?: ScrubQuote;
+  /** Hashes a protobuf's content for the change number (messages.content_hash); see ContentHasher. */
+  contentHash?: ContentHasher;
   /** Tells a group the account left from its stored chat protobuf; see LeftGroup. */
   leftGroup?: LeftGroup;
 }
@@ -184,7 +186,7 @@ export class AccountDb {
 
   private constructor(private readonly connection: Connection, options: AccountDbOptions) {
     this.identity = new Identity(connection);
-    this.messages = new Messages(connection, this.identity, options.scrubQuote ?? null);
+    this.messages = new Messages(connection, this.identity, options.scrubQuote ?? null, options.contentHash ?? null);
     this.search = new Search(connection, this.identity, this.messages);
     this.vectors = new Vectors(connection, this.identity, this.messages, this.search);
     this.sends = new Sends(connection);

@@ -93,6 +93,7 @@ import type {
   RecallAnswer,
   RecentConversation,
   RecentMessagePage,
+  NewSinceResult,
   RecentMessageRefs,
   RecentReadOptions,
   ReminderView,
@@ -1010,6 +1011,10 @@ export class WhatsAppService implements WhatsAppApi {
     opts: { private?: PrivateRule } = {}
   ): Promise<Synced<RecentConversation[]>> {
     return this.reads.getRecentMessages(hours, filter, includeSystem, types, opts);
+  }
+
+  newSince(after: number, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<NewSinceResult>> {
+    return this.reads.newSince(after, limit, opts);
   }
 
   recentMessageRefs(options: RecentReadOptions): Promise<Synced<RecentMessageRefs[]>> {

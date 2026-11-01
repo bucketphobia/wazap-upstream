@@ -31,6 +31,7 @@ const READ_TOOLS = [
   "get_media",
   "catch_up",
   "wait_for_messages",
+  "new_since",
   "remember",
   "reminder",
 ];
@@ -46,12 +47,12 @@ const WRITE_TOOLS = [
   "scheduled_messages",
 ];
 
-test("the registry is exactly the 23 documented tools, 15 of them in a session without writes", () => {
+test("the registry is exactly the 24 documented tools, 16 of them in a session without writes", () => {
   assert.deepEqual([...TOOL_NAMES].sort(), [...READ_TOOLS, ...WRITE_TOOLS].sort());
-  assert.equal(TOOL_NAMES.length, 23);
-  assert.equal(TOOL_COUNT, 23);
-  assert.equal(READ_TOOLS.length, 15);
-  assert.equal(READ_TOOL_COUNT, 15);
+  assert.equal(TOOL_NAMES.length, 24);
+  assert.equal(TOOL_COUNT, 24);
+  assert.equal(READ_TOOLS.length, 16);
+  assert.equal(READ_TOOL_COUNT, 16);
 });
 
 test("read-only registration exposes no write tool at all", () => {
@@ -527,6 +528,7 @@ test("each tool's annotations are true of its most far-reaching action: get_medi
     catch_up: "1001",
     remember: "0010",
     wait_for_messages: "1011",
+    new_since: "1011",
     search: "1011",
     get_message: "1011",
     find_contact: "1011",

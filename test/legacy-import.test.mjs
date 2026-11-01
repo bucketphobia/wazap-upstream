@@ -74,7 +74,7 @@ function dump(path) {
       out[table] = db
         .prepare(`SELECT * FROM ${table}`)
         .all()
-        .filter((row) => table !== "meta" || !/^(import_|migrated_|created_at|owner)/.test(row.key))
+        .filter((row) => table !== "meta" || !/^(import_|migrated_|created_at|change_epoch|owner)/.test(row.key))
         .map((row) =>
           JSON.stringify(
             Object.fromEntries(

@@ -136,6 +136,23 @@ const READ_OUTPUT = {
   account_id: z.string(),
 };
 
+const NEW_SINCE_OUTPUT = {
+  epoch: z.string().describe("A cursor stored with another epoch is void: start again from after 0"),
+  after: z.number(),
+  through: z.number().describe("Pass as after next"),
+  top: z.number(),
+  more: z.boolean(),
+  count: z.number(),
+  messages: z.array(
+    BROAD_MESSAGE_OUT.extend({
+      key: z.string().describe("Upsert by this: message_id changes when a chat's lid pairs with a phone"),
+      deleted: z.literal(true).optional().describe("Deleted; no words are left"),
+    }).passthrough()
+  ),
+  sync: z.string(),
+  account_id: z.string(),
+};
+
 const WAIT_OUTPUT = {
   count: z.number(),
   messages: z.array(BROAD_MESSAGE_OUT),
@@ -330,6 +347,7 @@ const HINTS: Record<string, ToolHints> = {
   // The user's notes, kept locally: not read-only, never WhatsApp, and filing the same thing twice changes nothing.
   remember: hint(false, false, true, false),
   wait_for_messages: hint(true, false, true, true),
+  new_since: hint(true, false, true, true),
   search: hint(true, false, true, true),
   get_message: hint(true, false, true, true),
   find_contact: hint(true, false, true, true),
@@ -763,6 +781,27 @@ const TOOLS: readonly ToolDef[] = [
         ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}),
       });
       return ok(renderWait(result), { ...result, count: result.messages.length });
+    },
+  }),
+
+  tool({
+    name: "new_since",
+    title: "List WhatsApp messages that arrived or changed",
+    description: `Messages that arrived or changed (edited, deleted, transcript added) after the cursor, in any chat but stories, as they are now: upsert by key, not message_id; a deleted one has deleted: true. A skipped number is normal. Not reported: messages removed locally (clearing, expiry).`,
+    schema: {
+      after: z.number().int().min(0).default(0).describe("through from the previous call; 0 lists all history"),
+      limit: z.number().int().min(1).max(200).default(100),
+    },
+    outputSchema: NEW_SINCE_OUTPUT,
+    write: false,
+    handler: async ({ after, limit }, ctx) => {
+      const result = await ctx.wa.newSince(after, limit, { private: await privateRule(ctx.hub, ctx.accountId) });
+      const { data } = result;
+      const note = `Changes ${data.after} to ${data.through} of ${data.top}${data.more ? "; more remain: call again with after " + data.through : ""}.`;
+      return ok(
+        renderMessages("Messages that arrived or changed", data.messages, new Map(), note, listTextCap(undefined)),
+        synced(result, { ...data, count: data.messages.length })
+      );
     },
   }),
 
@@ -1638,6 +1677,7 @@ function renderMessages(
       m.type !== "text" ? m.type : null,
       m.forwarded ? "forwarded" : null,
       m.edited ? "edited" : null,
+      m.deleted ? "deleted" : null,
       m.quoted ? "reply" : null,
       m.reactions?.length ? reactionTag(m.reactions) : null,
       m.mentions?.length ? `mentions ${m.mentions.map((person) => person.name).join(", ")}` : null,

@@ -9,7 +9,7 @@ breaking.
 
 | Area | Stable | Additive-only | Not promised |
 | --- | --- | --- | --- |
-| MCP tools | the 23 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
+| MCP tools | the 24 names, their required arguments, their error codes | new optional arguments, new enum values, new answer fields | description wording, field order, rendered text |
 | Safety | draft-then-confirm, send rules, read-only mode, session isolation | new codes for new refusals | the exact error sentences |
 | CLI | command and flag names, exit code 0 vs non-zero, `status --json`, `--version --json`, `account add --json` | new commands, flags and JSON keys | the human text on stderr |
 | Webhook | event names, signature scheme, the payload fields below | new events (opt-in), new payload fields | delivery latency, retry timing |
@@ -18,13 +18,13 @@ breaking.
 
 ## 1. The MCP surface
 
-wazap registers exactly 23 tools — the 20 of 1.0, `list_contacts`, added in
-1.2, and `scheduled_messages` and `reminder`, added in 1.4 — a session
-without writes sees 15 of them, and every tool also takes an optional `account_id`. Guarded by: `test/tools.test.mjs`,
+wazap registers exactly 24 tools — the 20 of 1.0, `list_contacts`, added in
+1.2, `scheduled_messages` and `reminder`, added in 1.4, and `new_since` — a session
+without writes sees 16 of them, and every tool also takes an optional `account_id`. Guarded by: `test/tools.test.mjs`,
 `test/tool-names.test.mjs`.
 
-The 23, each with what it requires: `learn` (), `get_status` (),
-`list_chats` (), `catch_up` (), `wait_for_messages` (), `find_contact` (),
+The 24, each with what it requires: `learn` (), `get_status` (),
+`list_chats` (), `catch_up` (), `wait_for_messages` (), `new_since` (), `find_contact` (),
 `list_contacts` (), `link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
 `confirm_send` (`draft_id`), `manage_group` (`action`),
 `read_messages` (`chat_id`), `remember` (`chat_id`), `get_message`
@@ -34,7 +34,7 @@ The 23, each with what it requires: `learn` (), `get_status` (),
 (`chat_id`, `action`), `scheduled_messages` (), `reminder` ().
 An empty argument list means the tool requires nothing.
 
-16 declare an output schema and answer in that shape, as an SDK client's
+17 declare an output schema and answer in that shape, as an SDK client's
 own validator checks it; the seven without one are the six of the integration
 contract and `learn` (`test/output-schema.test.mjs`). A refusal is an error result carrying
 `{ error, message, fix }`, with `account_id` added when the tool declares an
@@ -203,7 +203,7 @@ whenever that event is enabled.
 ## 5. Data on disk
 
 - The account database carries its schema version in `PRAGMA user_version`; it
-  is 6 in this release.
+  is 7 in this release.
 - Migrations run forward only, in order, and every released version has a chain
   test, so a new migration cannot ship without one. A released migration is
   never edited — a new shape is a new migration at the end — and the chain test

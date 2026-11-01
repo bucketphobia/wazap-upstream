@@ -923,6 +923,90 @@ CREATE INDEX reminders_state ON reminders(state, updated_at);
 `;
 // ---- end v6 ----------------------------------------------------------------
 
+// ---- v7: the order messages changed in (new_since) -------------------------
+// Self-contained: one column, its index, and the triggers that keep it. A
+// file upgraded from an earlier version numbers every message it holds at once.
+/** The change_seq a write takes: one past every one handed out, off the messages_changed index and the delete record. */
+const CHANGE_SEQ_HIGH = `max(
+  coalesce((SELECT change_seq FROM messages INDEXED BY messages_changed WHERE change_seq IS NOT NULL ORDER BY change_seq DESC LIMIT 1), 0),
+  coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'change_seq_high'), 0))`;
+export const NEXT_CHANGE_SEQ = `(${CHANGE_SEQ_HIGH} + 1)`;
+/**
+ * - messages.change_seq: one past the highest ever handed out (a physical
+ *   delete of the newest keeps its number in meta change_seq_high), so it only
+ *   grows. A message takes a new one when it is stored and whenever what a
+ *   reader sees of it changes: its text, an edit, a transcript, a tombstone,
+ *   its type (a system stub replaced by the message it stood for), its content
+ *   (content_hash: a quote scrubbed after the quoted message was deleted), or
+ *   the chat it sits under (a fold); and when its chat is renamed to a number
+ *   or folded into another, because the message's id is spelled with the chat
+ *   it reads as. A write that stores the same values again takes none.
+ *   Reactions, votes, receipts, delivery status, a sender newly known and a
+ *   change of tags do not move it. new_since lists what lies past a number, so
+ *   a consumer sees each arrival and each change once.
+ *   A physical delete (a cleared chat, expiry, a purge) leaves no row to list.
+ *   The triggers cover every write path; change_seq is not in their column
+ *   list, so the numbering never re-fires them.
+ *   The backfill orders what a file already held by stored_seq (null, from
+ *   before v5, first) and then id, so old history sits below everything stored later.
+ * - messages.content_hash: a hash of the message's content in its protobuf,
+ *   without the parts that vary between copies of the same message (its
+ *   messageContextInfo, media links and keys, thumbnails, scan data) and looking
+ *   through the envelopes the view looks through, supplied by the service
+ *   (AccountDbOptions.contentHash). Null for what a file held before v7 or
+ *   what no hasher saw; a change from null is not a change of content.
+ * - meta change_epoch: random, written once when the numbering is created. A
+ *   consumer that stored it with its cursor starts again from 0 when it
+ *   differs. A copy of the data directory keeps it.
+ */
+const V7 = `
+ALTER TABLE messages ADD COLUMN change_seq INTEGER;
+ALTER TABLE messages ADD COLUMN content_hash TEXT;
+
+UPDATE messages SET change_seq = numbered.n
+FROM (SELECT id, row_number() OVER (ORDER BY coalesce(stored_seq, 0), id) AS n FROM messages) AS numbered
+WHERE messages.id = numbered.id;
+
+CREATE INDEX messages_changed ON messages(change_seq, chat_id) WHERE change_seq IS NOT NULL;
+
+CREATE TRIGGER messages_change_insert AFTER INSERT ON messages
+BEGIN
+  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
+END;
+
+CREATE TRIGGER messages_change_update AFTER UPDATE OF text, transcript, transcript_info, edited_at, deleted_at, type, content_hash, quoted_sid, chat_id ON messages
+WHEN old.text IS NOT new.text OR old.transcript IS NOT new.transcript OR old.transcript_info IS NOT new.transcript_info
+  OR old.edited_at IS NOT new.edited_at OR old.deleted_at IS NOT new.deleted_at OR old.type IS NOT new.type
+  OR (old.content_hash IS NOT NULL AND old.content_hash IS NOT new.content_hash)
+  OR old.quoted_sid IS NOT new.quoted_sid OR old.chat_id IS NOT new.chat_id
+BEGIN
+  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
+END;
+
+-- A message's id is spelled with the chat it reads as, so a chat renamed to a
+-- number or folded into another changes the id of every message in it: each
+-- takes its own new number, in id order.
+CREATE TRIGGER chats_change_move AFTER UPDATE OF jid, merged_into ON chats
+WHEN old.jid IS NOT new.jid OR old.merged_into IS NOT new.merged_into
+BEGIN
+  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
+  FROM (SELECT id, row_number() OVER (ORDER BY id) AS n FROM messages WHERE chat_id = new.id) AS numbered
+  WHERE messages.id = numbered.id;
+END;
+
+-- A physical delete of the newest changed message keeps its number.
+CREATE TRIGGER messages_change_high AFTER DELETE ON messages
+WHEN old.change_seq IS NOT NULL AND old.change_seq > coalesce((
+  SELECT change_seq FROM messages INDEXED BY messages_changed WHERE change_seq IS NOT NULL ORDER BY change_seq DESC LIMIT 1), 0)
+BEGIN
+  INSERT INTO meta(key, value) VALUES ('change_seq_high', CAST(old.change_seq AS TEXT))
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER);
+END;
+
+INSERT OR REPLACE INTO meta(key, value) VALUES ('change_epoch', lower(hex(randomblob(8))));
+`;
+// ---- end v7 ----------------------------------------------------------------
+
 /** Every migration, in order. The schema version a build knows is the last one's. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1 },
@@ -931,6 +1015,7 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, sql: V4 },
   { version: 5, sql: V5 },
   { version: 6, sql: V6 },
+  { version: 7, sql: V7 },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

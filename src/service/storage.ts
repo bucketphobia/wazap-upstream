@@ -15,6 +15,7 @@ import type { AccountPaths, Config } from "../config.js";
 import { AccountDb, purgePreMigrationBackups, StorageError } from "../db/index.js";
 import { WazapError } from "../errors.js";
 import { LidRegistry } from "../identity.js";
+import { contentHashOf } from "../message-content-hash.js";
 import { IMPORT_META, importBetaArchive, importLegacyAccount, scrubQuote, type ImportReport } from "../legacy-import/index.js";
 import {
   LEGACY_TTL_MS,
@@ -168,7 +169,7 @@ export class AccountStorage {
    */
   openDatabase(): void {
     try {
-      const db = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, now: () => Date.now() });
+      const db = AccountDb.open(this.databasePath, { scrubQuote, contentHash: contentHashOf, leftGroup, now: () => Date.now() });
       this.accountDb = db;
       this.host.adoptDatabase(db);
       this.host.recoverSends(db);
@@ -227,7 +228,7 @@ export class AccountStorage {
       } else {
         log(`account ${this.accountRecord.id}: a different number is linked; its earlier database was set aside`);
       }
-      const next = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, now: () => Date.now() });
+      const next = AccountDb.open(this.databasePath, { scrubQuote, contentHash: contentHashOf, leftGroup, now: () => Date.now() });
       this.accountDb = next;
       if (restore === null && (imported || legacyFilesPresent(this.config.dataDir, this.paths))) next.setMeta(IMPORT_META.state, "skipped");
       carryLegacyRecord(legacy, next);

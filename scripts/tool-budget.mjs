@@ -20,7 +20,7 @@ import { pathToFileURL } from "node:url";
 
 import { registerTools } from "../dist/tools.js";
 
-export const MAX_LIST_TOKENS = 6000;
+export const MAX_LIST_TOKENS = 6200;
 export const MAX_OUTPUT_SCHEMA_TOKENS = 4000;
 export const MAX_DESCRIPTION_CHARS = 300;
 

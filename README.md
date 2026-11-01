@@ -15,7 +15,7 @@
 
 **wazap** is an MCP server for your own WhatsApp account. It links as a device,
 the way WhatsApp Web does, keeps what it sees on your machine, and gives any
-MCP client — Claude, ChatGPT, Gemini, Cursor, Codex — 23 tools over your chats,
+MCP client — Claude, ChatGPT, Gemini, Cursor, Codex — 24 tools over your chats,
 messages, media, contacts and groups.
 
 You stop opening WhatsApp to find things and ask instead:
@@ -99,7 +99,7 @@ the same code, so a Claude Desktop user never needs a terminal.
 Several WhatsApp accounts can live in one wazap (`wazap account add <id>`, then
 `wazap login --account <id>`); see [docs/accounts.md](docs/accounts.md).
 
-## The 23 tools
+## The 24 tools
 
 What every argument means, and every error code, is in
 [docs/tools.md](docs/tools.md). The assistant gets all of it by calling `learn`.
@@ -119,6 +119,7 @@ What every argument means, and every error code, is in
 | `get_group_info` | read | Participants, admins, group settings, the invite link for an admin. |
 | `get_media` | read | A voice note as its transcript, a photo as an image, any file saved to disk; served from the copy kept on arrival first. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, with a cursor so nothing is missed between calls. |
+| `new_since` | read | Everything that arrived or changed after a cursor, across every chat: for a program that syncs instead of paging each chat. |
 | `remember` | local | A note, tags or details about a person, kept on this machine. Nothing changes on WhatsApp. |
 | `send_message` | write | Draft a message, media, poll, location or forward — and send nothing. `send_at` drafts it for a later time. |
 | `confirm_send` | write | Send that draft, once, after the user has seen the preview and said yes; a draft for later is scheduled. |
@@ -320,7 +321,7 @@ What the 1.x line promises not to break is in [docs/stability.md](docs/stability
 | | |
 | --- | --- |
 | [docs/install.md](docs/install.md) | `setup` step by step, each client, the background service, `expose`, upgrading, skills |
-| [docs/tools.md](docs/tools.md) | The 23 tools in full, the workflows, every error code |
+| [docs/tools.md](docs/tools.md) | The 24 tools in full, the workflows, every error code |
 | [docs/accounts.md](docs/accounts.md) | Several WhatsApp accounts, several MCP clients on one server |
 | [docs/voice.md](docs/voice.md) | Voice notes as text: whisper.cpp locally, or an OpenAI-compatible API |
 | [docs/recall.md](docs/recall.md) | Semantic search with a local embedding model |

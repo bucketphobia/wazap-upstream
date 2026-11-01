@@ -383,10 +383,10 @@ export class Merger {
       id: number; type: string; quoted_sid: string | null; quoted_from_me: number | null; quoted_key_id: string | null;
       status: number | null; edited_at: number | null;
       expires_at: number | null; deleted_at: number | null; sender_id: number | null;
-      text: string | null; transcript: string | null; transcript_info: string | null; raw: Uint8Array | null; flags: number;
+      text: string | null; transcript: string | null; transcript_info: string | null; raw: Uint8Array | null; content_hash: string | null; flags: number;
     };
     const columns =
-      "id, type, quoted_sid, quoted_from_me, quoted_key_id, status, edited_at, expires_at, deleted_at, sender_id, text, transcript, transcript_info, raw, flags";
+      "id, type, quoted_sid, quoted_from_me, quoted_key_id, status, edited_at, expires_at, deleted_at, sender_id, text, transcript, transcript_info, raw, content_hash, flags";
     const keep = this.c.get<Twin>(`SELECT ${columns} FROM messages WHERE id = ?`, keepId)!;
     const drop = this.c.get<Twin>(`SELECT ${columns} FROM messages WHERE id = ?`, dropId)!;
 
@@ -400,11 +400,12 @@ export class Merger {
     const [winner, other] = dropNewer ? [drop, keep] : [keep, drop];
     const earliest = [keep.expires_at, drop.expires_at].filter((at): at is number => at !== null);
     this.c.run(
-      `UPDATE messages SET type = ?, text = ?, raw = ?, quoted_sid = ?, quoted_from_me = ?, quoted_key_id = ?, edited_at = ?,
+      `UPDATE messages SET type = ?, text = ?, raw = ?, content_hash = ?, quoted_sid = ?, quoted_from_me = ?, quoted_key_id = ?, edited_at = ?,
          transcript = ?, transcript_info = ?, status = ?, expires_at = ?, sender_id = ?, flags = ? WHERE id = ?`,
       winner.type,
       winner.text ?? other.text,
       winner.raw ?? other.raw,
+      winner.raw !== null ? winner.content_hash : other.content_hash,
       winner.quoted_sid ?? other.quoted_sid,
       winner.quoted_key_id === null ? other.quoted_from_me : winner.quoted_from_me,
       winner.quoted_key_id ?? other.quoted_key_id,

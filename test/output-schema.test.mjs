@@ -137,6 +137,7 @@ test("every tool with an output schema answers in its declared shape, through an
     ["get_message", { message_id: theirs }],
     ["get_group_info", { group_id: GROUP }],
     ["wait_for_messages", { timeout_seconds: 1 }],
+    ["new_since", {}],
     ["search", { query: "vedem" }],
     ["search", { query: "vedem", match: "words" }],
     ["find_contact", { tag: "client" }],

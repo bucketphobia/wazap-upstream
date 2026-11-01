@@ -114,7 +114,7 @@ for (const event of WEBHOOK_EVENTS) vocabulary.add(event);
 // ------------------------------------------------------------- 1. the tools
 
 test("the tool list the document prints is the registry, argument for argument", () => {
-  const listing = paragraph("The 23, each with what it requires:");
+  const listing = paragraph("The 24, each with what it requires:");
   const rows = [...listing.matchAll(/`([a-z_]+)`\s*\(([^)]*)\)/g)].map(([, name, args]) => [name, identifiers(args)]);
   assert.deepEqual(
     rows.map(([name]) => name).sort(),

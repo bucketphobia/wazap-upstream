@@ -40,6 +40,7 @@ import type {
   ConnectionStatus,
   MessageType,
   MessageView,
+  NewSinceResult,
   PrivateRule,
   RecentConversation,
   RecentMessagePage,
@@ -259,6 +260,58 @@ export class AccountReads {
 
       conversations.sort((a, b) => b.last_activity.localeCompare(a.last_activity));
       return this.host.synced(conversations);
+    });
+  }
+
+  /**
+   * Messages that arrived or changed after the change_seq `after`, oldest change
+   * first, across every chat but the stories. The top is fixed before anything
+   * else is read, so a change that lands during the call waits for the next one.
+   */
+  newSince(after: number, limit: number, opts: { private?: PrivateRule } = {}): Promise<Synced<NewSinceResult>> {
+    return this.host.guarded(async () => {
+      this.host.ensureConnected();
+      await this.host.waitForSync();
+      const db = this.storage.db;
+      const top = db.messages.changeTop();
+      // The page, then the names it needs learned, then the page again: a pairing folds a lid chat into its number's.
+      const page = (): Array<{ seq: number; message: StoredMessage }> => {
+        const listed: Array<{ seq: number; message: StoredMessage }> = [];
+        for (let cursor = after; cursor < top; ) {
+          const rows = db.messages.changedSince(cursor, top, limit + 1);
+          for (const row of rows) {
+            cursor = row.seq;
+            if (isNoiseJid(row.message.chatJid)) continue;
+            listed.push(row);
+            if (listed.length > limit) return listed;
+          }
+          if (rows.length < limit + 1) break;
+        }
+        return listed;
+      };
+      const chats = [...new Set(page().map((row) => row.message.chatJid))];
+      await this.identity.learnLidPhones(chats);
+      await Promise.all(
+        chats
+          .filter((jid) => isGroupId(jid) && !this.groups.groupCache.has(jid) && !this.groups.unreadableGroups.has(jid))
+          .slice(0, RECENT_GROUP_META_MAX)
+          .map((jid) => this.groups.learnParticipants(jid))
+      );
+      const found = page();
+      const more = found.length > limit;
+      const rows = found.slice(0, limit);
+      const stored = rows.map((row) => row.message);
+      const lookups = this.views.viewLookups(stored);
+      const people = this.identity.privateScope(opts.private);
+      const messages = stored.map((message) => {
+        const view = this.views.viewOfStored(message, lookups);
+        const hidden = people !== null && people.message(message);
+        const shown = people === null ? view : hidden ? withoutWords(view) : withoutPrivateQuote(view, people);
+        // A tombstone keeps its type and has no words; the answer says it was deleted.
+        const key = `${message.fromMe}_${message.keyId}`;
+        return message.deletedAt === null ? { ...shown, key } : { ...shown, key, ...(hidden ? {} : { text: "[deleted]" }), deleted: true as const };
+      });
+      return this.host.synced({ epoch: db.getMeta("change_epoch") ?? "", after, through: more ? rows[rows.length - 1]!.seq : top, top, more, messages });
     });
   }
 

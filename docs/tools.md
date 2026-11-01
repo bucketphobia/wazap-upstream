@@ -1,9 +1,9 @@
 # The tools
 
-What each of the 23 tools answers, the workflows behind them, and every error
-code. The [README](../README.md#the-23-tools) has the one-line table.
+What each of the 24 tools answers, the workflows behind them, and every error
+code. The [README](../README.md#the-24-tools) has the one-line table.
 
-## The 23 tools
+## The 24 tools
 
 | Tool | Kind | What it does |
 | --- | --- | --- |
@@ -20,6 +20,7 @@ code. The [README](../README.md#the-23-tools) has the one-line table.
 | `get_group_info` | read | Participants, admins, announcement mode, who may edit the info or add members, join approval, disappearing messages, community, invite link (when you are admin). |
 | `get_media` | read | A message's media: a voice note or audio as its transcript, a photo attached as an image, any file saved to disk (`save_to` picks the directory). Transcription runs on the local or the API provider; with `save_to` a recording comes as its file, with a transcript only if one was already made, and when no transcript can be made the file comes instead, with `transcript_unavailable` saying why. A copy [kept when the media arrived](data.md#kept-media) answers first, even with the link down, and `source` says which: `kept` or `whatsapp`. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, then return it with a cursor for the next call. `addressed_to_me` wakes only for direct messages, @-mentions and replies. |
+| `new_since` | read | Every message, in every chat but stories, that arrived or changed (edited, deleted, a transcript added) after a cursor, in the order it changed, each in its current state: `after` (default 0, all history) in, `through` out for the next call, with `epoch`, `top` and `more`. Upsert by `key`, not `message_id`, which changes when a chat's lid pairs with a phone. A deleted message comes with `deleted: true` and `[deleted]` for words. `limit` 1-200 (default 100). Not reported: messages removed locally (a cleared or deleted chat, expiry). For a consumer that syncs instead of paging every chat. See [Syncing with new_since](#syncing-with-new_since). |
 | `remember` | local | Keep what the user says about a person, on this machine only: a note, tags, details (`relatie`, `nickname`, "role": "contabil") that `find_contact` matches, and `handled: true` to take an ask off `catch_up`'s waiting list until they write again. A list of `chat_id`s files the same tags and details on all of them at once, or on none. `#private` keeps their words out of what the assistant did not ask about them by name ([Keeping someone private](#keeping-someone-private)). Nothing changes on WhatsApp. |
 | `send_message` | write | Draft a message: text (a reply, @-mentions), media from a path or URL (`as`: document, voice note or GIF), a poll (`options`), a location (`latitude`, `longitude`) or a forward (`forward`). Does not send. A text draft to someone you write to often carries `style_check`: where it does not read like you. `send_at` (with `time_zone`) drafts it for later; see [Scheduling a message](#scheduling-a-message). |
 | `confirm_send` | write | Send a draft after the user has seen the preview and said yes. A draft is sent at most once; see [Sending once](#sending-once). A draft with `send_at` is scheduled instead. |
@@ -280,6 +281,51 @@ carry a placeholder such as `[image] caption`, `[voice message · 0:42]`, `[dele
 and an event who answered going, maybe or not going. Timestamps are ISO 8601 with the machine's UTC offset,
 alongside a human `age` like `2h ago`.
 
+### Syncing with new_since
+
+`new_since` is for a program that keeps its own copy of the messages. Every
+message has a change number; the tool lists the messages whose number is past
+`after`, oldest change first, across every chat but stories, up to `limit`
+(100 by default, at most 200). A message gets a new number when it is stored and
+whenever what a reader sees of it changes: an edit, a deletion (for everyone or
+only here), a transcript added, the message a decryption stub stood for, a quote
+scrubbed after the quoted message was deleted. Storing the same message again
+changes nothing, and neither do a status, receipts, reactions, votes or a push
+name that arrive with it. When a chat is renamed to a number or folded into
+another because its lid was paired with a phone, every message in it comes
+again, since its `message_id` is spelled with the chat.
+
+The answer carries `epoch`, `after`, `through`, `top`, `more` and the messages,
+each in the shape `read_messages` gives, in its current state, plus `key`.
+Pass `through` as `after` next time. `top` is the newest number when the call
+started, so a change that lands during the call waits for the next one. With
+`more` true `through` is the number of the last message listed; otherwise it is
+`top`, so messages hidden at the end of the window (a cleared chat, an expired
+message) are skipped. A cursor past `top` (a restored older file) comes back as
+`top`. A number can be skipped: a message that changed again moves to its newer
+number.
+
+- **Upsert by `key`**, `<true|false>_<id>`, the message's direction and
+  WhatsApp id. A `key` is unique in practice: WhatsApp message ids are random and do not repeat across chats. `message_id` can change when a chat's lid pairs with a phone, so
+  a consumer keyed by it would keep two records for one message. A message comes
+  again when it changes; a deleted one comes with `deleted: true`, `[deleted]`
+  for words and none of its old words.
+- **Keep the `epoch` with your cursor.** It is random and written once, when the
+  numbering is created. When the epoch differs from the one stored with your
+  cursor, start again from `after: 0`. A restored copy of a data directory keeps
+  its epoch, so restoring one is for the consumer to notice, and to restart from 0.
+- `after: 0` lists everything the account still holds, history from before this
+  version included.
+- **Never reported:** a message removed locally, by clearing or deleting a chat,
+  by expiry or by the retention purge. No row is left to list; compare with
+  `read_messages` if you need to notice that.
+- **`#private`:** messages of someone tagged `#private` are listed without their
+  words ([Keeping someone private](#keeping-someone-private)). Tagging or untagging
+  someone, and a sender that becomes known or merges with another contact, are
+  not changes and list nothing again: after changing `#private`, sync again from 0.
+- A message under two spellings of a chat that is being folded into another is
+  listed once, under the chat it reads as.
+
 ### Finding people
 
 `find_contact` answers "who is mama?", "Ana de la contabilitate" or "Mișu"
@@ -448,6 +494,8 @@ and what kind, and loses the words:
   groups before it counts to `limit`, by meaning and by words, and says how
   many in `private_omitted`. A quote of theirs in someone else's message keeps
   who wrote it, not what.
+- `new_since` lists what arrived or changed from them, in their chat or in a
+  group, with `text: "[private]"` and `private: true`, a deletion too.
 - `wait_for_messages` without `chat_id` still returns what arrived from them,
   in their chat or in a group, with `text: "[private]"` and `private: true`;
   waiting on one chat, theirs or a group's, reads it whole.
@@ -458,7 +506,7 @@ and what kind, and loses the words:
   is no way to read one of theirs through the assistant.
 
 The tag goes with the person: filed on one account, it holds in `search`,
-`wait_for_messages`, `list_chats`, the stories and `find_contact`'s draft
+`new_since`, `wait_for_messages`, `list_chats`, the stories and `find_contact`'s draft
 context of every other account, by number or lid, and in every catch-up. The
 [outbound webhook](api-and-webhooks.md#which-chats-are-posted) never posts their
 direct chat or a message they wrote in a group, with or without a chat filter.
