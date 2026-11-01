@@ -12,6 +12,7 @@
  * asynchronous API for an exact worker scan over a shared int8 cache.
  */
 import { createHash } from "node:crypto";
+import { log } from "../logger.js";
 import { VectorCache, cacheLimitBytes } from "./vector-cache.js";
 import type { Connection } from "./connection.js";
 import { StorageError } from "./errors.js";
@@ -123,6 +124,19 @@ export function contentHash(text: string | null, transcript: string | null): str
 function recencyWeight(id: number, now: number, halfLifeMs: number | undefined): number {
   if (halfLifeMs === undefined) return 1;
   return RECENCY_MIN_WEIGHT + (1 - RECENCY_MIN_WEIGHT) * Math.pow(0.5, Math.max(0, now - secondOfId(id) * 1000) / halfLifeMs);
+}
+
+/** The ranking tail shared by the SQLite scan and the workers: drops expired hits, weighs similarity by age, orders by it. */
+function weighByAge(
+  hits: Array<{ id: number; score: number }>,
+  expired: Set<number> | null,
+  now: number,
+  halfLifeMs: number | undefined
+): Array<{ id: number; similarity: number; score: number }> {
+  const ranked = hits
+    .filter((hit) => expired === null || !expired.has(hit.id))
+    .map((hit) => ({ id: hit.id, similarity: hit.score, score: hit.score * recencyWeight(hit.id, now, halfLifeMs) }));
+  return halfLifeMs === undefined ? ranked : ranked.sort((a, b) => b.score - a.score || b.id - a.id);
 }
 
 /** Cosine similarity of a unit query against a stored int8 vector. */
@@ -294,13 +308,20 @@ export class Vectors {
   ) {}
 
   private cache: VectorCache | null = null;
-  private readonly cacheEnabled = cacheLimitBytes() > 0;
+  private cacheEnabled = cacheLimitBytes() > 0;
 
   /** Loads in small batches; searches use SQLite until the cache is ready. */
-  warmCache(model: string, dimensions?: number): Promise<void> {
-    if (this.c.readOnly || !this.cacheEnabled) return Promise.resolve();
-    this.cache ??= new VectorCache(this.c);
-    return this.cache.warm(model, dimensions);
+  async warmCache(model: string, dimensions?: number): Promise<void> {
+    if (this.c.readOnly || !this.cacheEnabled) return;
+    try {
+      this.cache ??= new VectorCache(this.c);
+    } catch (error) {
+      // The cache is advisory: one that cannot be set up stays off, and searches use SQLite.
+      this.cacheEnabled = false;
+      log(`recall cache: ${error instanceof Error ? error.message : "setup failed"}; using SQLite`);
+      return;
+    }
+    await this.cache.warm(model, dimensions);
   }
 
   cacheStatus() {
@@ -324,15 +345,13 @@ export class Vectors {
       void this.warmCache(input.model, input.vector.length).catch(() => {});
     }
     const cache = this.cache;
+    if (cache === null || !cache.ready(input.model, input.vector?.length)) return this.hybrid(input);
+    // The workers scan every embedding: any filter at all, even one added later, stays on SQLite.
+    const filter = this.search.resolveFilter(input);
     if (
-      cache === null ||
-      !cache.ready(input.model, input.vector?.length) ||
+      filter === null ||
+      filter.where !== this.search.resolveFilter({})!.where ||
       this.c.db.isTransaction ||
-      input.chat !== undefined ||
-      input.tag !== undefined ||
-      input.from !== undefined ||
-      input.since !== undefined ||
-      input.until !== undefined ||
       this.messages.purgePending()
     ) {
       return this.hybrid(input);
@@ -347,16 +366,7 @@ export class Vectors {
     // A clear barrier can be installed while workers scan, before its purge runs.
     if (ranked === null || this.messages.purgePending()) return this.hybrid(input);
     const now = this.c.now();
-    const expired = this.expiredIds(now);
-    const hits = ranked
-      .filter((hit) => !expired.has(hit.id))
-      .map((hit) => ({
-        id: hit.id,
-        similarity: hit.score,
-        score: hit.score * recencyWeight(hit.id, now, input.recencyHalfLifeMs),
-      }));
-    if (input.recencyHalfLifeMs !== undefined) hits.sort((a, b) => b.score - a.score || b.id - a.id);
-    return this.hybridWithRanked(input, hits);
+    return this.hybridWithRanked(input, weighByAge(ranked, this.expiredIds(now), now, input.recencyHalfLifeMs));
   }
 
   /**
@@ -623,12 +633,7 @@ export class Vectors {
       if (!joined && (secondOfId(id) === edgeLow || secondOfId(id) === edgeHigh) && !this.inTimeRange(id, filter)) continue;
       top.push(similarity, id);
     }
-    const expired = joined ? null : this.expiredIds(now);
-    const ranked = top
-      .sorted()
-      .filter((hit) => expired === null || !expired.has(hit.id))
-      .map((hit) => ({ id: hit.id, similarity: hit.score, score: hit.score * recencyWeight(hit.id, now, halfLifeMs) }));
-    return halfLifeMs === undefined ? ranked : ranked.sort((a, b) => b.score - a.score || b.id - a.id);
+    return weighByAge(top.sorted(), joined ? null : this.expiredIds(now), now, halfLifeMs);
   }
 
   /**

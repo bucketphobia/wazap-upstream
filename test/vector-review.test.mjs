@@ -44,6 +44,13 @@ function rawFixture(t, n = 0, dims = 2) {
   return { raw, c, cache, insert };
 }
 
+function trackingNames(raw) {
+  return raw
+    .prepare("SELECT name FROM sqlite_temp_master WHERE name LIKE 'vector_cache_%' ORDER BY name")
+    .all()
+    .map((row) => row.name);
+}
+
 test("A-S1 external connection writes invalidate cached similarities", async (t) => {
   const { db, path } = openTemp();
   t.after(() => db.close());
@@ -70,7 +77,7 @@ test("A-S2 worker failure releases memory and recovers with bounded attempts", a
   assert.equal(cache.vectors.byteLength, 0);
   await until(() => db.vectors.cacheStatus().state === "ready");
   assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
-  assert.equal(db.vectors.cacheStatus().recoveries, 1);
+  assert.equal(db.vectors.cacheStatus().recoveries, 0, "a recovery that reached ready leaves no spent attempts");
 });
 
 test("A-S3 large dirty backlog reconciles in background and declines queued worker scans", async (t) => {
@@ -192,22 +199,202 @@ test("A-S1 external deletion during dispatch never returns stale content", async
   assert.deepEqual(await pending, db.vectors.hybrid(input));
 });
 
-test("A-S2 recovery stops after three attempts and keeps SQLite available", async (t) => {
+test("A-S2 recovery stops after three consecutive failed attempts and keeps SQLite available", async (t) => {
   const { db } = openTemp();
   t.after(() => db.close());
   seed(db, [2, 1, 2, 3]);
   await db.vectors.warmCache("m");
+  await db.vectors.hybridAsync(input);
   const cache = db.vectors.cache;
   cache.recoveryDelayMs = 1;
-  for (let i = 0; i < 4; i++) {
-    await db.vectors.hybridAsync(input);
+  cache.allocate = async () => {
+    throw new Error("synthetic warm failure");
+  };
+  await cache.workers[0].terminate();
+  await until(() => cache.status().state === "failed");
+  assert.equal(cache.status().recoveries, 3);
+  assert.equal(cache.status().sharedBytes, 0);
+  assert.deepEqual(trackingNames(db.vectors.c.db), []);
+  assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
+});
+
+test("the recovery budget resets once a search is served from the recovered cache", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  for (let i = 0; i < 5; i++) {
+    await cache.rank("m", Float64Array.of(1, 0), 2, 0);
     await cache.workers[0].terminate();
-    if (i < 3) await until(() => cache.status().state === "ready");
+    await until(() => cache.status().state === "ready");
+  }
+  assert.equal(cache.status().recoveries, 1);
+  assert.notEqual(await cache.rank("m", Float64Array.of(1, 0), 2, 0), null);
+  assert.equal(cache.status().recoveries, 0);
+});
+
+test("a failure that recurs after every warm still ends in failed", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  cache.recoveryDelayMs = 1;
+  cache.scanTimeoutMs = 10;
+  const startWorkers = cache.startWorkers.bind(cache);
+  cache.startWorkers = () => {
+    startWorkers();
+    for (const worker of cache.workers) worker.postMessage = () => {};
+  };
+  for (let i = 0; i < 10 && cache.status().state !== "failed"; i++) {
+    await cache.warm("m");
+    await until(() => ["ready", "failed"].includes(cache.status().state));
+    await cache.rank("m", Float64Array.of(1, 0), 2, 0);
   }
   assert.equal(cache.status().state, "failed");
   assert.equal(cache.status().recoveries, 3);
-  assert.equal(cache.status().sharedBytes, 0);
-  assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
+});
+
+test("consecutive external changes back off without using up the recovery budget", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  cache.recoveryDelayMs = 100;
+  await cache.warm("m");
+  const delays = [cache.retryAt - Date.now()];
+  for (let i = 0; i < 3; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+    delays.push(cache.retryAt - Date.now());
+  }
+  assert.ok(
+    delays.every((delay, i) => i === 0 || delay > delays[i - 1] * 1.5),
+    `retry delays grow: ${delays}`
+  );
+  assert.equal(cache.status().recoveries, 0);
+});
+
+test("a warm cancelled while stopping workers settles instead of rejecting", async (t) => {
+  const { cache } = rawFixture(t, 2);
+  const stopWorkers = cache.stopWorkers.bind(cache);
+  let once = true;
+  cache.stopWorkers = async () => {
+    if (once) {
+      once = false;
+      cache.fail(new Error("synthetic failure while warming"));
+    }
+    return stopWorkers();
+  };
+  await assert.doesNotReject(cache.warm("m"));
+  assert.equal(cache.status().state, "recovering");
+});
+
+test("external changes while warming do not use up the recovery budget", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  for (let i = 0; i < 6; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.status().state, "recovering");
+  assert.equal(cache.status().reason, "external_change");
+  assert.equal(cache.status().recoveries, 0);
+});
+
+test("an external change during the last recovery attempt does not end the cache", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  const allocate = cache.allocate.bind(cache);
+  let broken = true;
+  cache.allocate = async (...args) => {
+    if (broken) throw new Error("synthetic warm failure");
+    return allocate(...args);
+  };
+  cache.fail(new Error("worker_failure"));
+  for (let i = 0; i < 2; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.status().recoveries, 2);
+  broken = false;
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  cache.retryAt = 0;
+  cache.maintain();
+  await cache.tail;
+  assert.equal(cache.status().state, "recovering");
+  assert.equal(cache.status().reason, "external_change");
+  assert.equal(cache.status().recoveries, 2);
+});
+
+test("a permanently blocked cache drops its tracking and never queries it again", async (t) => {
+  const { cache, raw } = rawFixture(t, 2);
+  assert.equal(trackingNames(raw).length, 4);
+  const cleared = [];
+  const clearInterval = globalThis.clearInterval;
+  globalThis.clearInterval = (timer) => (cleared.push(timer), clearInterval(timer));
+  t.after(() => (globalThis.clearInterval = clearInterval));
+  cache.maxBytes = 0;
+  await cache.warm("m");
+  assert.equal(cache.status().state, "disabled");
+  assert.ok(cleared.includes(cache.timer), "the maintenance timer stops with the cache");
+  assert.deepEqual(trackingNames(raw), []);
+  assert.doesNotThrow(() => raw.prepare("INSERT OR REPLACE INTO embeddings VALUES(9,'m',?)").run(Uint8Array.of(1, 0)));
+  assert.doesNotThrow(() => cache.maintain());
+  assert.equal(cache.ready("m", 2), false);
+  assert.equal(cache.indexedCount("m"), undefined);
+});
+
+test("cache errors fail the cache instead of escaping maintain, ready and indexedCount", async (t) => {
+  const { cache, raw, c } = rawFixture(t, 128);
+  await cache.warm("m");
+  await cache.rank("m", Float64Array.of(1, 0), 2, 0);
+  raw.exec("UPDATE embeddings SET vec=vec");
+  const get = c.get;
+  c.get = () => {
+    throw new Error("synthetic sqlite failure");
+  };
+  assert.doesNotThrow(() => cache.maintain());
+  assert.equal(cache.status().state, "recovering");
+  c.get = get;
+  cache.retryAt = 0;
+  cache.maintain();
+  await cache.tail;
+  await until(() => cache.status().state === "ready");
+  c.get = () => {
+    throw new Error("synthetic sqlite failure");
+  };
+  assert.equal(cache.ready("m", 2), false);
+  assert.equal(cache.status().state, "recovering");
+  c.get = get;
+  cache.retryAt = 0;
+  cache.maintain();
+  await until(() => cache.status().state === "ready");
+  c.get = () => {
+    throw new Error("synthetic sqlite failure");
+  };
+  assert.equal(cache.indexedCount("m"), undefined);
+  assert.equal(cache.status().state, "recovering");
+});
+
+test("newer messages append to the sorted index and a removal falls back to the full merge", async (t) => {
+  const { cache, raw, insert } = rawFixture(t, 10);
+  await cache.warm("m");
+  const appended = cache.order.buffer;
+  const ids = async () => (await cache.rank("m", Float64Array.of(1, 0), 20, 0)).map((hit) => hit.id);
+  for (let i = 11; i <= 14; i++) insert.run(i, "m", new Uint8Array(2).fill(1));
+  cache.maintain();
+  await cache.tail;
+  assert.equal(cache.order.buffer, appended, "appended in place");
+  assert.deepEqual(await ids(), [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  raw.exec("DELETE FROM embeddings WHERE message_id=3");
+  insert.run(15, "m", new Uint8Array(2).fill(1));
+  cache.maintain();
+  await cache.tail;
+  assert.notEqual(cache.order.buffer, appended, "merged into the other index");
+  assert.deepEqual(await ids(), [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 2, 1]);
 });
 
 test("A-S4 size limit refuses a cache before allocating its vector payload", async (t) => {
@@ -269,11 +456,12 @@ for (const count of [128, 1000]) {
     cache.recoveryDelayMs = 1;
     cache.maintain();
     await until(() => cache.status().state === "ready");
-    assert.equal(cache.status().recoveries, 1);
+    assert.equal(cache.status().recoveries, 1, "ready alone does not give the attempt back");
     assert.deepEqual(
       (await cache.rank("m", Float64Array.of(1, 0), 2, 0)).map((x) => x.id),
       [2, 1]
     );
+    assert.equal(cache.status().recoveries, 0, "a search served from the recovered cache does");
   });
 }
 

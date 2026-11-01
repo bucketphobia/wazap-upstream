@@ -197,3 +197,40 @@ test("worker exit during dirty reconciliation falls back instead of returning an
   };
   assert.equal(await cache.rank("m", unit, 10, 0), null);
 });
+
+test("a cache that cannot be created falls back to SQLite instead of rejecting the search", async (t) => {
+  const { db } = openTemp();
+  t.after(() => db.close());
+  seed(db, [10, 20, 30, 40, 50, 60, 70, 80, 90]);
+  // Makes the cache's own setup fail.
+  db.vectors.c.db.exec("CREATE TEMP TABLE vector_cache_dirty(id INTEGER)");
+  assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
+  assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
+  assert.equal(db.vectors.cacheStatus().state, "disabled");
+});
+
+test("the worker path is taken only for an unfiltered search, whatever the filter field", async (t) => {
+  const { db } = openTemp();
+  t.after(() => db.close());
+  seed(db, [10, 20, 30, 40, 50, 60, 70, 80, 90]);
+  await db.vectors.warmCache("m");
+  const ranks = [];
+  const rank = db.vectors.cache.rank.bind(db.vectors.cache);
+  db.vectors.cache.rank = (...args) => (ranks.push(args), rank(...args));
+  await db.vectors.hybridAsync(input);
+  assert.equal(ranks.length, 1);
+  for (const filter of [{ since: T0 + 5000 }, { until: T0 + 5000 }, { from: "me" }, { chat: PEER }]) {
+    const filtered = { ...input, ...filter };
+    assert.deepEqual(await db.vectors.hybridAsync(filtered), db.vectors.hybrid(filtered));
+  }
+  // A MessageFilter field added later: resolveFilter narrows rows, the worker path must step aside.
+  const search = db.vectors.search;
+  const resolve = search.resolveFilter.bind(search);
+  search.resolveFilter = (filter) => {
+    const resolved = resolve(filter);
+    return resolved === null || !filter.future ? resolved : { ...resolved, where: `${resolved.where} AND m.from_me = 1` };
+  };
+  const future = { ...input, future: true };
+  assert.deepEqual(await db.vectors.hybridAsync(future), db.vectors.hybrid(future));
+  assert.equal(ranks.length, 1, "filtered searches never reach the worker pool");
+});

@@ -65,6 +65,7 @@ export class VectorCache {
   private scratch = new Float64Array(new SharedArrayBuffer(0));
   private orderCount = 0;
   private orderDirty = false;
+  private orderStale = false; // A slot was freed: the sorted index holds an entry that no longer counts.
   private incomingCount = 0;
   private readonly slots = new Map<number, number>();
   private readonly free: number[] = [];
@@ -77,6 +78,8 @@ export class VectorCache {
   private reason: string | undefined;
   private blocked = false;
   private recoveries = 0;
+  private externals = 0; // Consecutive warms undone by another connection's write: they back off, but spend no attempt.
+  private attempting = false; // A recovery warm is under way: an external change that ends it gives its attempt back.
   private capFallbacks = 0;
   private retryAt = 0;
   private version = 0;
@@ -93,7 +96,8 @@ export class VectorCache {
 
   constructor(private readonly c: Connection) {
     if (this.maxBytes > 0)
-      c.db.exec(`CREATE TEMP TABLE vector_cache_dirty(id INTEGER PRIMARY KEY);
+      try {
+        c.db.exec(`CREATE TEMP TABLE vector_cache_dirty(id INTEGER PRIMARY KEY);
       CREATE TEMP TRIGGER vector_cache_insert AFTER INSERT ON main.embeddings BEGIN
         INSERT INTO vector_cache_dirty VALUES (new.message_id) ON CONFLICT(id) DO NOTHING; END;
       CREATE TEMP TRIGGER vector_cache_update AFTER UPDATE ON main.embeddings BEGIN
@@ -101,6 +105,10 @@ export class VectorCache {
         INSERT INTO vector_cache_dirty VALUES (new.message_id) ON CONFLICT(id) DO NOTHING; END;
       CREATE TEMP TRIGGER vector_cache_delete AFTER DELETE ON main.embeddings BEGIN
         INSERT INTO vector_cache_dirty VALUES (old.message_id) ON CONFLICT(id) DO NOTHING; END;`);
+      } catch (error) {
+        this.dropTracking();
+        throw error;
+      }
     this.timer = setInterval(() => this.maintain(), 250);
     this.timer.unref();
   }
@@ -116,15 +124,20 @@ export class VectorCache {
   }
 
   indexedCount(model: string): number | undefined {
-    if (
-      this.state !== "ready" ||
-      model !== this.model ||
-      !this.completeDimensions ||
-      this.dataVersion() !== this.version ||
-      this.c.get("SELECT id FROM vector_cache_dirty LIMIT 1") !== undefined
-    )
+    try {
+      if (
+        this.state !== "ready" ||
+        model !== this.model ||
+        !this.completeDimensions ||
+        this.dataVersion() !== this.version ||
+        this.c.get("SELECT id FROM vector_cache_dirty LIMIT 1") !== undefined
+      )
+        return undefined;
+      return this.slots.size;
+    } catch (error) {
+      this.failQuietly(error);
       return undefined;
-    return this.slots.size;
+    }
   }
 
   private sharedBytes(): number {
@@ -154,18 +167,23 @@ export class VectorCache {
       dimensions !== this.dimensions
     )
       return false;
-    if (this.dataVersion() !== this.version) {
-      this.loaded = false;
-      this.state = "cold";
-      void this.warm(this.model, this.dimensions);
+    try {
+      if (this.dataVersion() !== this.version) {
+        this.loaded = false;
+        this.state = "cold";
+        void this.warm(this.model, this.dimensions);
+        return false;
+      }
+      if (this.largeBacklog()) {
+        this.state = "reconciling";
+        this.maintain();
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.failQuietly(error);
       return false;
     }
-    if (this.largeBacklog()) {
-      this.state = "reconciling";
-      this.maintain();
-      return false;
-    }
-    return true;
   }
 
   private enqueue<T>(work: () => Promise<T>): Promise<T> {
@@ -175,37 +193,43 @@ export class VectorCache {
   }
 
   private maintain(): void {
-    if (this.closed || this.blocked || this.working || this.warming !== null || this.c.db.isTransaction) return;
-    if (this.state === "recovering") {
-      if (Date.now() < this.retryAt) return;
-      this.recoveries++;
-      this.state = "cold";
-      void this.warm(this.model, this.dimensions);
-    } else if (
-      this.loaded &&
-      (this.state === "reconciling" || this.c.get("SELECT id FROM vector_cache_dirty LIMIT 1") !== undefined)
-    ) {
-      this.state = "reconciling";
-      this.working = true;
-      const generation = this.generation;
-      void this.enqueue(async () => {
-        try {
-          this.checkGeneration(generation);
-          await this.sync();
-          this.checkGeneration(generation);
-          if (this.dataVersion() !== this.version) {
-            this.loaded = false;
-            this.state = "cold";
-            void this.warm(this.model, this.dimensions);
-          } else if (this.loaded && this.state === "reconciling") {
-            this.state = this.largeBacklog() ? "reconciling" : "ready";
+    try {
+      if (this.closed || this.blocked || this.working || this.warming !== null || this.c.db.isTransaction) return;
+      if (this.state === "recovering") {
+        if (Date.now() < this.retryAt) return;
+        // A write from another connection is not the cache's fault: fail() gives this attempt back if that is the cause.
+        if (this.reason !== "external_change") this.recoveries++;
+        this.attempting = true;
+        this.state = "cold";
+        void this.warm(this.model, this.dimensions);
+      } else if (
+        this.loaded &&
+        (this.state === "reconciling" || this.c.get("SELECT id FROM vector_cache_dirty LIMIT 1") !== undefined)
+      ) {
+        this.state = "reconciling";
+        this.working = true;
+        const generation = this.generation;
+        void this.enqueue(async () => {
+          try {
+            this.checkGeneration(generation);
+            await this.sync();
+            this.checkGeneration(generation);
+            if (this.dataVersion() !== this.version) {
+              this.loaded = false;
+              this.state = "cold";
+              void this.warm(this.model, this.dimensions);
+            } else if (this.loaded && this.state === "reconciling") {
+              this.state = this.largeBacklog() ? "reconciling" : "ready";
+            }
+          } catch (error) {
+            if (!(error instanceof CacheCancelled)) this.failQuietly(error);
+          } finally {
+            this.working = false;
           }
-        } catch (error) {
-          if (!(error instanceof CacheCancelled) && this.canFail()) this.fail(error);
-        } finally {
-          this.working = false;
-        }
-      });
+        });
+      }
+    } catch (error) {
+      this.failQuietly(error);
     }
   }
 
@@ -221,14 +245,14 @@ export class VectorCache {
       if (this.closed || this.blocked || requestedGeneration !== this.generation || this.state === "recovering") return;
       const previousGeneration = this.generation;
       this.state = "loading";
-      await this.stopWorkers();
-      if (this.closed) return;
-      this.checkGeneration(previousGeneration);
-      this.model = model;
-      this.release();
-      const generation = this.generation;
       const deadline = Date.now() + this.warmTimeoutMs;
       try {
+        await this.stopWorkers();
+        if (this.closed) return;
+        this.checkGeneration(previousGeneration);
+        this.model = model;
+        this.release();
+        const generation = this.generation;
         if (this.maxBytes === 0) throw new CacheLimit("disabled");
         this.version = this.dataVersion();
         let after = 0,
@@ -282,9 +306,10 @@ export class VectorCache {
         if (this.dataVersion() !== this.version) throw new Error("external_change");
         this.loaded = true;
         this.reason = undefined;
+        this.attempting = false;
         this.state = "ready";
       } catch (error) {
-        if (!(error instanceof CacheCancelled) && this.canFail()) this.fail(error);
+        if (!(error instanceof CacheCancelled)) this.failQuietly(error);
       }
     }).finally(() => {
       this.warming = null;
@@ -322,23 +347,12 @@ export class VectorCache {
     const buffers: SharedArrayBuffer[] = [];
     for (let i = 0; i < current.length; i++) {
       const source = current[i]!;
+      // Only the empty placeholders are not growable (engines: Node 22.16+ grows shared buffers): nothing to copy.
       if (source.buffer.growable) {
         source.buffer.grow(sizes[i]);
         buffers.push(source.buffer);
       } else {
-        const buffer = new SharedArrayBuffer(sizes[i], { maxByteLength: maxSizes[i] });
-        // Older runtimes may ignore the growable option: bound copy pauses and
-        // refuse a growth that would exceed the configured temporary peak.
-        if (source.byteLength > 0 && this.sharedBytes() + sizes.reduce((a, b) => a + b, 0) > this.maxBytes)
-          throw new CacheLimit("growth_peak_limit");
-        const bytes = new Uint8Array(buffer),
-          old = new Uint8Array(source.buffer);
-        for (let offset = 0; offset < old.length; offset += 1048576) {
-          bytes.set(old.subarray(offset, Math.min(old.length, offset + 1048576)), offset);
-          await this.checkedYield(generation);
-          if (this.closed || this.state === "recovering" || this.blocked) throw new Error("cancelled");
-        }
-        buffers.push(buffer);
+        buffers.push(new SharedArrayBuffer(sizes[i], { maxByteLength: maxSizes[i] }));
       }
     }
     this.checkGeneration(generation);
@@ -380,6 +394,14 @@ export class VectorCache {
     const generation = this.generation;
     this.checkGeneration(generation);
     if (!this.orderDirty) return;
+    // The usual case, newer messages only: nothing to interleave or drop, so append.
+    if (!this.orderStale && (this.orderCount === 0 || this.incoming[0]! > this.order[2 * this.orderCount - 2]!)) {
+      this.order.set(this.incoming.subarray(0, 2 * this.incomingCount), 2 * this.orderCount);
+      this.orderCount += this.incomingCount;
+      this.incomingCount = 0;
+      this.orderDirty = false;
+      return;
+    }
     let a = 0,
       b = 0,
       n = 0;
@@ -394,15 +416,13 @@ export class VectorCache {
         this.scratch[2 * n] = id;
         this.scratch[2 * n++ + 1] = slot;
       }
-      if ((a + b) % 2048 === 0) {
-        await this.checkedYield(generation);
-        if (this.closed || this.state === "recovering" || this.blocked) throw new Error("cancelled");
-      }
+      if ((a + b) % 2048 === 0) await this.checkedYield(generation);
     }
     [this.order, this.scratch] = [this.scratch, this.order];
     this.orderCount = n;
     this.incomingCount = 0;
     this.orderDirty = false;
+    this.orderStale = false;
   }
 
   private async sync(): Promise<void> {
@@ -425,7 +445,6 @@ export class VectorCache {
         Math.max(this.used + Math.max(0, additions - this.free.length), this.incomingCount + additions) > this.capacity
       ) {
         await this.capacityFor(additions);
-        if (this.closed || this.state === "recovering" || this.blocked) throw new Error("cancelled");
         continue; // Re-read after a yielding growth, before consuming any IDs.
       }
       // Capacity growth may yield: consume only once the cache can apply this
@@ -440,7 +459,7 @@ export class VectorCache {
           this.ids[slot] = 0;
           this.slots.delete(row.id);
           this.free.push(slot);
-          this.orderDirty = true;
+          this.orderDirty = this.orderStale = true;
         }
       }
       this.c.run(
@@ -543,9 +562,12 @@ export class VectorCache {
             )
             .map((row) => row.id)
         );
+        // A search served from the recovered cache closes the incident.
+        this.recoveries = this.externals = 0;
+        this.attempting = false;
         return hits.filter((hit) => !changed.has(hit.id));
       } catch (error) {
-        if (!(error instanceof CacheCancelled) && this.canFail()) this.fail(error);
+        if (!(error instanceof CacheCancelled)) this.failQuietly(error);
         return null;
       } finally {
         this.working = false;
@@ -553,8 +575,9 @@ export class VectorCache {
     });
   }
 
-  private canFail(): boolean {
-    return !this.closed && this.state !== "recovering" && !this.blocked;
+  /** The cache is advisory: an error in it fails the cache, never the caller. */
+  private failQuietly(error: unknown): void {
+    if (!this.closed && this.state !== "recovering" && !this.blocked) this.fail(error);
   }
 
   private fail(error: unknown): void {
@@ -566,12 +589,29 @@ export class VectorCache {
         : "worker_or_warm_failure";
     this.reason =
       error instanceof CacheLimit ? error.message : error instanceof RangeError ? "allocation_failed" : code;
+    if (this.attempting && this.reason === "external_change" && this.recoveries > 0) this.recoveries--;
+    this.attempting = false;
     this.state = error instanceof CacheLimit ? "disabled" : permanent || this.recoveries >= 3 ? "failed" : "recovering";
     this.blocked = permanent || this.recoveries >= 3;
-    this.retryAt = Date.now() + this.recoveryDelayMs * 2 ** this.recoveries;
+    if (this.blocked) {
+      clearInterval(this.timer);
+      this.dropTracking();
+    }
+    const streak = this.reason === "external_change" ? this.externals++ : this.recoveries;
+    this.retryAt = Date.now() + this.recoveryDelayMs * 2 ** Math.min(streak, 6);
     void this.stopWorkers();
     this.release();
     log(`recall cache: ${this.reason}; using SQLite${this.state === "recovering" ? " until bounded recovery" : ""}`);
+  }
+
+  /** Once blocked nothing reads the dirty table, so its triggers must not keep writing inside message writes. */
+  private dropTracking(): void {
+    try {
+      this.c.db.exec(`DROP TRIGGER IF EXISTS temp.vector_cache_insert; DROP TRIGGER IF EXISTS temp.vector_cache_update;
+        DROP TRIGGER IF EXISTS temp.vector_cache_delete; DROP TABLE IF EXISTS temp.vector_cache_dirty;`);
+    } catch (error) {
+      log(`recall cache: could not drop change tracking: ${error instanceof Error ? error.message : "unknown"}`);
+    }
   }
 
   private stopWorkers(): Promise<void> {
@@ -591,6 +631,7 @@ export class VectorCache {
     this.capacity = 0;
     this.orderCount = 0;
     this.incomingCount = 0;
+    this.orderDirty = this.orderStale = false;
     this.slots.clear();
     this.free.length = 0;
     this.vectors = new Int8Array(new SharedArrayBuffer(0));
