@@ -32,7 +32,7 @@ Most of these are written for you by `wazap config`, `wazap login` and
 | `WAZAP_MEDIA_KEEP_MAX_MB` | `16` | A file bigger than this (1 to 100 MB) is not kept. |
 | `WAZAP_MEDIA_KEEP_QUOTA_MB` | `1024` | All of an account's kept files together stay under this; the oldest are removed first to make room. Nothing is written that would leave the disk with less than 1 GB, or 5% of it, free. |
 | `WAZAP_MEDIA_KEEP_DAYS` | `90` | A file kept longer than this is removed (checked at start and hourly); `0` keeps files until the quota needs the room. |
-| `WAZAP_RETENTION` | `0` | `1` turns on [strict retention](data.md#strict-retention-wazap_retention1-off-by-default). |
+| `WAZAP_RETENTION` | `0` | `1` turns on [strict retention](data.md#strict-retention-wazap_retention1-off-by-default). The [iPhone import](iphone-import.md) refuses to write while it is on. |
 | `WAZAP_PRE_MIGRATION_BACKUP` | `1` | `0` upgrades the account database without first copying it beside itself. An upgrade that cannot write the copy refuses to start; this is the way past that, knowingly. |
 | `WAZAP_TRUST_PROXY` | `loopback` | Advanced, for a self-hosted OAuth server behind a proxy: the proxy IPs/CIDRs trusted for X-Forwarded-For, comma-separated; `none` trusts no proxy. |
 

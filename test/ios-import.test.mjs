@@ -1679,13 +1679,16 @@ for (const entry of ["boot", "cli"]) {
         } else {
           const { runIosImport } = await import("../dist/ios-import/cli.js");
           await svc.stop();
-          await runIosImport({
+          const run = runIosImport({
             ...svc.config,
             command: "import",
             args: ["ios", archive],
             importMedia: folder,
             json: true,
           });
+          // An unapproved API upload is a refusal the command reports, not a quiet success.
+          if (allowApi) await run;
+          else await assert.rejects(run, /no usable provider/);
         }
         assert.equal(fixture.calls(), allowApi ? 1 : 0);
         const { AccountDb } = await import("../dist/db/index.js");
@@ -1852,7 +1855,8 @@ for (const allowApi of [false, true]) {
     await next.stop();
     await assert.rejects(runIosImport(config), /Select the iPhone archive/);
     assert.equal(fixture.calls(), 0);
-    await runIosImport({ ...config, importReset: true });
+    if (allowApi) await runIosImport({ ...config, importReset: true });
+    else await assert.rejects(runIosImport({ ...config, importReset: true }), /no usable provider/);
     const read = AccountDb.open(next.databasePath, { readOnly: true });
     try {
       assert.equal(read.getMeta("owner"), other);
@@ -1922,13 +1926,30 @@ test(
     const marker = join(dirname(fixture.svc.databasePath), "ios-import-binding.json");
     unlinkSync(marker);
     mkdirSync(marker);
-    await fixture.svc.storage.claimDatabase("40700000077@s.whatsapp.net");
+    const claim = fixture.svc.storage.claimDatabase("40700000077@s.whatsapp.net");
     for (const response of fixture.responses)
       response.end(JSON.stringify({ text: "synthetic accepted old-owner transcript" }));
-    await fixture.svc.storage.iosImport;
+    await claim;
     assert.equal(fixture.calls(), 3, "an ownership barrier error must not permit a fourth upload");
-    assert.equal(old.isOpen, true);
-    assert.equal(old.getMeta("owner"), ME, "failed persistence must prevent database replacement");
+    assert.equal(old.isOpen, false, "the new owner still gets its own database");
+    assert.equal(fixture.svc.db.getMeta("owner"), "40700000077@s.whatsapp.net");
+    assert.notEqual(fixture.svc.getStatus().storage.state, "failed");
+    assert.equal(fixture.svc.db.counts().messages, 0);
+    const { AccountDb } = await import("../dist/db/index.js");
+    const { readdirSync } = await import("node:fs");
+    const root = dirname(fixture.svc.databasePath);
+    const aside = readdirSync(root).find((name) => /^wazap\.\d+\.previous-owner\.sqlite$/.test(name));
+    const previous = AccountDb.open(join(root, aside), { readOnly: true });
+    try {
+      assert.equal(previous.getMeta("owner"), ME);
+      assert.equal(
+        previous.connection.db.prepare("SELECT count(*) n FROM messages WHERE transcript IS NOT NULL").get().n,
+        3,
+        "accepted uploads still land in the old owner's database"
+      );
+    } finally {
+      previous.close();
+    }
   }
 );
 
@@ -2062,4 +2083,405 @@ test("explicit CLI import remains available with automatic import disabled and d
   assert.equal(next.db.getMeta("ios_import_error"), "existing_refusal");
   assert.deepEqual(readFileSync(marker), before);
   assert.equal(fixture.calls(), 1);
+});
+
+// Maintainer review of upstream PR 107.
+
+test("an invalid voice-skip line stops the voice pass before any upload and keeps the voice state", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [
+      { pk: 1, type: 3, file: "a.opus" },
+      { pk: 2, type: 3, chat: 2, member: 1, file: "b.opus" },
+    ]);
+    writeFileSync(join(dir, "a.opus"), "audio");
+    writeFileSync(join(dir, "b.opus"), "audio");
+    writeFileSync(join(dir, "voice-skip.txt"), `${GROUP}\n\n+40700000002\n`);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "must not upload" };
+    };
+    await assert.rejects(
+      importIos({ db, source: path, media: dir, transcriber }),
+      (e) => e.code === "INVALID_ID" && /voice-skip\.txt line 3/.test(e.message) && !e.message.includes("40700000002")
+    );
+    assert.equal(calls, 0);
+    assert.equal(readIosReport(db).state, "voice");
+    writeFileSync(join(dir, "voice-skip.txt"), `${GROUP}\n\n`);
+    const fixed = await importIos({ db, source: path, media: dir, transcriber });
+    assert.equal(fixed.state, "done");
+    assert.equal(calls, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("retention refuses an iPhone import from the CLI (dry run too) and the boot", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable", automatic: true });
+  const { svc, archive } = fixture;
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  await svc.stop();
+  const retained = { ...svc.config, retention: true };
+  await assert.rejects(
+    runIosImport({ ...retained, command: "import", args: ["ios", archive] }),
+    (e) => e.code === "INVALID_ID" && /WAZAP_RETENTION/.test(e.message)
+  );
+  await assert.rejects(
+    runIosImport({ ...retained, command: "import", args: ["ios", archive], dryRun: true }),
+    (e) => e.code === "INVALID_ID" && /WAZAP_RETENTION/.test(e.message)
+  );
+  const next = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-retention-",
+    id: ME,
+    name: "Owner",
+    config: { ...retained },
+  }).svc;
+  t.after(() => next.stop());
+  await next.storage.claimDatabase(ME);
+  await next.bootStorage();
+  assert.equal(next.db.messages.get(`false_${PEER}_key1`), null);
+  assert.equal(next.getStatus().storage.ios_import_error, "retention_unsupported");
+  assert.equal(next.getStatus().storage.state, "ready");
+});
+
+test("a failing ownership-file write leaves the account usable and iPhone import off for the session", async (t) => {
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  const { svc } = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-marker-",
+    id: ME,
+    name: "Owner",
+    config: { importIos: true, persistHistory: true },
+  });
+  t.after(() => svc.stop());
+  const root = dirname(svc.databasePath);
+  // A file where the import folder belongs: lstat of the archive path fails with ENOTDIR.
+  writeFileSync(join(root, "import"), "not a folder");
+  await svc.storage.claimDatabase(ME);
+  assert.notEqual(svc.getStatus().storage.state, "failed");
+  assert.equal(svc.db.getMeta("ios_import_error"), "ownership_file_failed");
+  unlinkSync(join(root, "import"));
+  mkdirSync(join(root, "import"));
+  source(join(root, "import"), [{ pk: 1 }]);
+  await svc.bootStorage();
+  assert.equal(svc.getStatus().storage.state, "ready");
+  assert.equal(svc.db.messages.get(`false_${PEER}_key1`), null, "no import while the ownership file is unusable");
+  assert.equal(svc.db.getMeta("ios_import_error"), "ownership_file_failed");
+});
+
+test("a failing ownership seal does not fail a new owner's account and keeps the old archive away from it", async (t) => {
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const first = fixture.svc;
+  const root = dirname(first.databasePath);
+  const config = first.config;
+  await first.stop();
+  // A directory in place of the ownership file: it exists but cannot be read back.
+  const marker = join(root, "ios-import-binding.json");
+  unlinkSync(marker);
+  mkdirSync(marker);
+  const other = "40700000077@s.whatsapp.net";
+  const next = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-seal-",
+    id: other,
+    name: "Other",
+    config: { ...config },
+  }).svc;
+  t.after(() => next.stop());
+  await next.storage.claimDatabase(other);
+  assert.notEqual(next.getStatus().storage.state, "failed");
+  await next.bootStorage();
+  assert.equal(next.getStatus().storage.state, "ready");
+  assert.equal(next.db.messages.get(`false_${PEER}_key1`), null, "old archive text must not enter the new owner");
+  next.storage.startImportVoice();
+  assert.equal(fixture.calls(), 0);
+  assert.equal(next.getStatus().storage.ios_import_error, "ownership_file_failed");
+});
+
+test("--json writes only the report, as one line on stdout", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const { svc, archive } = fixture;
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  await svc.stop();
+  const out = [];
+  const original = process.stdout.write;
+  process.stdout.write = function (chunk, ...rest) {
+    if (typeof chunk !== "string") return original.call(this, chunk, ...rest);
+    out.push(chunk);
+    return true;
+  };
+  try {
+    await runIosImport({ ...svc.config, command: "import", args: ["ios", archive], json: true });
+  } finally {
+    process.stdout.write = original;
+  }
+  assert.equal(out.length, 1);
+  assert.equal(out[0].endsWith("\n"), true);
+  assert.equal(JSON.parse(out[0]).inserted, 1);
+});
+
+test("a bad transcription setting does not block text-only or dry-run CLI imports", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const { svc, archive, folder } = fixture;
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  await svc.stop();
+  const saved = process.env.WAZAP_TRANSCRIBE;
+  process.env.WAZAP_TRANSCRIBE = "bogus";
+  t.after(() => {
+    if (saved === undefined) delete process.env.WAZAP_TRANSCRIBE;
+    else process.env.WAZAP_TRANSCRIBE = saved;
+  });
+  const base = { ...svc.config, command: "import", args: ["ios", archive] };
+  await runIosImport({ ...base, dryRun: true });
+  await runIosImport(base);
+  await assert.rejects(runIosImport({ ...base, importMedia: folder, importReset: true }), /Unknown transcription provider/);
+  assert.equal(fixture.calls(), 0);
+});
+
+test("--media without a usable transcriber is a refusal, not a finished import", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 3, file: "note.opus" }]);
+    writeFileSync(join(dir, "note.opus"), "audio");
+    await assert.rejects(importIos({ db, source: path, media: dir }), (e) => /no usable provider/.test(e.message));
+    assert.equal(readIosReport(db).state, "voice");
+    assert.equal(db.messages.get(`false_${PEER}_key1`).transcript, null);
+    assert.equal((await importIos({ db, source: path, media: dir, transcriber: async () => ({ text: "later" }) })).state, "done");
+  } finally {
+    db.close();
+  }
+});
+
+test("a done import with its voice pass finished is not re-examined, even when a missing file appears", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 3, file: "late.opus" }]);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "transcript" };
+    };
+    const first = await importIos({ db, source: path, media: dir, transcriber });
+    assert.equal(first.state, "done");
+    assert.equal(first.voice.missing, 1);
+    writeFileSync(join(dir, "late.opus"), "audio");
+    const again = await importIos({ db, source: path, media: dir, transcriber });
+    assert.equal(again.state, "done");
+    assert.equal(calls, 0);
+    const reset = await importIos({ db, source: path, media: dir, transcriber, explicit: true, reset: true });
+    assert.equal(reset.voice.transcribed, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a done text-only import still runs its voice pass when --media is requested later", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 3, file: "note.opus" }]);
+    writeFileSync(join(dir, "note.opus"), "audio");
+    assert.equal((await importIos({ db, source: path })).state, "done");
+    const voice = await importIos({ db, source: path, media: dir, transcriber: async () => ({ text: "now" }) });
+    assert.equal(voice.voice.transcribed, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a transient voice failure stops new uploads; accepted ones still persist", async () => {
+  const { db, dir } = target();
+  try {
+    const rows = Array.from({ length: 8 }, (_, i) => ({ pk: i + 1, type: 3, file: `n${i}.opus` }));
+    const path = source(dir, rows);
+    for (const row of rows) writeFileSync(join(dir, row.file), "audio");
+    let calls = 0;
+    const report = await importIos({
+      db,
+      source: path,
+      media: dir,
+      transcriber: async () => {
+        if (++calls === 1) throw markFailure(Error("private"), "transient", "provider busy");
+        await new Promise((resolve) => setImmediate(resolve));
+        return { text: "accepted" };
+      },
+    });
+    assert.equal(calls, 3);
+    assert.equal(report.state, "voice");
+    assert.equal(report.voice.failed, 1);
+    assert.equal(report.voice.transcribed, 2);
+  } finally {
+    db.close();
+  }
+});
+
+test("the work index lives beside the account database; only day-old leftovers are removed", async () => {
+  const { db, dir } = target();
+  try {
+    const { readdirSync, mkdirSync: mkdir, existsSync: exists, utimesSync } = await import("node:fs");
+    const root = dirname(db.path);
+    const stale = join(root, ".ios-scratch-stale");
+    const recent = join(root, ".ios-scratch-recent");
+    for (const folder of [stale, recent]) {
+      mkdir(folder);
+      writeFileSync(join(folder, "index.sqlite"), "leftover");
+    }
+    const old = new Date(Date.now() - 48 * 3600_000);
+    utimesSync(stale, old, old);
+    const path = source(dir, [{ pk: 1, type: 3, file: "note.opus" }]);
+    writeFileSync(join(dir, "note.opus"), "audio");
+    let seen = [];
+    await importIos({
+      db,
+      source: path,
+      media: dir,
+      transcriber: async () => {
+        seen = readdirSync(root).filter((name) => name.startsWith(".ios-scratch-"));
+        return { text: "x" };
+      },
+    });
+    assert.equal(seen.length, 2, "this run's index and the recent one of another run");
+    assert.equal(exists(stale), false);
+    assert.equal(exists(recent), true, "a recent index may belong to a running dry run");
+    await importIos({ db, source: path, dryRun: true });
+    assert.equal(exists(recent), true);
+  } finally {
+    db.close();
+  }
+});
+
+test("a short command such as status --live does not run the boot text import", async (t) => {
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  const { svc } = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-status-",
+    id: ME,
+    name: "Owner",
+    config: { importIos: true, persistHistory: true, command: "status" },
+  });
+  t.after(() => svc.stop());
+  await svc.storage.claimDatabase(ME);
+  const folder = join(dirname(svc.databasePath), "import");
+  mkdirSync(folder, { recursive: true });
+  source(folder, [{ pk: 1 }]);
+  await svc.bootStorage();
+  assert.equal(svc.db.getMeta("ios_import_v1"), null);
+  assert.equal(svc.db.messages.get(`false_${PEER}_key1`), null);
+});
+
+test("a background voice pass does not stop a later explicit --media run", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 3, file: "late.opus" }]);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "transcript" };
+    };
+    const background = await importIos({ db, source: path, media: dir, background: true, transcriber });
+    assert.equal(background.state, "done");
+    assert.equal(background.voice.missing, 1);
+    writeFileSync(join(dir, "late.opus"), "audio");
+    const explicit = await importIos({ db, source: path, media: dir, transcriber });
+    assert.equal(explicit.voice.transcribed, 1);
+    assert.equal(calls, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a seal that could not be written leaves a barrier: no import binds the old archive without --reset", async (t) => {
+  const { default: fs } = await import("node:fs");
+  const { syncBuiltinESMExports } = await import("node:module");
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  const { AccountDb } = await import("../dist/db/index.js");
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const { archive, svc: first } = fixture;
+  const root = dirname(first.databasePath);
+  const config = first.config;
+  await first.stop();
+  // The archive was already present when the first number linked: no ownership file exists.
+  unlinkSync(join(root, "ios-import-binding.json"));
+  const other = "40700000077@s.whatsapp.net";
+  const next = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-barrier-",
+    id: other,
+    name: "Other",
+    config: { ...config },
+  }).svc;
+  t.after(() => next.stop());
+  const original = fs.openSync;
+  t.mock.method(fs, "openSync", function (path, ...rest) {
+    if (typeof path === "string" && path.includes("ios-import-binding.json"))
+      throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+    return original.call(this, path, ...rest);
+  });
+  syncBuiltinESMExports();
+  try {
+    await next.storage.claimDatabase(other);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.notEqual(next.getStatus().storage.state, "failed");
+  await next.stop();
+  const restarted = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-barrier-",
+    id: other,
+    name: "Other",
+    config: { ...config },
+  }).svc;
+  t.after(() => restarted.stop());
+  await restarted.storage.claimDatabase(other);
+  await restarted.bootStorage();
+  assert.equal(restarted.db.messages.get(`false_${PEER}_key1`), null);
+  assert.equal(restarted.getStatus().storage.ios_import_error, "archive_selection_required");
+  await restarted.stop();
+  const cli = { ...config, command: "import", args: ["ios", archive] };
+  await assert.rejects(runIosImport(cli), /Select the iPhone archive/);
+  const read = AccountDb.open(restarted.databasePath, { readOnly: true });
+  try {
+    assert.equal(read.counts().messages, 0, "the old owner's archive must not enter the new owner");
+  } finally {
+    read.close();
+  }
+  await runIosImport({ ...cli, importReset: true });
+  const after = AccountDb.open(restarted.databasePath);
+  try {
+    assert.equal(after.counts().messages, 1);
+    assert.equal(after.getMeta("ios_import_barrier"), null);
+    assert.equal(after.getMeta("ios_import_error"), null);
+  } finally {
+    after.close();
+  }
+  await runIosImport(cli);
+});
+
+test("a successful CLI import clears a stale ownership_file_failed notice and nothing else", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const { svc, archive } = fixture;
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  const { AccountDb } = await import("../dist/db/index.js");
+  svc.db.setMeta("ios_import_error", "ownership_file_failed");
+  await svc.stop();
+  await runIosImport({ ...svc.config, command: "import", args: ["ios", archive] });
+  const read = AccountDb.open(svc.databasePath);
+  try {
+    assert.equal(read.getMeta("ios_import_error"), null);
+    read.setMeta("ios_import_error", "existing_refusal");
+  } finally {
+    read.close();
+  }
+  await runIosImport({ ...svc.config, command: "import", args: ["ios", archive] });
+  const again = AccountDb.open(svc.databasePath, { readOnly: true });
+  try {
+    assert.equal(again.getMeta("ios_import_error"), "existing_refusal");
+  } finally {
+    again.close();
+  }
 });

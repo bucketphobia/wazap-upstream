@@ -10,7 +10,7 @@ import { WazapError } from "../errors.js";
 import { assertIosStandaloneSource } from "./source.js";
 
 type BindingDb = Pick<AccountDb, "path" | "isOpen" | "getMeta">;
-type Stamp = { path: string; dev: string; ino: string; size: string; mtimeNs: string; ctimeNs: string };
+export type Stamp = { path: string; dev: string; ino: string; size: string; mtimeNs: string; ctimeNs: string };
 type Binding =
   | { version: 1; state: "awaiting-source"; owner: string }
   | { version: 1; state: "bound"; owner: string; sha256: string }
@@ -18,6 +18,8 @@ type Binding =
 const HASH = /^[a-f0-9]{64}$/;
 const STAMP_KEYS = ["path", "dev", "ino", "size", "mtimeNs", "ctimeNs"] as const;
 const markerPath = (db: BindingDb) => join(dirname(db.path), "ios-import-binding.json");
+/** Set in a new owner's database when the ownership file could not be sealed; only an explicit --reset clears it. */
+export const IOS_BARRIER = "ios_import_barrier";
 export const IOS_SELECTION_REQUIRED = "Select the iPhone archive explicitly for the linked account before importing.";
 function denied(): never {
   throw new WazapError(
@@ -113,8 +115,8 @@ export function sealIosBindingBeforeOwnerChange(db: BindingDb): void {
 
 export async function authorizeIosArchive(args: {
   db: BindingDb; source: string; explicit?: boolean; reselect?: boolean; dryRun?: boolean;
-  savedHash?: string | null; signal?: AbortSignal; stopping?: () => boolean;
-}): Promise<{ hash: string; assertCurrent(): void }> {
+  savedHash?: string | null; savedStamp?: Stamp | null; signal?: AbortSignal; stopping?: () => boolean;
+}): Promise<{ hash: string; stamp: Stamp; assertCurrent(): void }> {
   const checkStopped = () => {
     if (args.signal?.aborted || args.stopping?.())
       throw new WazapError("SERVICE_ERROR", "iPhone import stopped; the last committed chunk will resume.");
@@ -137,11 +139,16 @@ export async function authorizeIosArchive(args: {
   }
   const binding = parseBinding(raw);
   const reselect = args.explicit && args.reselect;
+  if (!args.dryRun && !reselect && db.getMeta(IOS_BARRIER) !== null) denied();
   const bound = binding?.state === "bound" && binding.owner === owner ? binding : null;
   const awaiting = binding?.state === "awaiting-source" && binding.owner === owner;
   if (!args.dryRun && !reselect && (unreadable ||
       (raw !== null && !bound && !awaiting) ||
       (raw === null && !args.explicit && !(typeof args.savedHash === "string" && HASH.test(args.savedHash))))) denied();
+  // A finished import whose file stamp is unchanged keeps its recorded hash instead of reading the archive again.
+  if (!args.dryRun && !reselect && bound && typeof args.savedHash === "string" &&
+      bound.sha256 === args.savedHash && sameStamp(args.savedStamp ?? undefined, stamp))
+    return { hash: args.savedHash, stamp, assertCurrent };
   const digest = createHash("sha256");
   try {
     for await (const chunk of createReadStream(stamp.path, { signal: args.signal })) {
@@ -171,5 +178,5 @@ export async function authorizeIosArchive(args: {
       writeMarker(path, { version: 1, state: "bound", owner, sha256: hash });
     }
   }
-  return { hash, assertCurrent };
+  return { hash, stamp, assertCurrent };
 }

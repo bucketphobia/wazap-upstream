@@ -13,8 +13,8 @@ import { join } from "node:path";
 import { accountPolicy, type AccountRecord } from "../accounts.js";
 import type { AccountPaths, Config } from "../config.js";
 import { AccountDb, purgePreMigrationBackups, StorageError } from "../db/index.js";
-import { IOS_ERROR, importIos, readIosReport } from "../ios-import/index.js";
-import { initializeIosBinding, sealIosBindingBeforeOwnerChange, IOS_SELECTION_REQUIRED } from "../ios-import/binding.js";
+import { IOS_ERROR, IOS_RETENTION_REFUSED, importIos, readIosReport } from "../ios-import/index.js";
+import { initializeIosBinding, sealIosBindingBeforeOwnerChange, IOS_BARRIER, IOS_SELECTION_REQUIRED } from "../ios-import/binding.js";
 import { IosSourceError } from "../ios-import/source.js";
 import { readTranscribeSettings } from "../transcribe/index.js";
 import { WazapError } from "../errors.js";
@@ -106,6 +106,8 @@ export class AccountStorage {
   private ownerClaim: Promise<void> | null = null;
   private iosStopping = false;
   private iosImport: Promise<unknown> | null = null;
+  /** The ownership file failed: iPhone import stays off until restart, the account keeps working. */
+  private iosBlocked = false;
   expiryTimer: ReturnType<typeof setTimeout> | null = null;
   /** The daily pass over the legacy files, the beta archive and set-aside databases. */
   legacyTimer: ReturnType<typeof setInterval> | null = null;
@@ -220,7 +222,7 @@ export class AccountStorage {
     if (db === null || !db.isOpen || this.storageState === "failed") return;
     try {
       db.bindOwner(owner);
-      if (this.config.importIos) initializeIosBinding(db);
+      this.initializeIos(db);
       return;
     } catch (err) {
       if (!(err instanceof StorageError) || err.code !== "OWNER_MISMATCH") {
@@ -231,9 +233,18 @@ export class AccountStorage {
     this.ownerChanging = true;
     this.storageState = "preparing";
     this.stopImport();
+    let sealFailed = false;
     try {
       // Persist an ownership barrier before replacing a database, including unbound old folders.
-      if (this.config.importIos) sealIosBindingBeforeOwnerChange(db);
+      if (this.config.importIos) {
+        try {
+          sealIosBindingBeforeOwnerChange(db);
+        } catch (err) {
+          // The old archive must not reach the new owner, so import stays off; the account does not depend on it.
+          sealFailed = this.iosBlocked = true;
+          logError(`iPhone import ownership file ${this.accountRecord.id}`, err);
+        }
+      }
       await this.finishImport(30_000);
       await this.storageBoot?.catch(() => {});
       if (this.host.stopped() || !db.isOpen) return;
@@ -259,9 +270,12 @@ export class AccountStorage {
       }
       const next = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, now: () => Date.now() });
       this.accountDb = next;
+      // Memory alone would lose the barrier at restart: persist it first, before the account serves.
+      if (sealFailed) next.setMeta(IOS_BARRIER, "1");
       if (restore === null && (imported || legacyFilesPresent(this.config.dataDir, this.paths))) next.setMeta(IMPORT_META.state, "skipped");
       carryLegacyRecord(legacy, next);
       next.bindOwner(owner);
+      if (sealFailed) this.noteIosBlocked(next);
       this.identity.lids = new LidRegistry();
       this.host.adoptDatabase(next);
       this.storageState = this.legacyPending(next) ? "preparing" : "ready";
@@ -274,6 +288,25 @@ export class AccountStorage {
       this.storageFail(err);
     } finally {
       this.ownerChanging = false;
+    }
+  }
+
+  private initializeIos(db: AccountDb): void {
+    if (!this.config.importIos) return;
+    try {
+      initializeIosBinding(db);
+    } catch (err) {
+      this.iosBlocked = true;
+      logError(`iPhone import ownership file ${this.accountRecord.id}`, err);
+      this.noteIosBlocked(db);
+    }
+  }
+
+  private noteIosBlocked(db: AccountDb): void {
+    try {
+      db.setMeta(IOS_ERROR, "ownership_file_failed");
+    } catch {
+      // A read-only or full database still serves; the log carries the cause.
     }
   }
 
@@ -336,14 +369,20 @@ export class AccountStorage {
                   ? "owner_missing"
                   : err instanceof WazapError && err.message === "iPhone import needs WAZAP_PERSIST_HISTORY=1."
                     ? "history_disabled"
-                    : "import_failed";
+                    : err instanceof WazapError && err.message === IOS_RETENTION_REFUSED
+                      ? "retention_unsupported"
+                      : err instanceof WazapError && err.message.startsWith("voice-skip.txt line ")
+                        ? "voice_skip_invalid"
+                        : err instanceof WazapError && err.message.startsWith("Voice transcription was requested")
+                          ? "voice_unavailable"
+                          : "import_failed";
     db.setMeta(IOS_ERROR, reason);
     log(`iPhone import stopped (${reason}). Use wazap import ios --reset to clear its saved progress.`);
   }
 
   /** One background voice pass per boot, only after the real connection opens. */
   startImportVoice(): void {
-    if (!this.config.importIos || this.config.command !== "serve") return;
+    if (!this.config.importIos || this.config.command !== "serve" || this.iosBlocked) return;
     const db = this.readyDb();
     if (
       db === null ||
@@ -372,6 +411,7 @@ export class AccountStorage {
       background: true,
       afterTranscript: () => this.host.embedFeed()?.kick(),
       settings,
+      retention: this.config.retention,
       signal: (this.iosAbort ??= new AbortController()).signal,
       stopping: () => this.iosStopping,
     }).catch((err) => this.noteIosFailure(db, err));
@@ -401,7 +441,8 @@ export class AccountStorage {
       }
       await this.importLateBeta(db);
       const iosSource = join(this.paths.root, "import", "ChatStorage.sqlite");
-      if (this.config.importIos && existsSync(iosSource)) {
+      // Only the server imports at boot: a short command such as status --live must not wait for it.
+      if (this.config.importIos && this.config.command === "serve" && !this.iosBlocked && existsSync(iosSource)) {
         try {
           if (!this.config.persistHistory)
             throw new WazapError("INVALID_ID", "iPhone import needs WAZAP_PERSIST_HISTORY=1.");
@@ -412,6 +453,7 @@ export class AccountStorage {
             db,
             source: iosSource,
             textOnly: true,
+            retention: this.config.retention,
             signal: (this.iosAbort ??= new AbortController()).signal,
             stopping: () => this.iosStopping,
           });

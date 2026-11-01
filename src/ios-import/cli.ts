@@ -6,7 +6,7 @@ import { WazapError } from "../errors.js";
 import { releaseLock, writeLock } from "../lock.js";
 import { say } from "../logger.js";
 import { readTranscribeSettings } from "../transcribe/index.js";
-import { importIos } from "./index.js";
+import { IOS_ERROR, importIos } from "./index.js";
 
 export async function runIosImport(config: Config): Promise<void> {
   if (config.args[0] !== "ios" || !config.args[1])
@@ -27,8 +27,11 @@ export async function runIosImport(config: Config): Promise<void> {
   try {
     db = AccountDb.open(account.databaseFile, { readOnly: config.dryRun });
     if (!config.dryRun) await db.resume();
-    const settings = readTranscribeSettings(process.env, config.dataDir);
-    const permitted = !(settings.provider === "openai" && accountPolicy(record, config).readOnly && !settings.allowApi);
+    // Only a voice request needs the provider; a bad setting must not block text or a dry run.
+    const settings = config.importMedia ? readTranscribeSettings(process.env, config.dataDir) : undefined;
+    const permitted =
+      settings !== undefined &&
+      !(settings.provider === "openai" && accountPolicy(record, config).readOnly && !settings.allowApi);
     const report = await importIos({
       db,
       source: config.args[1],
@@ -36,13 +39,16 @@ export async function runIosImport(config: Config): Promise<void> {
       dryRun: config.dryRun,
       explicit: true,
       reset: config.importReset,
+      retention: config.retention,
       settings: permitted ? settings : undefined,
     });
-    say(
-      config.json
-        ? JSON.stringify(report)
-        : `iPhone import: ${report.state}; ${report.inserted} inserted, ${report.skippedExisting} existing, ${report.quarantined} quarantined.`
-    );
+    // A failed ownership file at boot is over once an import has run.
+    if (!config.dryRun && db.getMeta(IOS_ERROR) === "ownership_file_failed") db.setMeta(IOS_ERROR, null);
+    if (config.json) process.stdout.write(`${JSON.stringify(report)}\n`);
+    else
+      say(
+        `iPhone import: ${report.state}; ${report.inserted} inserted, ${report.skippedExisting} existing, ${report.quarantined} quarantined.`
+      );
   } finally {
     db?.close();
     if (!config.dryRun) releaseLock(lock);

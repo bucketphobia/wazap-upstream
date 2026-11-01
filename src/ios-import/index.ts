@@ -10,11 +10,13 @@ import type { SQLInputValue } from "../db/sqlite.js";
 import { classifyFailure, transcribeFile, type TranscribeSettings, type Transcript } from "../transcribe/index.js";
 import { WazapError } from "../errors.js";
 import { log } from "../logger.js";
-import { authorizeIosArchive } from "./binding.js";
+import { authorizeIosArchive, IOS_BARRIER, type Stamp } from "./binding.js";
 
 export const IOS_META = "ios_import_v1";
 export const IOS_ERROR = "ios_import_error";
 export const IOS_VOICE_TARGETS = "ios_voice_targets_v1";
+/** Imported rows carry no expiry, so strict retention cannot be honoured. */
+export const IOS_RETENTION_REFUSED = "iPhone import cannot honour WAZAP_RETENTION=1: imported messages would never expire.";
 const TYPES: Record<number, string> = {
   0: "text",
   7: "text",
@@ -103,6 +105,10 @@ interface Progress {
   generation?: string;
   replyCursor?: string;
   voiceTerminalFailures?: number;
+  /** Source file stamp; a finished import with the same stamp is not hashed again. */
+  stamp?: Stamp;
+  /** The voice pass ran to its end; a later run does not repeat it (--reset does). */
+  voicePass?: true;
 }
 export function readIosReport(db: Pick<AccountDb, "getMeta">): IosReport | null {
   const raw = db.getMeta(IOS_META);
@@ -122,6 +128,8 @@ export interface IosArgs {
   background?: boolean;
   skipFile?: string;
   settings?: TranscribeSettings;
+  /** WAZAP_RETENTION: the importer stores no expiry, so it refuses to run at all. */
+  retention?: boolean;
   signal?: AbortSignal;
   /** Graceful stop: finish accepted uploads, but start no further work. */
   stopping?: () => boolean;
@@ -224,6 +232,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
   const owner = db.getMeta("owner");
   if (!validJid(owner)) fail("Link the target account before importing an iPhone archive.");
   if (args.reset && !args.explicit) fail("An archive reset requires explicit selection.");
+  if (args.retention) fail(IOS_RETENTION_REFUSED);
   // Validate schema and snapshot before authorization or destructive progress changes.
   const sourceHandle = openIosSource(args.source);
   let scratch: ReturnType<typeof openScratch> | undefined;
@@ -253,6 +262,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       reselect: args.reset,
       dryRun: args.dryRun,
       savedHash: progress?.hash ?? null,
+      savedStamp: progress?.report.state === "done" ? progress.stamp : null,
       signal: args.signal,
       stopping: args.stopping,
     });
@@ -277,6 +287,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         db.setMeta(IOS_META, null);
         db.setMeta(IOS_ERROR, null);
         db.setMeta(IOS_VOICE_TARGETS, null);
+        db.setMeta(IOS_BARRIER, null);
       });
       // Only importer-owned pages are removed, in bounded transactions.
       let cursor = "";
@@ -308,6 +319,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
     let last = progress?.last ?? 0;
     let replyCursor = progress?.replyCursor ?? "";
     let voiceTerminalFailures = progress?.voiceTerminalFailures ?? Object.keys(progress?.voiceFailureRows ?? {}).length;
+    let voicePass = progress?.voicePass === true;
     const checkpoint = () => {
       guard();
       db.setMeta(
@@ -315,10 +327,12 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         JSON.stringify({
           format: 2,
           hash: authorization.hash,
+          stamp: authorization.stamp,
           generation,
           last,
           replyCursor,
           voiceTerminalFailures,
+          voicePass: voicePass || undefined,
           report,
           voiceBindings: bindingCapture ? 2 : undefined,
         })
@@ -434,9 +448,9 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         await pause();
       }
     }
-    if (terminal && (args.textOnly || !args.media)) return report;
+    if (terminal && (args.textOnly || !args.media || (report.state === "done" && voicePass))) return report;
     // All source-scale indexes live on disk with a fixed SQLite cache.
-    scratch = openScratch();
+    scratch = openScratch(dirname(db.path));
     if (!terminal) {
       const identities = source.prepare(
         "SELECT m.Z_PK pk,m.ZISFROMME fromMe,m.ZSTANZAID keyId,c.ZCONTACTJID chat FROM ZWAMESSAGE m LEFT JOIN ZWACHATSESSION c ON c.Z_PK=m.ZCHATSESSION WHERE m.Z_PK>? ORDER BY m.Z_PK LIMIT 500"
@@ -638,18 +652,33 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       (args.settings?.provider
         ? (file: string) => transcribeFile(args.settings!, file, { signal: args.signal })
         : null);
+    if (args.media && !transcriber)
+      throw new WazapError(
+        "INVALID_ID",
+        "Voice transcription was requested but no usable provider is available, so no voice was imported.",
+        "Enable a provider in the voice settings (and WAZAP_TRANSCRIBE_ALLOW_API=1 for a read-only account using an API), then rerun"
+      );
     if (args.media && transcriber) {
       const skipPath = args.skipFile ?? join(dirname(args.source), "voice-skip.txt");
       if (!existsSync(skipPath)) {
         log("iPhone voice import paused: voice-skip.txt is missing; an empty file explicitly permits all chats.");
         return report;
       }
-      const skip = new Set(
-        readFileSync(skipPath, "utf8")
-          .split(/\r?\n/)
-          .map((x) => canonical(db, x.trim()))
-          .filter(Boolean)
-      );
+      // An unreadable line must never leave its chat eligible: stop before any upload.
+      const skip = new Set<string>();
+      readFileSync(skipPath, "utf8")
+        .split(/\r?\n/)
+        .forEach((line, index) => {
+          const jid = line.trim();
+          if (jid === "") return;
+          if (!validJid(jid))
+            throw new WazapError(
+              "INVALID_ID",
+              `voice-skip.txt line ${index + 1} is not an exact chat JID, so no voice was imported.`,
+              "Write one JID per line, such as 40700000002@s.whatsapp.net, or remove the line"
+            );
+          skip.add(canonical(db, jid));
+        });
       report.voice.skipped = 0;
       report.voice.missing = 0;
       report.voice.failed = voiceTerminalFailures;
@@ -657,7 +686,6 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       // turn one synchronous source read into an archive-wide scan.
       const voicePage = source.prepare(`${SELECT} WHERE m.Z_PK>? ORDER BY m.Z_PK LIMIT 500`);
       let cursor = 0;
-      let retryable = false;
       let paused = false;
       let dispatchFailed = false;
       for (;;) {
@@ -713,8 +741,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
                       if (failure.kind === "permanent" || failure.kind === "gone") {
                         putVoice(r.pk, { failure: failure.kind });
                         voiceTerminalFailures++;
-                      } else retryable = true;
-                      if (failure.kind === "paused") paused = true;
+                      } else paused = true; // a retryable failure: start no further uploads this run
                       report.voice.failed++;
                       checkpoint();
                     });
@@ -756,10 +783,12 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         await yieldLoop();
         guard();
       }
-      if (retryable || paused || stopped()) {
+      if (paused || stopped()) {
         checkpoint();
         return report;
       }
+      // A background pass leaves live-provider notes alone, so it does not stand for an explicit one.
+      if (!args.background) voicePass = true;
     }
     report.state = stopped() ? "voice" : "done";
     checkpoint();

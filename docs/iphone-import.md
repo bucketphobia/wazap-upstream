@@ -24,9 +24,15 @@ Automatic importing defaults off. The CLI works with `WAZAP_IMPORT_IOS=0`.
    a plain filesystem copy of the full data directory.
 3. Prepare an extracted, unencrypted, standalone SQLite database. ZIP files,
    encrypted backups and other database layouts are not accepted directly.
-4. Keep the extracted source stable while importing. Leave free space on both the
-   target and temporary filesystems for history and a temporary work index.
+4. Keep the extracted source stable while importing. Leave free space in the
+   account's data directory for history and a temporary work index (a private
+   `.ios-scratch-*` folder beside the account database; a run removes any more than a
+   day old that an interrupted run left).
 5. Keep history persistence enabled: `WAZAP_PERSIST_HISTORY=1` (the default).
+6. Leave [strict retention](data.md#strict-retention-wazap_retention1-off-by-default)
+   off. Imported messages carry no expiry, so with `WAZAP_RETENTION=1` the importer
+   refuses to run (`retention_unsupported`) from both the CLI, dry runs included,
+   and the folder drop.
 
 A nonempty `ChatStorage.sqlite-wal` or `ChatStorage.sqlite-journal` causes refusal.
 Committed messages may still exist only in a WAL file. **Do not delete companion
@@ -62,7 +68,7 @@ an enabled transcription provider or automatic importer.
 | --- | --- |
 | `--account <id>` | Select the already linked target account |
 | `--dry-run` | Inventory without writing import state or messages |
-| `--json` | Print the aggregate report as JSON |
+| `--json` | Print the aggregate report as one JSON line on stdout (no other summary is printed) |
 | `--media <dir>` | Explicitly request voice transcription using extracted files |
 | `--reset` | Reselect the archive and rebuild import progress; see [recovery](#resume-reset-and-change-archives) |
 
@@ -96,7 +102,7 @@ Place the source under the target account:
 ```
 
 Restart the server after copying. There is no folder watcher. Text imports before
-WhatsApp connects; eligible voice work runs in the background after connection,
+WhatsApp connects (only in `serve`, so `status --live` does not wait for it); eligible voice work runs in the background after connection,
 only in `serve`. Short commands such as `status --live` do not start archive
 uploads. Existing transcription settings and [voice consent](#add-voice-transcription)
 still apply. To start with text only, leave out `voice-skip.txt` or set
@@ -166,7 +172,10 @@ JID per line, for example:
 120363000000000001@g.us
 ```
 
-An empty file permits all eligible chats. A missing file means no uploads. Create
+An empty file permits all eligible chats. A missing file means no uploads. Blank
+lines are ignored; every other line must be an exact JID as shown above (no `+`,
+device suffix or spaces inside). A line that is not stops the voice pass before any
+upload and the command reports its line number (`voice_skip_invalid`). Create
 an empty file only when you intend that consent; review an existing file before
 changing its exclusions. Then explicitly request voice work:
 
@@ -180,6 +189,11 @@ import even when voice files are absent; missing files are counted in the report
 No media is copied into wazap. Normal WhatsApp media retrieval is unavailable for
 archive-only rows.
 
+If `--media` is given but no provider is usable (none configured, or an API provider
+that a read-only account is not allowed to use), the command stops with an error
+and exit code 1 after the text import; the import stays in the `voice` state
+(`voice_unavailable`). Without `--media`, transcription settings are not read.
+
 The manual `--media` command requests voice even when `WAZAP_TRANSCRIBE_AUTO=0`.
 Folder-drop voice requires automatic import enabled, an enabled provider and
 `WAZAP_TRANSCRIBE_AUTO=on` (or `1`/`true`). On an account made read-only globally or
@@ -187,7 +201,10 @@ with `writes: false`, API uploads additionally require `WAZAP_TRANSCRIBE_ALLOW_A
 for both methods. `all` is not required for archive voice work; its special handling
 of the user's own new live notes is described in the voice settings.
 
-Up to three calls run concurrently. Existing transcripts win, including one that
+Up to three calls run concurrently. After a provider failure that may clear
+(rate limit, server error, network), no new upload starts in that run; uploads
+already accepted still finish and are saved, and the next run resumes the rest.
+There is no stored backoff. Existing transcripts win, including one that
 arrives during an upload. Background importing leaves live-provider-owned notes
 to the normal voice worker. Archive transcription stays bound to the original
 target voice row rather than following a reused message identity.
@@ -208,7 +225,12 @@ The CLI report and the account's `get_status` → `storage.ios_import` contain:
 Skipped existing messages are expected on reruns. A `done` report does not mean
 every source row became a message or every voice file was available. Check the
 skip, quarantine and voice counts, and `storage.ios_import_error` when present.
-A refused archive leaves the account usable.
+A refused archive leaves the account usable. So does an ownership file that
+cannot be written or sealed (`ownership_file_failed`, for example a full disk):
+iPhone import stays off until the server restarts. If the failure came while a
+different number was linking, the old archive stays refused for the new number
+after restarts too; only `wazap import ios <file> --reset`, after you confirm the
+archive belongs to the linked account, lifts that.
 
 Imports use bounded pages and commit progress with each text chunk. An interrupted
 run resumes from committed progress; it need not start again from the first row.
@@ -218,8 +240,13 @@ A completed text import can repair blank labels on rerun without replaying messa
 
 For an interruption or transient provider failure, rerun the same command against
 the same stable source, or restart with automatic importing enabled. No reset is
-normally needed. Source bytes are hashed on each invocation; do not edit a selected
-archive in place between runs and expect its old progress to apply.
+normally needed. Source bytes are hashed when an unfinished import starts; do not edit
+a selected archive in place between runs and expect its old progress to apply. A `done`
+import whose archive file is unchanged (same path, size and times) is not hashed
+again. Once a `--media` voice pass has finished on it (a background pass does not
+count), it is not repeated either, so voice files that appear later, or an edited
+`voice-skip.txt`, need `--reset` to be picked up. A text-only `done` import still
+runs its voice pass when you add `--media`.
 
 Use `--reset` only after confirming that the source belongs to the currently linked
 account, for example when selecting a replacement source or retrying terminal
@@ -257,6 +284,10 @@ corresponding explanatory message instead.
 | `source_unreadable` | Check the mounted path and the container/process user's read permissions. |
 | `source_changed` | Stop changes to the source and use a stable export. Review the intended selection before resetting. |
 | `source_corrupt` | Restore or re-export from the original backup; reset does not repair source corruption. |
+| `retention_unsupported` | Turn off `WAZAP_RETENTION` for the import; imported messages cannot expire. |
+| `voice_skip_invalid` | Fix the line number the command names in `voice-skip.txt`, then rerun. |
+| `voice_unavailable` | Configure a usable provider (and API consent on a read-only account) or drop `--media`. |
+| `ownership_file_failed` | Free disk space or fix permissions on the account folder (and an `import` path that is a file), then restart. If it appeared when another number linked, also confirm the archive belongs to the linked account and run the import with `--reset` (`archive_selection_required` until then). A successful CLI import clears the notice. |
 | `owner_missing` / `history_disabled` | Link the target account / enable history persistence before writing. |
 | `voice_target_bindings_missing`, `voice_collision_exclusions_missing`, `voice_failure_exclusions_missing` or `legacy_reply_bindings_missing` | An old checkpoint cannot prove safe ownership/exclusions. Confirm the archive and use an explicit reset; existing rows remain. |
 | Text imports but voice does not | Check provider configuration, `--media` or automatic settings, `voice-skip.txt`, API consent and media paths. |
@@ -280,6 +311,6 @@ WhatsApp protobuf or media credentials.
 Preflight checks precede source selection and reset, preserving existing progress
 when they refuse a source. Reads use SQLite read-only/immutable access; no source
 index is created. Corruption discovered later while reading can still stop a run.
-Collision preparation and media lookup use a temporary private disk index. Text,
+Collision preparation and media lookup use a temporary private disk index in the account directory. Text,
 name, reply and voice scans use bounded pages, with paged checkpoints; migration
 from an old checkpoint must parse its existing JSON once.

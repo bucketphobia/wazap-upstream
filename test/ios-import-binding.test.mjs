@@ -205,3 +205,13 @@ test("graceful stop interrupts hashing between stream chunks without publishing 
   assert.ok(checks >= 2);
   assert.equal(existsSync(f.marker), false);
 });
+test("a finished import with an unchanged source stamp is not hashed again; a changed stamp is", async (t) => {
+  const f = fixture(t);
+  const first = await authorizeIosArchive({ ...f, explicit: true });
+  // A marker and progress that claim a hash the bytes do not have prove the bytes are not read.
+  const fake = "b".repeat(64);
+  writeFileSync(f.marker, JSON.stringify({ version: 1, state: "bound", owner: ME, sha256: fake }));
+  const again = await authorizeIosArchive({ ...f, savedHash: fake, savedStamp: first.stamp });
+  assert.equal(again.hash, fake);
+  await assert.rejects(authorizeIosArchive({ ...f, savedHash: fake, savedStamp: { ...first.stamp, size: "1" } }), changedArchive);
+});
