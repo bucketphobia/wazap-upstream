@@ -820,20 +820,23 @@ function specOf(args: CatchupArgs, now: number): CatchupWindowSpec {
   return { kind: "since", ms: sinceOf(since, now) };
 }
 
-/** Everyone tagged #private or #no-catchup on any of the live accounts, by jid; an account that cannot say adds nobody. The broad reads take its #private half. */
-export async function taggedAcross(targets: ReadonlyArray<{ wa: WhatsAppApi }>): Promise<CatchupTagJids> {
+/** Everyone tagged #private or #no-catchup on any of the live accounts, by jid; reports whether every account answered. The broad reads take its #private half. */
+export async function taggedAcross(targets: ReadonlyArray<{ wa: WhatsAppApi }>): Promise<CatchupTagJids & { complete: boolean }> {
+  let complete = true;
   const privateJids = new Set<string>();
   const noCatchup = new Set<string>();
   for (const target of targets) {
     try {
       const tagged = await target.wa.catchUpTags?.();
+      if (tagged === undefined) complete = false;
       for (const jid of tagged?.private ?? []) privateJids.add(jid);
       for (const jid of tagged?.noCatchup ?? []) noCatchup.add(jid);
     } catch {
+      complete = false;
       // Its scan reports what is wrong with it.
     }
   }
-  return { private: [...privateJids], noCatchup: [...noCatchup] };
+  return { private: [...privateJids], noCatchup: [...noCatchup], complete };
 }
 
 /**
@@ -843,7 +846,8 @@ export async function taggedAcross(targets: ReadonlyArray<{ wa: WhatsAppApi }>):
  */
 export async function privateRule(hub: AccountSource, accountId: string): Promise<PrivateRule> {
   const others = hub.bindings().filter((binding) => binding.id !== accountId);
-  return { others: others.length === 0 ? [] : (await taggedAcross(others)).private };
+  const tags = await taggedAcross(others);
+  return { others: tags.private, complete: tags.complete };
 }
 
 function missingSupport(id: string): WazapError {

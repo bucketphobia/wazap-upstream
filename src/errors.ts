@@ -117,7 +117,7 @@ export const ERROR_GUIDE: Record<ErrorCode, string> = {
   CHAT_ACTION_EXPIRED: "Preview expired after 15 minutes: preview again and ask for a new yes.",
   CHAT_ACTION_STALE: "Account, target or conversation changed: preview again and ask for a new yes; nothing changed.",
   CHAT_ACTION_OUTCOME_UNKNOWN: "May have happened: inspect state; never retry automatically or without a new explicit request.",
-  CURSOR_EXPIRED: "The catch_up cursor expired: call catch_up without it; nothing was lost.",
+  CURSOR_EXPIRED: "The cursor expired: restart catch_up without its cursor, or new_since from after 0.",
   SEND_OUTCOME_UNKNOWN:
     "It may or may not have arrived: never confirm or draft it again unasked. read_messages shows it once WhatsApp echoes it; not there yet does not mean it failed.",
   SEND_BLOCKED: "The account's send rules refuse this recipient: tell the user. Do not retry or route around it.",

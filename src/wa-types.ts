@@ -429,6 +429,13 @@ export interface SystemEvent {
   value?: string;
 }
 
+/** Content-free removal of a message with an expiry. */
+export interface ExpiredMessageView {
+  key: string;
+  chat_id: string;
+  expired: true;
+}
+
 /** What new_since answers: messages past a change_seq cursor, in the order they changed. */
 export interface NewSinceResult {
   /** Random, fixed when the numbering was created: a cursor kept with another epoch means start again from 0. */
@@ -440,7 +447,7 @@ export interface NewSinceResult {
   top: number;
   more: boolean;
   /** Each carries `key`, which does not change when a lid's pairing changes `message_id`. */
-  messages: Array<MessageView & { key: string }>;
+  messages: Array<(MessageView & { key: string; expires_at?: string; view_once?: true }) | ExpiredMessageView>;
 }
 
 export interface RecentConversation {
@@ -543,6 +550,8 @@ export interface SearchOptions {
  */
 export interface PrivateRule {
   others: readonly string[];
+  /** False while a live account could not report tags; retain the stored snapshot. */
+  complete?: boolean;
 }
 
 /** One recall hit: the message plus the score it ranked by. */

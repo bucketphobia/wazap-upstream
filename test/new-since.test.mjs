@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { proto } from "baileys";
 
 import { WhatsAppService } from "../dist/whatsapp.js";
-import { connectedService, schemaCheckedTools } from "./helpers.mjs";
+import { connectedService, offlineConfig, schemaCheckedTools } from "./helpers.mjs";
 
 const ME = "40700000001@s.whatsapp.net";
 const ANA = "40700000002@s.whatsapp.net";
@@ -18,8 +18,8 @@ const GROUP = "120363000000000001@g.us";
 const STATUS = "status@broadcast";
 const MINUTE = 60_000;
 
-function account({ allowWrite = false } = {}) {
-  const { svc, sock } = connectedService(WhatsAppService, { prefix: "wazap-newsince-", id: ME, name: "Răzvan" });
+function account({ allowWrite = false, config = {} } = {}) {
+  const { svc, sock } = connectedService(WhatsAppService, { prefix: "wazap-newsince-", id: ME, name: "Răzvan", config });
   sock.ev.emit("contacts.upsert", [
     { id: ANA, name: "Ana" },
     { id: DAN, name: "Dan" },
@@ -119,24 +119,25 @@ test("an edit, a deletion for everyone and a late transcript list the message ag
   );
 });
 
-test("stories, expired messages and a cleared chat are not listed, and a hidden tail still moves through to the top", async () => {
+test("stories and cleared chats are hidden, while expired messages list content-free removals", async () => {
   const { svc, call, arrive } = account();
   const visible = arrive(ANA, "rămâne");
   const expiring = arrive(DAN, "expiră");
-  arrive(STATUS, "o poveste", { participant: DAN });
   const cleared = arrive(GROUP, "dispare cu ștergerea", { participant: DAN });
   const before = await call("new_since", {});
   assert.deepEqual(ids(before), [visible, expiring, cleared], "the story is no chat's message");
 
   svc.db.messages.setExpiry(expiring, Date.now() - 1000);
+  const expiryTop = svc.db.messages.changeTop();
+  arrive(STATUS, "o poveste", { participant: DAN });
   await svc.db.messages.clearChat(GROUP, Date.now() + MINUTE);
   const after = await call("new_since", {});
-  assert.deepEqual(ids(after), [visible]);
+  assert.deepEqual(after.structuredContent.messages, [before.structuredContent.messages[0], { key: "false_M2", chat_id: DAN, expired: true }]);
 
   const tail = await call("new_since", { after: before.structuredContent.through - 1 });
-  assert.deepEqual([tail.structuredContent.count, tail.structuredContent.more], [0, false], "everything left past the cursor is hidden");
+  assert.deepEqual([tail.structuredContent.count, tail.structuredContent.more], [1, false], "the expiry remains past the cursor");
   assert.equal(tail.structuredContent.through, tail.structuredContent.top);
-  assert.ok(tail.structuredContent.through > 0);
+  assert.ok(tail.structuredContent.through > expiryTop, "a hidden tail still moves through to the top");
 });
 
 test("a message that changes after the call started waits for the next call", async () => {
@@ -340,4 +341,270 @@ test("the content hash pins what it leaves out: each of those fields can change 
   assert.equal(hash(image()), hash({ documentWithCaptionMessage: { message: image() } }));
   assert.equal(hash(image()), hash({ deviceSentMessage: { destinationJid: "x@s.whatsapp.net", message: image() } }));
   assert.notEqual(hash(image()), hash({ viewOnceMessage: { message: image() } }), "view once is a difference a reader sees");
+});
+
+test("new_since declares and returns expiry and view-once metadata only when applicable, including private rows", async () => {
+  const { svc, call, tools, arrive } = account();
+  const plain = arrive(ANA, "plain");
+  const expiring = arrive(DAN, "temporary");
+  const once = arrive(ANA, { viewOnceMessageV2: { message: { imageMessage: { viewOnce: true, caption: "once" } } } });
+  const deadline = Math.floor(Date.now() / 1000) * 1000 + 60_000;
+  svc.db.messages.setExpiry(expiring, deadline);
+  svc.db.identity.updateFields(ANA, { addTags: ["private"] });
+  svc.db.identity.updateFields(DAN, { addTags: ["private"] });
+  const rows = (await call("new_since", {})).structuredContent.messages;
+  const byId = new Map(rows.map((row) => [row.message_id, row]));
+  assert.equal(Date.parse(byId.get(expiring).expires_at), deadline);
+  assert.match(byId.get(expiring).expires_at, /[+-]\d{2}:\d{2}$/);
+  assert.equal(byId.get(once).view_once, true);
+  assert.equal(byId.get(once).private, true);
+  assert.ok(!("expires_at" in byId.get(plain)));
+  assert.ok(!("view_once" in byId.get(plain)));
+  const shape = tools.get("new_since").meta.outputSchema.messages.element.options[0].shape;
+  assert.ok(shape.expires_at && shape.view_once, "both fields are declared, not just passed through");
+});
+
+test("setting and changing expiry re-lists once, while the same deadline does not", async () => {
+  const { svc, call, arrive } = account();
+  const id = arrive(ANA, "temporary");
+  let mark = (await call("new_since", {})).structuredContent.through;
+  for (const deadline of [60_000, 30_000].map((delta) => Math.floor(Date.now() / 1000) * 1000 + delta)) {
+    svc.db.messages.setExpiry(id, deadline);
+    const changed = await call("new_since", { after: mark });
+    assert.deepEqual(ids(changed), [id]);
+    assert.equal(Date.parse(changed.structuredContent.messages[0].expires_at), deadline);
+    mark = changed.structuredContent.through;
+    svc.db.messages.setExpiry(id, deadline);
+    assert.deepEqual(ids(await call("new_since", { after: mark })), []);
+  }
+});
+
+test("private tag transitions re-list the sender's group rows and both directions of their direct chat, without unrelated or no-op changes", async () => {
+  const { svc, call, arrive } = account();
+  const expected = [arrive(ANA, "incoming"), arrive(ANA, "outgoing", { fromMe: true }), arrive(GROUP, "group", { participant: ANA })];
+  arrive(GROUP, "other", { participant: DAN });
+  let mark = (await call("new_since", {})).structuredContent.through;
+  for (const [step, privateNow] of [true, false, true, false].entries()) {
+    const edit = privateNow ? { addTags: ["private"] } : { removeTags: ["private"] };
+    svc.db.identity.updateFields(ANA, edit);
+    const changed = await call("new_since", { after: mark });
+    assert.deepEqual(ids(changed).sort(), [...expected].sort());
+    assert.equal(new Set(changed.structuredContent.messages.map((m) => m.key)).size, 3);
+    for (const row of changed.structuredContent.messages) {
+      assert.equal(row.private, privateNow ? true : undefined);
+      assert.equal(row.text === "[private]", privateNow);
+    }
+    mark = changed.structuredContent.through;
+    svc.db.identity.updateFields(ANA, edit);
+    if (step > 0) svc.db.identity.updateFields(ANA, { addTags: ["friend"] });
+    assert.deepEqual(ids(await call("new_since", { after: mark })), []);
+  }
+});
+
+function linkedTools(personal, work) {
+  const bindings = [{ id: "personal", wa: personal.svc }, { id: "work", wa: work.svc }];
+  const records = bindings.map(({ id }) => ({ id, name: id, enabled: true, owner: null }));
+  const hub = {
+    bindings: () => bindings.filter((b) => records.some((r) => r.id === b.id && r.enabled)),
+    defaultBinding: () => bindings[0], binding: (id) => bindings.find((b) => b.id === id),
+    records: () => records, record: (id) => records.find((r) => r.id === id),
+    recordOnDisk: (id) => records.find((r) => r.id === id),
+    findByChat: (jid) => bindings.filter((b) => b.wa.hasChat(jid)),
+    findByMessage: (id) => bindings.filter((b) => b.wa.hasMessage(id)),
+    findByDraft: () => [], reload: () => {}, noteOwner: () => {},
+  };
+  return { ...schemaCheckedTools(hub, { allowWrite: false }), bindings, records };
+}
+
+test("test_transient_account_outage_never_unprivates", async () => {
+  const personal = account();
+  const work = account();
+  const { call, records } = linkedTools(personal, work);
+  personal.svc.db.identity.updateFields(ANA, { addTags: ["private"] });
+  work.arrive(ANA, "secret words one");
+  work.arrive(ANA, "secret words two");
+  const read = async (after = 0) => (await call("new_since", { account_id: "work", after })).structuredContent;
+  const first = await read();
+  assert.ok(first.messages.every((m) => m.private));
+  const snapshot = work.svc.db.getMeta("change_private_others");
+  const real = personal.svc.catchUpTags.bind(personal.svc);
+  personal.svc.catchUpTags = async () => { throw new Error("preparing"); };
+  const during = await read(first.through);
+  assert.deepEqual(during.messages, [], "an outage must not re-list private history with words");
+  assert.equal(during.top, first.top, "an outage cannot renumber history as untagged");
+  assert.equal(work.svc.db.getMeta("change_private_others"), snapshot);
+  work.arrive(ANA, "secret during outage");
+  const added = await read(during.through);
+  assert.deepEqual(added.messages.map((m) => [m.text, m.private]), [["[private]", true]]);
+  assert.ok((await read()).messages.every((m) => m.private), "listing uses the stored union too");
+  personal.svc.catchUpTags = real;
+  assert.deepEqual((await read(added.through)).messages, [], "recovery does not renumber unchanged tags");
+  // Disabling the account retires its tags even if it cannot answer.
+  records[0].enabled = false;
+  const retired = await read(added.through);
+  assert.deepEqual(retired.messages.map((m) => m.text), ["secret words one", "secret words two", "secret during outage"]);
+});
+
+test("a healthy linked account's real untag re-lists with words", async () => {
+  const personal = account();
+  const work = account();
+  const { call } = linkedTools(personal, work);
+  personal.svc.db.identity.updateFields(ANA, { addTags: ["private"] });
+  const id = work.arrive(ANA, "restored words");
+  const first = (await call("new_since", { account_id: "work" })).structuredContent;
+  assert.equal(first.messages[0].private, true);
+  personal.svc.db.identity.updateFields(ANA, { removeTags: ["private"] });
+  const untagged = (await call("new_since", { account_id: "work", after: first.through })).structuredContent;
+  assert.deepEqual(untagged.messages.map((m) => [m.message_id, m.text, m.private]), [[id, "restored words", undefined]]);
+});
+
+test("linked-account private tag transitions re-list rows using the existing cross-account rule", async () => {
+  const personal = account();
+  const workConfig = offlineConfig("wazap-newsince-work-", { persistHistory: true });
+  let work = account({ config: workConfig });
+  const { call, bindings } = linkedTools(personal, work);
+  await work.svc.db.learnLidPhone(LID, ANA);
+  const expected = [work.arrive(ANA, "incoming"), work.arrive(ANA, "outgoing", { fromMe: true }), work.arrive(GROUP, "group", { participant: ANA })];
+  work.arrive(DAN, "public");
+  const read = async (after = 0) => call("new_since", { account_id: "work", after });
+  let mark = (await read()).structuredContent.through;
+  for (const privateNow of [true, false]) {
+    personal.svc.db.identity.updateFields(LID, privateNow ? { addTags: ["private"] } : { removeTags: ["private"] });
+    const changed = await read(mark);
+    assert.deepEqual(ids(changed).sort(), [...expected].sort());
+    for (const row of changed.structuredContent.messages) {
+      assert.equal(row.private, privateNow ? true : undefined);
+      assert.equal(row.text === "[private]", privateNow);
+    }
+    mark = changed.structuredContent.through;
+    assert.deepEqual(ids(await read(mark)), []);
+    if (privateNow) {
+      await work.svc.stop();
+      work = connectedService(WhatsAppService, { prefix: "wazap-newsince-reopen-", id: ME, name: "Răzvan", config: workConfig });
+      bindings[1].wa = work.svc;
+      await work.svc.bootStorage();
+      const unchanged = await read(mark);
+      assert.deepEqual(ids(unchanged), [], "the external tag snapshot survives reopening");
+      assert.equal(unchanged.structuredContent.top, mark, "restart does not re-number unchanged privacy");
+    }
+  }
+  await work.svc.stop();
+});
+
+
+test("an expiry physically removed before polling is listed once, with mixed pages bounded by top", async () => {
+  const { svc, call, arrive } = account();
+  const doomed = arrive(ANA, "words to forget");
+  const mark = (await call("new_since", {})).structuredContent.through;
+  const first = arrive(DAN, "first live row");
+  svc.db.messages.setExpiry(doomed, Date.now() - 1000);
+  await svc.db.messages.expireDue();
+  // The ordinary expiry sweep keeps a tombstone; clearing physically removes it.
+  await svc.db.messages.clearChat(ANA, Date.now());
+  assert.equal(svc.db.messages.get(doomed, { includeHidden: true }), null);
+  const fixedTop = svc.db.messages.changeTop();
+  const last = arrive(DAN, "last live row");
+  const bounded = svc.db.messages.changedSince(mark, fixedTop, 10);
+  assert.equal(bounded.length, 2, "the later message lies outside the fixed window");
+  const pages = [];
+  let after = mark;
+  for (let n = 0; n < 3; n++) {
+    const page = (await call("new_since", { after, limit: 1 })).structuredContent;
+    assert.equal(page.count, 1);
+    assert.equal(page.after, after);
+    assert.equal(page.more, n < 2);
+    assert.equal(page.top, svc.db.messages.changeTop());
+    if (page.more) assert.ok(page.through < page.top);
+    else assert.equal(page.through, page.top);
+    pages.push(page.messages[0]);
+    after = page.through;
+  }
+  assert.equal(pages[0].message_id, first);
+  assert.deepEqual(pages[1], { key: "false_M1", chat_id: ANA, expired: true });
+  assert.equal(pages[2].message_id, last);
+  assert.deepEqual((await call("new_since", { after })).structuredContent.messages, []);
+});
+
+test("folding an expiring duplicate does not tell the consumer to forget the surviving message", async () => {
+  const { svc, call, arrive } = account();
+  const lid = "123456789012345@lid";
+  const phoneCopy = arrive(ANA, "still live", { key: "SAME" });
+  const lidCopy = arrive(lid, "still live", { key: "SAME" });
+  const deadline = Date.now() + MINUTE;
+  svc.db.messages.setExpiry(phoneCopy, deadline);
+  svc.db.messages.setExpiry(lidCopy, deadline);
+  const mark = (await call("new_since", {})).structuredContent.through;
+  await svc.db.learnLidPhone(lid, ANA);
+  assert.equal(svc.db.messages.get(phoneCopy).text, "still live");
+  const page = (await call("new_since", { after: mark })).structuredContent;
+  assert.ok(page.messages.every((row) => row.expired !== true), "the duplicate's removal cannot erase its live twin");
+  assert.equal(page.through, page.top);
+  const all = (await call("new_since", {})).structuredContent.messages;
+  assert.deepEqual(all.map((row) => [row.key, row.text, row.expired]), [["false_SAME", "still live", undefined]]);
+});
+
+for (const retention of [false, true]) {
+  test(`new_since observes disappearing deadlines with retention ${retention ? "on" : "off"}`, async (t) => {
+    const { svc, sock, call, event } = account({ config: { retention } });
+    const start = Math.floor(Date.now() / 1000) * 1000;
+    let now = start;
+    t.mock.method(svc.db.connection, "now", () => now);
+    const raw = { ...event(ANA, "temporary", { at: start }), ephemeralStartTimestamp: start / 1000, ephemeralDuration: 60 };
+    sock.ev.emit("messages.upsert", { type: "notify", messages: [raw] });
+    const first = (await call("new_since", {})).structuredContent;
+    assert.equal(Date.parse(first.messages[0].expires_at), start + 60_000);
+    assert.equal(svc.db.connection.get("SELECT observed_expires_at FROM messages").observed_expires_at, start + 60_000);
+    const stored = svc.db.messages.get(`false_${ANA}_M1`);
+    assert.equal(stored.expiresAt, retention ? start + 60_000 : null, "retention enforcement stays separate");
+    sock.ev.emit("messages.update", [{ key: raw.key, update: { ephemeralDuration: 30 } }]);
+    const changed = (await call("new_since", { after: first.through })).structuredContent;
+    assert.equal(Date.parse(changed.messages[0]?.expires_at), start + 30_000);
+    sock.ev.emit("messages.update", [{ key: raw.key, update: { ephemeralDuration: 30 } }]);
+    assert.deepEqual((await call("new_since", { after: changed.through })).structuredContent.messages, []);
+    now = start + 30_000;
+    assert.deepEqual((await call("new_since", {})).structuredContent.messages, [{ key: "false_M1", chat_id: ANA, expired: true }]);
+    assert.equal(svc.db.messages.get(`false_${ANA}_M1`) !== null, !retention, "ordinary reads still follow retention");
+    await svc.db.messages.clearChat(ANA, now);
+    assert.deepEqual((await call("new_since", { after: changed.through })).structuredContent.messages, [{ key: "false_M1", chat_id: ANA, expired: true }]);
+  });
+}
+
+test("new_since refuses a cursor older than pruned expiry removals and allows a full restart", async (t) => {
+  const { svc, call, arrive } = account();
+  const id = arrive(ANA, "temporary");
+  const first = (await call("new_since", {})).structuredContent;
+  svc.db.messages.setExpiry(id, Date.now() + MINUTE);
+  await svc.db.messages.clearChat(ANA, Date.now() + MINUTE);
+  const removal = (await call("new_since", { after: first.through })).structuredContent;
+  const removedAt = svc.db.connection.get("SELECT max(at) AS at FROM expired_removals").at;
+  t.mock.method(svc.db.connection, "now", () => removedAt + 91 * 86400000);
+  const refused = await call("new_since", { after: first.through });
+  assert.equal(refused.isError, true);
+  const error = JSON.parse(refused.content[0].text);
+  assert.equal(error.error, "CURSOR_EXPIRED");
+  assert.match(error.message, /cursor predates pruned removal records/i);
+  assert.match(error.fix, /after.*0/);
+  assert.equal(svc.db.getMeta("expired_removals_pruned_through"), String(removal.through));
+  const boundary = await call("new_since", { after: removal.through });
+  assert.deepEqual(boundary.structuredContent.messages, []);
+  const restarted = await call("new_since", { after: 0 });
+  assert.equal(restarted.isError, undefined);
+});
+
+test("new_since refuses if removal records are pruned while it learns identities", async (t) => {
+  const { svc, call, arrive } = account();
+  const id = arrive(ANA, "temporary");
+  const mark = (await call("new_since", {})).structuredContent.through;
+  svc.db.messages.setExpiry(id, Date.now() + MINUTE);
+  await svc.db.messages.clearChat(ANA, Date.now() + MINUTE);
+  const learn = svc.identity.learnLidPhones.bind(svc.identity);
+  const removedAt = svc.db.connection.get("SELECT max(at) AS at FROM expired_removals").at;
+  t.mock.method(svc.identity, "learnLidPhones", async (jids) => {
+    t.mock.method(svc.db.connection, "now", () => removedAt + 91 * 86400000);
+    await svc.db.messages.pruneExpiredRemovals();
+    return learn(jids);
+  });
+  const result = await call("new_since", { after: mark });
+  assert.equal(result.isError, true, "cannot advance a cursor over a removal pruned during the call");
+  assert.equal(JSON.parse(result.content[0].text).error, "CURSOR_EXPIRED");
 });

@@ -56,6 +56,7 @@ import {
 import { MESSAGE_TYPES } from "./wa-types.js";
 import type {
   ChatSummary,
+  ExpiredMessageView,
   ContactSummary,
   HandledResult,
   JoinGroupResult,
@@ -147,7 +148,9 @@ const NEW_SINCE_OUTPUT = {
     BROAD_MESSAGE_OUT.extend({
       key: z.string().describe("Upsert by this: message_id changes when a chat's lid pairs with a phone"),
       deleted: z.literal(true).optional().describe("Deleted; no words are left"),
-    }).passthrough()
+      expires_at: z.string().datetime({ offset: true }).optional().describe("Disappearing message deadline"),
+      view_once: z.literal(true).optional(),
+    }).passthrough().or(z.object({ key: z.string(), chat_id: z.string(), expired: z.literal(true) }))
   ),
   sync: z.string(),
   account_id: z.string(),
@@ -787,7 +790,7 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "new_since",
     title: "List WhatsApp messages that arrived or changed",
-    description: `Messages that arrived or changed (edited, deleted, transcript added) after the cursor, in any chat but stories, as they are now: upsert by key, not message_id; a deleted one has deleted: true. A skipped number is normal. Not reported: messages removed locally (clearing, expiry).`,
+    description: `Messages that arrived or changed after the cursor, in any chat but stories, as they are now. Upsert by key; deleted ones have deleted: true, expired ones only key, chat_id and expired: true. Ordinary local clearing is not reported. Skipped numbers are normal.`,
     schema: {
       after: z.number().int().min(0).default(0).describe("through from the previous call; 0 lists all history"),
       limit: z.number().int().min(1).max(200).default(100),
@@ -1661,7 +1664,7 @@ function listTextCap(fullText: boolean | undefined): number | null {
 
 function renderMessages(
   title: string,
-  messages: ReadonlyArray<AnyMessage>,
+  messages: ReadonlyArray<AnyMessage | ExpiredMessageView>,
   labels: Map<string, string> = new Map(),
   note: string | null = null,
   textCap: number | null = LIST_TEXT_CHARS,
@@ -1672,6 +1675,10 @@ function renderMessages(
   if (note) lines.splice(1, 0, note);
   const introduced = new Set<string>();
   for (const m of messages) {
+    if ("expired" in m) {
+      lines.push(`- [expired] key: \`${m.key}\` · chat: \`${m.chat_id}\``);
+      continue;
+    }
     const tags = [
       labels.get(m.message_id) ?? null,
       m.type !== "text" ? m.type : null,

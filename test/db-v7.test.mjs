@@ -2,10 +2,11 @@
  * Schema v7, the order messages changed in (messages.change_seq, read by
  * new_since): the backfill of a file of an earlier version, the triggers that
  * give a message a new number when it is stored and when what a reader sees of
- * it changes, and the read off the index.
+ * it changes, expiry removal records, privacy transitions, and the index read.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { proto } from "baileys";
@@ -31,7 +32,7 @@ function seqs(path) {
 }
 
 const listed = (db, after = 0, top = db.messages.changeTop(), limit = 100) =>
-  db.messages.changedSince(after, top, limit).map((row) => [row.message.keyId, row.seq]);
+  db.messages.changedSince(after, top, limit).map((row) => ["message" in row ? row.message.keyId : row.key.replace(/^(true|false)_/, ""), row.seq]);
 
 test("a v6 file's messages are numbered in stored_seq order, those from before v5 first by id, and what is stored next comes after all of them", () => {
   const path = join(tempDir("wazap-v7-"), "wazap.sqlite");
@@ -67,8 +68,28 @@ test("a v6 file's messages are numbered in stored_seq order, those from before v
 
   const db = AccountDb.open(path, { now: () => T0 + 86_400_000, checkpointDelayMs: 0 });
   assert.equal(db.schemaVersion, SCHEMA_VERSION);
-  assert.ok(SCHEMA_VERSION >= 7);
+  assert.equal(SCHEMA_VERSION, 7);
   assert.equal(db.getMeta("migrated_v7") !== null, true);
+  const copyPath = join(path, "..", "wazap.6.pre-migration.sqlite");
+  assert.ok(existsSync(copyPath));
+  const copy = new (sqlite().DatabaseSync)(copyPath, { readOnly: true });
+  try {
+    assert.equal(copy.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(copy.prepare("SELECT count(*) AS n FROM messages").get().n, 5);
+    assert.ok(!copy.prepare("PRAGMA table_info(messages)").all().some((column) => column.name === "change_seq"));
+  } finally { copy.close(); }
+  const upgraded = new (sqlite().DatabaseSync)(path, { readOnly: true });
+  const fresh = new (sqlite().DatabaseSync)(":memory:");
+  try {
+    for (const migration of MIGRATIONS) fresh.exec(migration.sql);
+    const schema = (sql) => sql.prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name").all();
+    assert.deepEqual(schema(upgraded), schema(fresh), "6 -> 7 creates the full fresh schema, including expiry and privacy triggers");
+    assert.ok(upgraded.prepare("PRAGMA table_info(messages)").all().some((column) => column.name === "observed_expires_at"));
+    assert.deepEqual(upgraded.prepare("SELECT * FROM expired_removals").all(), []);
+  } finally {
+    upgraded.close();
+    fresh.close();
+  }
   const numbered = seqs(path);
   assert.deepEqual(numbered, { old1: 1, old2: 2, tomb: 3, late: 4, last: 5 });
   assert.equal(db.messages.changeTop(), 5);
@@ -145,16 +166,16 @@ test("a number freed by a physical delete is never handed out again", () => {
   db.messages.upsert(textMessage(PEER, "A", T0, "unu"));
   const story = db.messages.upsert(textMessage("status@broadcast", "STORY", T0 + 2000, "poveste", { senderJid: PEER, expiresAt: T0 + 86_400_000 }));
   assert.equal(db.messages.changeTop(), 2);
-  // The feed keeps no tombstone: the delete tombstones the row (number 3) and then removes it.
+  // The feed keeps no tombstone or removal marker; its last change number is still retained.
   db.messages.delete(story.sid);
   assert.equal(idOf(db, story.sid), null);
-  assert.equal(db.messages.changeTop(), 3, "the high-water mark survives the delete");
+  assert.equal(db.messages.changeTop(), 3, "the story deletion preserves its last change number");
   db.messages.upsert(textMessage(PEER, "B", T0 + 3000, "doi"));
   assert.equal(seqs(path).B, 4);
   db.close();
 });
 
-test("the status feed is not listed, nor a row behind a clear barrier or past its deadline", async () => {
+test("the status feed and clear barriers hide messages, while expiry leaves content-free markers", async () => {
   const { db, clock } = openTemp();
   db.messages.upsert(textMessage("status@broadcast", "STORY", T0 + 1000, "poveste", { senderJid: PEER, expiresAt: clock.now + 86_400_000 }));
   db.messages.upsert(textMessage(PEER, "KEPT", T0 + 2000, "rămâne"));
@@ -162,10 +183,13 @@ test("the status feed is not listed, nor a row behind a clear barrier or past it
   db.messages.setExpiry(soon.sid, clock.now + 1000);
   assert.deepEqual(listed(db).map(([key]) => key), ["KEPT", "SOON"]);
   clock.now += 2000;
-  assert.deepEqual(listed(db).map(([key]) => key), ["KEPT"], "expired, even before the sweep ran");
+  assert.deepEqual(listed(db).map(([key]) => key), ["KEPT", "SOON"], "expiry is reported before the sweep runs");
+  assert.deepEqual(db.messages.changedSince(3, db.messages.changeTop(), 10), [
+    { seq: 4, key: "false_SOON", chatJid: PEER, expired: true },
+  ]);
   db.messages.upsert(textMessage(PEER, "BEFORE", T0 + 4000, "înainte de ștergere"));
   await db.messages.clearChat(PEER, T0 + 4500);
-  assert.deepEqual(listed(db), [], "cleared chats are not reported");
+  assert.deepEqual(listed(db).map(([key]) => key), ["SOON"], "clearing an expiring message still reports its removal");
   db.close();
 });
 
@@ -218,15 +242,21 @@ test("a lid chat's pairing gives every message of it its own new number, whichev
   db.close();
 });
 
-test("a message deleted before its deadline is still listed after it; the sweep's own tombstone is not", async () => {
+test("messages past their deadlines list content-free markers before and after the sweep", async () => {
   const { db, clock } = openTemp();
   const early = db.messages.upsert(textMessage(PEER, "EARLY", T0, "va fi șters", { expiresAt: clock.now + 10_000 }));
   db.messages.upsert(textMessage(PEER, "SWEPT", T0 + 1000, "expiră", { expiresAt: clock.now + 10_000 }));
   db.messages.delete(early.sid);
   clock.now += 20_000;
-  assert.deepEqual(listed(db).map(([key]) => key), ["EARLY"], "SWEPT is past its deadline and not yet swept");
+  assert.deepEqual(db.messages.changedSince(0, db.messages.changeTop(), 10), [
+    { seq: 2, key: "false_SWEPT", chatJid: PEER, expired: true },
+    { seq: 3, key: "false_EARLY", chatJid: PEER, expired: true },
+  ], "both are content-free before the sweep");
   await db.messages.expireDue();
-  assert.deepEqual(listed(db).map(([key]) => key), ["EARLY"], "the sweep's tombstone stays hidden, the deletion stays listed");
+  assert.deepEqual(db.messages.changedSince(0, db.messages.changeTop(), 10), [
+    { seq: 3, key: "false_EARLY", chatJid: PEER, expired: true },
+    { seq: 4, key: "false_SWEPT", chatJid: PEER, expired: true },
+  ], "the sweep's tombstone is also a content-free expiry");
   db.close();
 });
 
@@ -313,4 +343,122 @@ test("a quote scrubbed from a row stored without a content hash is a change all 
   const row = reopened.messages.changedSince(before.R, reopened.messages.changeTop(), 10).find((entry) => entry.message.keyId === "R");
   assert.equal(proto.WebMessageInfo.decode(row.message.raw).message.extendedTextMessage.contextInfo.quotedMessage, null);
   reopened.close();
+});
+
+test("v7 expiry changes take exactly one number and no-op writes take none, with recursive triggers enabled", () => {
+  const { db, path, clock } = openTemp();
+  const row = db.messages.upsert(textMessage(PEER, "A", T0, "hello"));
+  db.close();
+  const sql = new (sqlite().DatabaseSync)(path);
+  try {
+    sql.exec("PRAGMA recursive_triggers = ON");
+    let seq = sql.prepare("SELECT change_seq FROM messages").get().change_seq;
+    for (const deadline of [clock.now + 10000, clock.now + 5000, null]) {
+      sql.prepare("UPDATE messages SET expires_at = ? WHERE key_id = 'A'").run(deadline);
+      assert.equal(sql.prepare("SELECT change_seq FROM messages").get().change_seq, ++seq);
+      sql.prepare("UPDATE messages SET expires_at = ? WHERE key_id = 'A'").run(deadline);
+      assert.equal(sql.prepare("SELECT change_seq FROM messages").get().change_seq, seq);
+    }
+    assert.ok(row.sid);
+  } finally { sql.close(); }
+});
+
+
+test("physical expiry removals survive restart, share the counter, and prune after 90 days without reusing numbers", async () => {
+  const { db, path, clock } = openTemp();
+  db.messages.upsert(textMessage(PEER, "A", T0, "secret", { expiresAt: clock.now + 1000 }));
+  db.messages.upsert(textMessage(PEER, "B", T0, "plain"));
+  const before = db.messages.changeTop();
+  db.close();
+  const sql = new (sqlite().DatabaseSync)(path);
+  sql.exec("PRAGMA recursive_triggers = ON; DELETE FROM messages");
+  const records = sql.prepare("SELECT * FROM expired_removals").all();
+  assert.equal(records.length, 1, "only rows with an expiry leave a marker");
+  assert.equal(records[0].key, "false_A");
+  assert.equal(records[0].chat_id, PEER);
+  assert.ok(records[0].change_seq > before);
+  assert.deepEqual(Object.keys(records[0]).sort(), ["at", "change_seq", "chat_id", "key"]);
+  const removedSeq = records[0].change_seq;
+  const at = records[0].at;
+  sql.close();
+  const reopened = AccountDb.open(path, { now: () => clock.now, checkpointDelayMs: 0 });
+  try {
+    assert.equal(reopened.messages.changeTop(), removedSeq);
+    assert.equal(reopened.messages.changedSince(before, removedSeq, 10).length, 1);
+    clock.now = at + 90 * 86400000;
+    await reopened.messages.expireDue();
+    assert.equal(reopened.messages.changedSince(before, removedSeq, 10).length, 1, "exactly 90 days is retained");
+    clock.now++;
+    await reopened.messages.expireDue();
+    assert.deepEqual(reopened.messages.changedSince(before, removedSeq, 10), []);
+    reopened.messages.upsert(textMessage(PEER, "C", T0, "new"));
+    assert.ok(reopened.messages.changeTop() > removedSeq);
+  } finally { reopened.close(); }
+});
+
+test("observed expiry changes take one number and no-op writes take none", () => {
+  const { db, path } = openTemp();
+  db.messages.upsert(textMessage(PEER, "A", T0, "hello"));
+  db.close();
+  const sql = new (sqlite().DatabaseSync)(path);
+  try {
+    sql.exec("PRAGMA recursive_triggers = ON");
+    let seq = sql.prepare("SELECT change_seq FROM messages").get().change_seq;
+    for (const deadline of [T0 + 10000, T0 + 5000, null]) {
+      sql.prepare("UPDATE messages SET observed_expires_at = ?").run(deadline);
+      assert.equal(sql.prepare("SELECT change_seq FROM messages").get().change_seq, ++seq);
+      sql.prepare("UPDATE messages SET observed_expires_at = ?").run(deadline);
+      assert.equal(sql.prepare("SELECT change_seq FROM messages").get().change_seq, seq);
+    }
+  } finally { sql.close(); }
+});
+
+test("physical story deletes never create expiry removal records", async () => {
+  const { db, path, clock } = openTemp();
+  db.messages.upsert(textMessage("status@broadcast", "STORY", T0, "story", { expiresAt: clock.now + 1000 }));
+  db.close();
+  const sql = new (sqlite().DatabaseSync)(path);
+  try {
+    assert.equal(sql.prepare("SELECT count(*) AS n FROM messages").get().n, 1);
+    sql.exec("DELETE FROM messages");
+    assert.deepEqual(sql.prepare("SELECT * FROM expired_removals").all(), []);
+  } finally { sql.close(); }
+});
+
+test("every V7 allocation includes removal records in the counter's top", () => {
+  const { db, path } = openTemp();
+  db.messages.upsert(textMessage(PEER, "A", T0, "hello"));
+  db.close();
+  const sql = new (sqlite().DatabaseSync)(path);
+  try {
+    sql.prepare("INSERT INTO expired_removals VALUES (100, 'false_gone', ?, ?)").run(PEER, T0);
+    sql.exec("UPDATE messages SET text = 'edited'");
+    assert.equal(sql.prepare("SELECT change_seq FROM messages").get().change_seq, 101);
+    sql.exec("UPDATE messages SET change_seq = 1; DELETE FROM meta WHERE key = 'change_seq_high';");
+  } finally { sql.close(); }
+  const reopened = AccountDb.open(path, { now: () => T0, checkpointDelayMs: 0 });
+  try {
+    assert.equal(reopened.messages.changeTop(), 100);
+    reopened.messages.upsert(textMessage(PEER, "B", T0, "new"));
+    assert.equal(reopened.messages.changeTop(), 101);
+  } finally { reopened.close(); }
+});
+
+test("folding duplicate messages preserves the earliest observed expiry, including tombstones", async () => {
+  for (const tombstone of [null, "phone", "lid"]) {
+    const { db, clock } = openTemp();
+    try {
+      const phone = db.messages.upsert(textMessage(PEER, "SAME", T0, "secret", { observedExpiresAt: clock.now + 60_000 }));
+      const lid = db.messages.upsert(textMessage(PEER_LID, "SAME", T0, "secret", { observedExpiresAt: clock.now + 30_000 }));
+      if (tombstone !== null) db.messages.delete(tombstone === "phone" ? phone.sid : lid.sid);
+      await db.learnLidPhone(PEER_LID, PEER);
+      clock.now += 30_000;
+      assert.deepEqual(db.messages.changedSince(0, db.messages.changeTop(), 10).map(({ seq: _seq, ...row }) => row),
+        [{ key: "false_SAME", chatJid: PEER, expired: true }], `deadline survives the ${tombstone ?? "live"} fold`);
+      const through = db.messages.changeTop();
+      await db.messages.clearChat(PEER, clock.now);
+      assert.deepEqual(db.messages.changedSince(through, db.messages.changeTop(), 10).map(({ seq: _seq, ...row }) => row),
+        [{ key: "false_SAME", chatJid: PEER, expired: true }], "later physical clear still reports the removal");
+    } finally { db.close(); }
+  }
 });

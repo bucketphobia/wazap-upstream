@@ -16,9 +16,9 @@
  *   its words (withoutWords), marked `private`; waiting on a chat, theirs or a
  *   group's, names it;
  * - new_since keeps what arrived or changed from them without its words
- *   (withoutWords), marked `private`, a deleted one too. A change of tag is not
- *   a change of a message and lists nothing again: a consumer syncs from 0
- *   after it;
+ *   (withoutWords), marked `private`, a deleted one too. Changing the tag
+ *   re-lists their sender rows and direct chat; other accounts' private JIDs
+ *   are reconciled before the next window;
  * - list_chats keeps the last message of their chat, or theirs in a group,
  *   without its words, marked `private`;
  * - read_messages on "status" keeps their stories without text, caption or

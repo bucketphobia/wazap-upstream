@@ -233,8 +233,9 @@ export class AccountIngest {
     const raw = this.views.rawOf(stored);
     if (raw === null) return;
     const merged = { ...raw, ...update, key: raw.key } as WAMessage;
+    const deadline = messageExpiry(merged);
+    if (deadline !== undefined) db.messages.observeExpiry(stored.sid, deadline);
     if (this.config.retention === true) {
-      const deadline = messageExpiry(merged);
       if (deadline !== undefined && db.messages.setExpiry(stored.sid, deadline)) this.storage.armExpiry();
       if (db.messages.get(stored.sid) === null) {
         this.storage.armExpiry();
@@ -582,6 +583,7 @@ export class AccountIngest {
       quotedSid: quotedMessageId(raw, { canonical: (jid) => this.identity.canonical(jid), ownId: this.identity.ownJid(), chatId: chatJid }) ?? null,
       status: fromMe && typeof raw.status === "number" ? raw.status : null,
       expiresAt,
+      observedExpiresAt: messageExpiry(raw) ?? null,
       flags: this.flagsOf(raw, fromMe, keyId, chatJid),
     };
     return { input, raw };

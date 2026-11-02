@@ -924,12 +924,13 @@ CREATE INDEX reminders_state ON reminders(state, updated_at);
 // ---- end v6 ----------------------------------------------------------------
 
 // ---- v7: the order messages changed in (new_since) -------------------------
-// Self-contained: one column, its index, and the triggers that keep it. A
-// file upgraded from an earlier version numbers every message it holds at once.
-/** The change_seq a write takes: one past every one handed out, off the messages_changed index and the delete record. */
+// Expiry and privacy tracking are part of this migration.
+// An upgrade numbers every message it holds at once.
+/** One past every number handed out, including retained physical removals. */
 const CHANGE_SEQ_HIGH = `max(
   coalesce((SELECT change_seq FROM messages INDEXED BY messages_changed WHERE change_seq IS NOT NULL ORDER BY change_seq DESC LIMIT 1), 0),
-  coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'change_seq_high'), 0))`;
+  coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'change_seq_high'), 0),
+  coalesce((SELECT max(change_seq) FROM expired_removals), 0))`;
 export const NEXT_CHANGE_SEQ = `(${CHANGE_SEQ_HIGH} + 1)`;
 /**
  * - messages.change_seq: one past the highest ever handed out (a physical
@@ -942,9 +943,11 @@ export const NEXT_CHANGE_SEQ = `(${CHANGE_SEQ_HIGH} + 1)`;
  *   or folded into another, because the message's id is spelled with the chat
  *   it reads as. A write that stores the same values again takes none.
  *   Reactions, votes, receipts, delivery status, a sender newly known and a
- *   change of tags do not move it. new_since lists what lies past a number, so
- *   a consumer sees each arrival and each change once.
- *   A physical delete (a cleared chat, expiry, a purge) leaves no row to list.
+ *   change of non-private tags do not move it. new_since lists what lies past
+ *   a number, so a consumer sees each arrival and each change once.
+ *   Expiry deadlines and private-tag transitions also take new numbers.
+ *   A physical delete with an expiry leaves a content-free expired_removals
+ *   record (number, direction/key, chat JID and time), retained for 90 days.
  *   The triggers cover every write path; change_seq is not in their column
  *   list, so the numbering never re-fires them.
  *   The backfill orders what a file already held by stored_seq (null, from
@@ -962,6 +965,7 @@ export const NEXT_CHANGE_SEQ = `(${CHANGE_SEQ_HIGH} + 1)`;
 const V7 = `
 ALTER TABLE messages ADD COLUMN change_seq INTEGER;
 ALTER TABLE messages ADD COLUMN content_hash TEXT;
+ALTER TABLE messages ADD COLUMN observed_expires_at INTEGER;
 
 UPDATE messages SET change_seq = numbered.n
 FROM (SELECT id, row_number() OVER (ORDER BY coalesce(stored_seq, 0), id) AS n FROM messages) AS numbered
@@ -969,30 +973,13 @@ WHERE messages.id = numbered.id;
 
 CREATE INDEX messages_changed ON messages(change_seq, chat_id) WHERE change_seq IS NOT NULL;
 
-CREATE TRIGGER messages_change_insert AFTER INSERT ON messages
-BEGIN
-  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
-END;
-
-CREATE TRIGGER messages_change_update AFTER UPDATE OF text, transcript, transcript_info, edited_at, deleted_at, type, content_hash, quoted_sid, chat_id ON messages
-WHEN old.text IS NOT new.text OR old.transcript IS NOT new.transcript OR old.transcript_info IS NOT new.transcript_info
-  OR old.edited_at IS NOT new.edited_at OR old.deleted_at IS NOT new.deleted_at OR old.type IS NOT new.type
-  OR (old.content_hash IS NOT NULL AND old.content_hash IS NOT new.content_hash)
-  OR old.quoted_sid IS NOT new.quoted_sid OR old.chat_id IS NOT new.chat_id
-BEGIN
-  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
-END;
-
--- A message's id is spelled with the chat it reads as, so a chat renamed to a
--- number or folded into another changes the id of every message in it: each
--- takes its own new number, in id order.
-CREATE TRIGGER chats_change_move AFTER UPDATE OF jid, merged_into ON chats
-WHEN old.jid IS NOT new.jid OR old.merged_into IS NOT new.merged_into
-BEGIN
-  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
-  FROM (SELECT id, row_number() OVER (ORDER BY id) AS n FROM messages WHERE chat_id = new.id) AS numbered
-  WHERE messages.id = numbered.id;
-END;
+CREATE TABLE expired_removals(
+  change_seq INTEGER PRIMARY KEY,
+  key TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX expired_removals_at ON expired_removals(at);
 
 -- A physical delete of the newest changed message keeps its number.
 CREATE TRIGGER messages_change_high AFTER DELETE ON messages
@@ -1001,6 +988,96 @@ WHEN old.change_seq IS NOT NULL AND old.change_seq > coalesce((
 BEGIN
   INSERT INTO meta(key, value) VALUES ('change_seq_high', CAST(old.change_seq AS TEXT))
   ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER);
+END;
+
+CREATE TRIGGER messages_expired_removal AFTER DELETE ON messages
+WHEN (old.expires_at IS NOT NULL OR old.observed_expires_at IS NOT NULL)
+  AND (SELECT kind FROM chats WHERE id = old.chat_id) <> 'status'
+BEGIN
+  -- Preserve the deleted row's number before taking the next, regardless of trigger order.
+  INSERT INTO meta(key, value) VALUES ('change_seq_high', CAST(coalesce(old.change_seq, 0) AS TEXT))
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER);
+  INSERT INTO expired_removals(change_seq, key, chat_id, at)
+  SELECT ${NEXT_CHANGE_SEQ}, CASE old.from_me WHEN 1 THEN 'true_' ELSE 'false_' END || old.key_id,
+    coalesce(ck.jid, c.jid), CAST(unixepoch('subsec') * 1000 AS INTEGER)
+  FROM chats c LEFT JOIN chats ck ON ck.id = c.merged_into WHERE c.id = old.chat_id;
+  INSERT INTO meta(key, value) SELECT 'change_seq_high', CAST(max(change_seq) AS TEXT) FROM expired_removals WHERE true
+  ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER);
+END;
+
+CREATE TRIGGER messages_change_insert AFTER INSERT ON messages
+BEGIN
+  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
+END;
+
+CREATE TRIGGER chats_change_move AFTER UPDATE OF jid, merged_into ON chats
+WHEN old.jid IS NOT new.jid OR old.merged_into IS NOT new.merged_into
+BEGIN
+  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
+  FROM (SELECT id, row_number() OVER (ORDER BY id) AS n FROM messages WHERE chat_id = new.id) AS numbered
+  WHERE messages.id = numbered.id;
+END;
+
+CREATE TRIGGER messages_change_update AFTER UPDATE OF text, transcript, transcript_info, edited_at, deleted_at, type, content_hash, quoted_sid, chat_id, expires_at, observed_expires_at ON messages
+WHEN old.text IS NOT new.text OR old.transcript IS NOT new.transcript OR old.transcript_info IS NOT new.transcript_info
+  OR old.edited_at IS NOT new.edited_at OR old.deleted_at IS NOT new.deleted_at OR old.type IS NOT new.type
+  OR (old.content_hash IS NOT NULL AND old.content_hash IS NOT new.content_hash)
+  OR old.quoted_sid IS NOT new.quoted_sid OR old.chat_id IS NOT new.chat_id
+  OR old.expires_at IS NOT new.expires_at OR old.observed_expires_at IS NOT new.observed_expires_at
+BEGIN
+  UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = new.id;
+END;
+
+CREATE TRIGGER contact_notes_change_insert AFTER INSERT ON contact_notes
+WHEN EXISTS (SELECT 1 FROM json_each(new.tags) WHERE value = 'private')
+BEGIN
+  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
+  FROM (
+    SELECT m.id, row_number() OVER (ORDER BY m.id) AS n FROM messages m
+    WHERE m.sender_id IN (
+      SELECT id FROM contacts WHERE coalesce(merged_into, id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = new.contact_id)
+    ) OR m.chat_id IN (
+      SELECT c.id FROM chats c JOIN contacts k ON k.id = c.contact_id
+      WHERE c.kind = 'direct' AND coalesce(k.merged_into, k.id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = new.contact_id)
+    )
+  ) AS numbered WHERE messages.id = numbered.id;
+END;
+
+CREATE TRIGGER contact_notes_change_update AFTER UPDATE OF tags ON contact_notes
+WHEN EXISTS (SELECT 1 FROM json_each(old.tags) WHERE value = 'private')
+  IS NOT EXISTS (SELECT 1 FROM json_each(new.tags) WHERE value = 'private')
+BEGIN
+  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
+  FROM (
+    SELECT m.id, row_number() OVER (ORDER BY m.id) AS n FROM messages m
+    WHERE m.sender_id IN (
+      SELECT id FROM contacts WHERE coalesce(merged_into, id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = new.contact_id)
+    ) OR m.chat_id IN (
+      SELECT c.id FROM chats c JOIN contacts k ON k.id = c.contact_id
+      WHERE c.kind = 'direct' AND coalesce(k.merged_into, k.id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = new.contact_id)
+    )
+  ) AS numbered WHERE messages.id = numbered.id;
+END;
+
+CREATE TRIGGER contact_notes_change_delete AFTER DELETE ON contact_notes
+WHEN EXISTS (SELECT 1 FROM json_each(old.tags) WHERE value = 'private')
+BEGIN
+  UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_HIGH}) + numbered.n
+  FROM (
+    SELECT m.id, row_number() OVER (ORDER BY m.id) AS n FROM messages m
+    WHERE m.sender_id IN (
+      SELECT id FROM contacts WHERE coalesce(merged_into, id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = old.contact_id)
+    ) OR m.chat_id IN (
+      SELECT c.id FROM chats c JOIN contacts k ON k.id = c.contact_id
+      WHERE c.kind = 'direct' AND coalesce(k.merged_into, k.id) =
+        (SELECT coalesce(merged_into, id) FROM contacts WHERE id = old.contact_id)
+    )
+  ) AS numbered WHERE messages.id = numbered.id;
 END;
 
 INSERT OR REPLACE INTO meta(key, value) VALUES ('change_epoch', lower(hex(randomblob(8))));

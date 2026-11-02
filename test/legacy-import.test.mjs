@@ -495,3 +495,43 @@ test("verification names the keys of a difference nothing explains", async () =>
     db.close();
   }
 });
+
+test("retention-off legacy import observes raw, beta and recall-only deadlines without enforcing them", async () => {
+  const fx = await buildLegacyAccount();
+  const metaPath = join(fx.paths.root, "recall", "meta.jsonl");
+  const lines = readFileSync(metaPath, "utf8").split("\n").map((line) => {
+    try {
+      const row = JSON.parse(line);
+      return row.sid === r.indexOnly ? JSON.stringify({ ...row, expiresAt: fx.now - 1000 }) : line;
+    } catch { return line; }
+  });
+  writeFileSync(metaPath, lines.join("\n"));
+  const beta = new (sqlite().DatabaseSync)(join(fx.dataDir, "archive.sqlite"));
+  beta.prepare("UPDATE messages SET expires = ? WHERE keyid = 'VO1'").run(fx.now - 1000);
+  beta.close();
+  const db = openDb(fx);
+  try {
+    await run(fx, db, { verify: false });
+    const rows = db.messages.changedSince(0, db.messages.changeTop(), 100);
+    const ephemeral = rows.find((row) => row.message?.sid === r.ephemeral)?.message;
+    assert.equal(ephemeral.expiresAt, ephemeral.ts + 7 * 86_400_000);
+    for (const key of ["false_E2", "false_VO1", "false_IDX1"]) {
+      assert.ok(rows.some((row) => row.key === key && row.expired), `${key} must be content-free`);
+    }
+    for (const sid of [r.ephemeral, r.expired, r.betaViewOnce, r.indexOnly]) {
+      assert.equal(db.messages.get(sid).expiresAt, null, "ordinary reads do not enforce observed deadlines");
+    }
+  } finally { db.close(); }
+});
+
+test("a malformed beta deadline is still rejected with retention on", async () => {
+  const fx = await buildLegacyAccount({ retention: true });
+  const beta = new (sqlite().DatabaseSync)(join(fx.dataDir, "archive.sqlite"));
+  beta.prepare("UPDATE messages SET expires = ? WHERE keyid = 'VO1'").run(fx.now + 0.5);
+  beta.close();
+  const db = openDb(fx);
+  try {
+    await assert.rejects(run(fx, db, { verify: false, retention: true }), { code: "INVALID_INPUT" });
+    assert.equal(db.messages.get(r.betaViewOnce), null, "invalid expiry cannot become an indefinitely retained row");
+  } finally { db.close(); }
+});

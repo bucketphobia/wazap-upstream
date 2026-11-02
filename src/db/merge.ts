@@ -382,13 +382,20 @@ export class Merger {
     type Twin = {
       id: number; type: string; quoted_sid: string | null; quoted_from_me: number | null; quoted_key_id: string | null;
       status: number | null; edited_at: number | null;
-      expires_at: number | null; deleted_at: number | null; sender_id: number | null;
+      expires_at: number | null; observed_expires_at: number | null; deleted_at: number | null; sender_id: number | null;
       text: string | null; transcript: string | null; transcript_info: string | null; raw: Uint8Array | null; content_hash: string | null; flags: number;
     };
     const columns =
-      "id, type, quoted_sid, quoted_from_me, quoted_key_id, status, edited_at, expires_at, deleted_at, sender_id, text, transcript, transcript_info, raw, content_hash, flags";
+      "id, type, quoted_sid, quoted_from_me, quoted_key_id, status, edited_at, expires_at, observed_expires_at, deleted_at, sender_id, text, transcript, transcript_info, raw, content_hash, flags";
     const keep = this.c.get<Twin>(`SELECT ${columns} FROM messages WHERE id = ?`, keepId)!;
     const drop = this.c.get<Twin>(`SELECT ${columns} FROM messages WHERE id = ?`, dropId)!;
+
+    if (drop.observed_expires_at !== null) {
+      this.c.run(
+        "UPDATE messages SET observed_expires_at = ? WHERE id = ? AND (observed_expires_at IS NULL OR observed_expires_at > ?)",
+        drop.observed_expires_at, keepId, drop.observed_expires_at
+      );
+    }
 
     if (keep.deleted_at !== null || drop.deleted_at !== null) {
       if (keep.deleted_at === null) report.mediaPaths.push(...this.messages.tombstone(keepId, drop.deleted_at!));

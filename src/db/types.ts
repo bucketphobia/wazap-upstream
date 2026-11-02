@@ -96,6 +96,8 @@ export interface MessageInput {
   editedAt?: number | null;
   /** Absolute deadline; it can only ever move earlier. */
   expiresAt?: number | null;
+  /** Observed disappearing deadline, independent of retention enforcement. */
+  observedExpiresAt?: number | null;
   /**
    * MESSAGE_FLAGS bits the message carries (mentions_me, via_wazap). A stored
    * message only gains bits; via_wazap is also set by the database itself
