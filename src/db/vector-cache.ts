@@ -197,9 +197,10 @@ export class VectorCache {
       if (this.closed || this.blocked || this.working || this.warming !== null || this.c.db.isTransaction) return;
       if (this.state === "recovering") {
         if (Date.now() < this.retryAt) return;
-        // A write from another connection is not the cache's fault: fail() gives this attempt back if that is the cause.
-        if (this.reason !== "external_change") this.recoveries++;
-        this.attempting = true;
+        // A write from another connection is not the cache's fault: it spends no attempt, and fail() gives back
+        // a counted one it ends. An attempt after an external change was never counted, so it has none to give back.
+        this.attempting = this.reason !== "external_change";
+        if (this.attempting) this.recoveries++;
         this.state = "cold";
         void this.warm(this.model, this.dimensions);
       } else if (

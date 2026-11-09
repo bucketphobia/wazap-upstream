@@ -232,5 +232,12 @@ test("the worker path is taken only for an unfiltered search, whatever the filte
   };
   const future = { ...input, future: true };
   assert.deepEqual(await db.vectors.hybridAsync(future), db.vectors.hybrid(future));
+  // One that leaves `where` alone and only moves the id range steps aside too.
+  search.resolveFilter = (filter) => {
+    const resolved = resolve(filter);
+    return resolved === null || !filter.ranged ? resolved : { ...resolved, upper: resolved.upper - 1 };
+  };
+  const ranged = { ...input, ranged: true };
+  assert.deepEqual(await db.vectors.hybridAsync(ranged), db.vectors.hybrid(ranged));
   assert.equal(ranks.length, 1, "filtered searches never reach the worker pool");
 });

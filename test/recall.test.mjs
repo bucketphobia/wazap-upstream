@@ -1183,7 +1183,7 @@ test("recall cache is opt-in: unset keeps the SQLite path with no cache or worke
     await svc.recallIdle();
     await svc.db.vectors.warmCache(MODEL, DIMS);
     const result = await svc.recall("factura", undefined, 5);
-    assert.equal(result.data.index.cache.state, "disabled");
+    assert.equal("cache" in result.data.index, false, "a default install reports no cache");
     assert.equal(svc.db.vectors.cache, null);
     assert.ok(result.data.hits.length > 0);
   } finally { await svc.stop(); stub.server.close(); }

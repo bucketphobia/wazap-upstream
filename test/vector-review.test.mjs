@@ -329,6 +329,45 @@ test("an external change during the last recovery attempt does not end the cache
   assert.equal(cache.status().recoveries, 2);
 });
 
+test("external changes in a row after real failures give back only the attempt that was counted", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  const allocate = cache.allocate.bind(cache);
+  let broken = true;
+  cache.allocate = async (...args) => {
+    if (broken) throw new Error("synthetic warm failure");
+    return allocate(...args);
+  };
+  cache.fail(new Error("worker_failure"));
+  for (let i = 0; i < 2; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.status().recoveries, 2);
+  broken = false;
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  for (let i = 0; i < 3; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+    assert.equal(cache.status().reason, "external_change");
+    assert.equal(cache.status().recoveries, 2, `external change ${i + 1} leaves the spent attempts spent`);
+  }
+  broken = true;
+  delete cache.dataVersion;
+  // The attempt after an external change is free; the one after a real failure is the third counted.
+  for (let i = 0; i < 2; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.status().state, "failed", "a third counted failure still ends the cache");
+  assert.equal(cache.status().recoveries, 3);
+});
+
 test("a permanently blocked cache drops its tracking and never queries it again", async (t) => {
   const { cache, raw } = rawFixture(t, 2);
   assert.equal(trackingNames(raw).length, 4);

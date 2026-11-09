@@ -13,7 +13,7 @@
  */
 import { createHash } from "node:crypto";
 import { log } from "../logger.js";
-import { VectorCache, cacheLimitBytes } from "./vector-cache.js";
+import { VectorCache, cacheLimitBytes, type VectorCacheStatus } from "./vector-cache.js";
 import type { Connection } from "./connection.js";
 import { StorageError } from "./errors.js";
 import { secondOf, secondOfId } from "./ids.js";
@@ -308,7 +308,8 @@ export class Vectors {
   ) {}
 
   private cache: VectorCache | null = null;
-  private cacheEnabled = cacheLimitBytes() > 0;
+  private readonly cacheOptIn = cacheLimitBytes() > 0;
+  private cacheEnabled = this.cacheOptIn;
 
   /** Loads in small batches; searches use SQLite until the cache is ready. */
   async warmCache(model: string, dimensions?: number): Promise<void> {
@@ -324,7 +325,9 @@ export class Vectors {
     await this.cache.warm(model, dimensions);
   }
 
-  cacheStatus() {
+  /** Undefined unless WAZAP_RECALL_CACHE_MAX_MB opts in, so a default install reports nothing new. */
+  cacheStatus(): VectorCacheStatus | undefined {
+    if (!this.cacheOptIn) return undefined;
     return (
       this.cache?.status() ?? {
         state: this.cacheEnabled ? ("cold" as const) : ("disabled" as const),
@@ -348,9 +351,14 @@ export class Vectors {
     if (cache === null || !cache.ready(input.model, input.vector?.length)) return this.hybrid(input);
     // The workers scan every embedding: any filter at all, even one added later, stays on SQLite.
     const filter = this.search.resolveFilter(input);
+    const none = this.search.resolveFilter({})!;
     if (
       filter === null ||
-      filter.where !== this.search.resolveFilter({})!.where ||
+      filter.where !== none.where ||
+      filter.lower !== none.lower ||
+      filter.upper !== none.upper ||
+      filter.params.length !== none.params.length ||
+      filter.narrowsRows ||
       this.c.db.isTransaction ||
       this.messages.purgePending()
     ) {
