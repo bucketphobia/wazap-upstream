@@ -337,7 +337,9 @@ test("a restriction that ends on its own clock is told when it ends, without any
   capped.noteNewChatCap({ capping_status: "CAPPED", cycle_end_timestamp: String((Date.now() + 40) / 1000) });
   assert.deepEqual(told, ["timelock", "cap"]);
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.deepEqual(told, ["timelock", "cap", "timelock", "cap"], "each lift reached onChange by itself");
+  // Two accounts, two timers: which runs out first is not a promise. Each reads the clock for
+  // itself, so a millisecond turning between the two reads leaves one a millisecond shorter.
+  assert.deepEqual(told.slice(2).sort(), ["cap", "timelock"], "each lift reached onChange by itself");
 });
 
 test("a change in health is a connection event only while linked", async (t) => {
