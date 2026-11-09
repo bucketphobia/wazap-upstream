@@ -7,16 +7,24 @@ import { type AccountDb, type MessageInput, normalizeJid, sidOf } from "../db/in
 import { openScratch } from "./scratch.js";
 import { openIosSource, IosSourceError } from "./source.js";
 import type { SQLInputValue } from "../db/sqlite.js";
-import { classifyFailure, transcribeFile, type TranscribeSettings, type Transcript } from "../transcribe/index.js";
+import {
+  classifyFailure,
+  PROVIDERS,
+  transcribeFile,
+  type Failure,
+  type TranscribeSettings,
+  type Transcript,
+} from "../transcribe/index.js";
+import { ANSWER_UNREADABLE, FILE_UNREADABLE, TIMED_OUT } from "../transcribe/openai.js";
 import { WazapError } from "../errors.js";
 import { log } from "../logger.js";
 import { authorizeIosArchive, IOS_BARRIER, type Stamp } from "./binding.js";
 
 export const IOS_META = "ios_import_v1";
 export const IOS_ERROR = "ios_import_error";
-export const IOS_VOICE_TARGETS = "ios_voice_targets_v1";
 /** Imported rows carry no expiry, so strict retention cannot be honoured. */
 export const IOS_RETENTION_REFUSED = "iPhone import cannot honour WAZAP_RETENTION=1: imported messages would never expire.";
+export const IOS_CHECKPOINT_UNSUPPORTED = "The saved iPhone import progress is in an unsupported format.";
 const TYPES: Record<number, string> = {
   0: "text",
   7: "text",
@@ -55,11 +63,22 @@ function boundedReport(report: IosReport): IosReport {
     skippedByType: boundedTypeCounts(report.skippedByType),
   };
 }
+/** A note that fails for its own sake is tried this many times (once per run), then stored as failed. */
+const NOTE_ATTEMPTS = 3;
+/**
+ * Archive type 3 may hold audio files as well as voice notes, and the archive says which only by length.
+ * An API provider gets notes of at most this long (the rule of AUTO_TRANSCRIBE_MAX_SECONDS in service/voice.ts).
+ */
+const API_MAX_SECONDS = 600;
+/** Notes the first part of a run may fail for their own sake before the run is taken to be broken, not the notes. */
+const BROKEN_RUN_FAULTS = 3;
+/** Runs in a row that stop that way before the notes, not the host, are taken to be the cause. */
+const BROKEN_RUNS = 3;
 const EPOCH = Date.UTC(2001, 0, 1);
 const SELECT = `SELECT m.Z_PK pk,m.ZMESSAGETYPE nativeType,m.ZISFROMME fromMe,m.ZSTANZAID keyId,
  m.ZMESSAGEDATE date,m.ZTEXT text,m.ZPARENTMESSAGE parent,
  c.ZCONTACTJID chat,c.ZGROUPINFO groupInfo,c.ZPARTNERNAME name,g.ZMEMBERJID sender,
- NULL caption,NULL mediaPath
+ NULL caption,NULL mediaPath,NULL duration
  FROM ZWAMESSAGE m LEFT JOIN ZWACHATSESSION c ON c.Z_PK=m.ZCHATSESSION
  LEFT JOIN ZWAGROUPMEMBER g ON g.Z_PK=m.ZGROUPMEMBER
 `;
@@ -77,6 +96,7 @@ interface Row {
   sender: string | null;
   caption: string | null;
   mediaPath: string | null;
+  duration: number | null;
 }
 export interface IosReport {
   state: "rows" | "replies" | "voice" | "done";
@@ -94,21 +114,18 @@ interface Progress {
   hash: string;
   last: number;
   report: IosReport;
-  replies?: Array<{ child: string; parent: number; id?: number }>;
-  /** Legacy canonical-SID keys cannot prove exclusions after an identity fold. */
-  voiceFailures?: Record<string, string>;
-  voiceFailureRows?: Record<string, string>;
-  collisionRows?: number[];
   /** Original target bindings were captured from the first text chunk. */
-  voiceBindings?: 1 | 2;
+  voiceBindings?: 2;
   format?: 2;
   generation?: string;
   replyCursor?: string;
   voiceTerminalFailures?: number;
   /** Source file stamp; a finished import with the same stamp is not hashed again. */
   stamp?: Stamp;
-  /** The voice pass ran to its end; a later run does not repeat it (--reset does). */
-  voicePass?: true;
+  /** The voice pass ran to its end; a later run does not repeat it (--reset does). A background pass does not stand for an explicit one. */
+  voicePass?: true | "background";
+  /** Consecutive runs that stopped on three held failures with no success; the third and later charge them. */
+  heldRuns?: number;
 }
 export function readIosReport(db: Pick<AccountDb, "getMeta">): IosReport | null {
   const raw = db.getMeta(IOS_META);
@@ -128,6 +145,8 @@ export interface IosArgs {
   background?: boolean;
   skipFile?: string;
   settings?: TranscribeSettings;
+  /** An explicit run with an API provider tells its caller what it will send, once, before the first upload. */
+  announce?: (notes: number, provider: string) => void;
   /** WAZAP_RETENTION: the importer stores no expiry, so it refuses to run at all. */
   retention?: boolean;
   signal?: AbortSignal;
@@ -233,6 +252,14 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
   if (!validJid(owner)) fail("Link the target account before importing an iPhone archive.");
   if (args.reset && !args.explicit) fail("An archive reset requires explicit selection.");
   if (args.retention) fail(IOS_RETENTION_REFUSED);
+  // A folder drop never sends archive voice to an API provider: only `wazap import ios --media` does.
+  const api = args.settings?.provider != null && PROVIDERS[args.settings.provider].kind === "api";
+  const apiBackground = args.background === true && api;
+  // Whisper crashing or timing out belongs to the note; an API busy or unreachable belongs to the provider.
+  // An API that times out on a note is both: the note is charged and the pass stops, so it is not re-sent at once.
+  const apiTimeout = (failure: Failure) => api && failure.kind === "transient" && failure.reason === TIMED_OUT;
+  const noteFault = (failure: Failure) =>
+    failure.kind === "transient" && (!api || failure.reason === ANSWER_UNREADABLE || failure.reason === FILE_UNREADABLE || apiTimeout(failure));
   // Validate schema and snapshot before authorization or destructive progress changes.
   const sourceHandle = openIosSource(args.source);
   let scratch: ReturnType<typeof openScratch> | undefined;
@@ -254,7 +281,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         };
       },
     };
-    let progress = args.dryRun || args.reset ? null : (JSON.parse(db.getMeta(IOS_META) ?? "null") as Progress | null);
+    const progress = args.dryRun || args.reset ? null : (JSON.parse(db.getMeta(IOS_META) ?? "null") as Progress | null);
     const authorization = await authorizeIosArchive({
       db,
       source: args.source,
@@ -262,7 +289,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       reselect: args.reset,
       dryRun: args.dryRun,
       savedHash: progress?.hash ?? null,
-      savedStamp: progress?.report.state === "done" ? progress.stamp : null,
+      savedStamp: progress?.report.state === "done" || progress?.report.state === "voice" ? progress.stamp : null,
       signal: args.signal,
       stopping: args.stopping,
     });
@@ -281,12 +308,18 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       check();
     };
     check();
+    // No release wrote another format, so an unknown checkpoint cannot prove what it owns: reset or nothing.
+    if (progress !== null && progress.format !== 2)
+      throw new WazapError(
+        "INVALID_ID",
+        IOS_CHECKPOINT_UNSUPPORTED,
+        "Run wazap import ios <ChatStorage.sqlite> --reset after confirming the archive belongs to the linked account."
+      );
     if (args.reset && !args.dryRun) {
       guard();
       db.transaction(() => {
         db.setMeta(IOS_META, null);
         db.setMeta(IOS_ERROR, null);
-        db.setMeta(IOS_VOICE_TARGETS, null);
         db.setMeta(IOS_BARRIER, null);
       });
       // Only importer-owned pages are removed, in bounded transactions.
@@ -318,8 +351,9 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
     const prefix = `ios_import_v2:${generation}:`;
     let last = progress?.last ?? 0;
     let replyCursor = progress?.replyCursor ?? "";
-    let voiceTerminalFailures = progress?.voiceTerminalFailures ?? Object.keys(progress?.voiceFailureRows ?? {}).length;
-    let voicePass = progress?.voicePass === true;
+    let voiceTerminalFailures = progress?.voiceTerminalFailures ?? 0;
+    let voicePass = progress?.voicePass;
+    let heldRuns = progress?.heldRuns ?? 0;
     const checkpoint = () => {
       guard();
       db.setMeta(
@@ -333,12 +367,13 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
           replyCursor,
           voiceTerminalFailures,
           voicePass: voicePass || undefined,
+          heldRuns: heldRuns || undefined,
           report,
           voiceBindings: bindingCapture ? 2 : undefined,
         })
       );
     };
-    type VoiceEntry = { id?: number; failure?: string; collision?: boolean };
+    type VoiceEntry = { id?: number; failure?: string; collision?: boolean; attempts?: number };
     const voiceKey = (pk: number) => `${prefix}voice:${String(Math.floor(pk / 500)).padStart(20, "0")}`;
     const getVoicePage = (pk: number): Record<string, VoiceEntry> => JSON.parse(db.getMeta(voiceKey(pk)) ?? "{}");
     const putVoice = (pk: number, patch: VoiceEntry) => {
@@ -346,9 +381,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       page[String(pk)] = { ...page[String(pk)], ...patch };
       db.setMeta(voiceKey(pk), JSON.stringify(page));
     };
-    const legacyBindings = progress?.voiceBindings === 1 ? db.getMeta(IOS_VOICE_TARGETS) : null;
-    const bindingCapture =
-      progress === null || progress.voiceBindings === 2 || (progress.voiceBindings === 1 && legacyBindings !== null);
+    const bindingCapture = progress === null || progress.voiceBindings === 2;
     if (
       progress?.format === 2 &&
       (JSON.stringify(progress.report.sourceByType) !== JSON.stringify(report.sourceByType) ||
@@ -359,72 +392,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       db.transaction(checkpoint);
     }
     const terminal = report.state === "voice" || report.state === "done";
-    if (progress !== null && progress.format !== 2) {
-      // SID spellings can redirect after folds. Legacy tasks without an original
-      // row ID cannot prove that the current child is still importer-owned.
-      if ((progress.replies ?? []).some((task) => !Number.isSafeInteger(task.id) || task.id! <= 0)) {
-        guard();
-        db.setMeta(IOS_ERROR, "legacy_reply_bindings_missing");
-        return report;
-      }
-      if (terminal && progress.collisionRows === undefined && report.quarantineReasons.identity_collision > 0) {
-        guard();
-        db.setMeta(IOS_ERROR, "voice_collision_exclusions_missing");
-        return report;
-      }
-      if (terminal && progress.voiceFailureRows === undefined && Object.keys(progress.voiceFailures ?? {}).length > 0) {
-        guard();
-        db.setMeta(IOS_ERROR, "voice_failure_exclusions_missing");
-        return report;
-      }
-      // Legacy metadata was one JSON value. Parsing it once is the explicit migration exception.
-      const targets: Record<string, number> = JSON.parse(legacyBindings ?? "{}");
-      const keys = new Set([
-        ...Object.keys(targets),
-        ...Object.keys(progress.voiceFailureRows ?? {}),
-        ...(progress.collisionRows ?? []).map(String),
-      ]);
-      const legacyCollisions = new Set(progress.collisionRows ?? []);
-      let batch: string[] = [];
-      const migrate = () =>
-        db.transaction(() => {
-          guard();
-          for (const pk of batch)
-            putVoice(Number(pk), {
-              id: targets[pk],
-              failure: progress!.voiceFailureRows?.[pk],
-              collision: legacyCollisions.has(Number(pk)) || undefined,
-            });
-        });
-      for (const pk of keys) {
-        batch.push(pk);
-        if (batch.length === 500) {
-          migrate();
-          batch = [];
-          await pause();
-        }
-      }
-      if (batch.length) migrate();
-      const legacyReplies = progress.replies ?? [];
-      for (let start = 0; start < legacyReplies.length; start += 500) {
-        guard();
-        db.transaction(() => {
-          for (let index = start; index < Math.min(start + 500, legacyReplies.length); index++) {
-            const task = legacyReplies[index]!;
-            db.setMeta(`${prefix}reply:${String(index).padStart(20, "0")}`, JSON.stringify(task));
-          }
-        });
-        await pause();
-      }
-      guard();
-      db.transaction(() => {
-        checkpoint();
-        db.setMeta(IOS_VOICE_TARGETS, null);
-      });
-      // Drop the one-time legacy JSON maps after publishing the paged generation.
-      progress = null;
-    }
-    if (terminal && !bindingCapture && !args.textOnly && args.media && report.sourceByType["3"]) {
+    if (terminal && !bindingCapture && !args.textOnly && !apiBackground && args.media && report.sourceByType["3"]) {
       guard();
       db.setMeta(IOS_ERROR, "voice_target_bindings_missing");
       return report;
@@ -448,7 +416,14 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         await pause();
       }
     }
-    if (terminal && (args.textOnly || !args.media || (report.state === "done" && voicePass))) return report;
+    if (
+      terminal &&
+      (args.textOnly ||
+        apiBackground ||
+        !args.media ||
+        (report.state === "done" && (voicePass === true || (args.background && voicePass))))
+    )
+      return report;
     // All source-scale indexes live on disk with a fixed SQLite cache.
     scratch = openScratch(dirname(db.path));
     if (!terminal) {
@@ -476,8 +451,13 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       }
     }
     let mediaCursor = 0;
+    // The length column is optional in the archive; without it no note has a known length.
+    const lengthColumn = source
+      .prepare("PRAGMA table_info(ZWAMEDIAITEM)")
+      .all()
+      .some((column) => String(column.name).toUpperCase() === "ZMOVIEDURATION");
     const mediaPage = source.prepare(
-      "SELECT Z_PK pk,ZMESSAGE message,ZTITLE caption,ZMEDIALOCALPATH path FROM ZWAMEDIAITEM WHERE Z_PK>? ORDER BY Z_PK LIMIT 500"
+      `SELECT Z_PK pk,ZMESSAGE message,ZTITLE caption,ZMEDIALOCALPATH path,${lengthColumn ? "ZMOVIEDURATION" : "NULL"} duration FROM ZWAMEDIAITEM WHERE Z_PK>? ORDER BY Z_PK LIMIT 500`
     );
     for (;;) {
       check();
@@ -490,7 +470,8 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
             scratch.media.run(
               row.message,
               typeof row.caption === "string" ? row.caption : null,
-              typeof row.path === "string" ? row.path : null
+              typeof row.path === "string" ? row.path : null,
+              typeof row.duration === "number" && Number.isFinite(row.duration) ? row.duration : null
             );
         scratch.db.exec("COMMIT");
       } catch (err) {
@@ -501,7 +482,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       await pause();
     }
     const enrich = (row: Row): Row =>
-      Object.assign(row, scratch!.getMedia.get(row.pk) ?? { caption: null, mediaPath: null });
+      Object.assign(row, scratch!.getMedia.get(row.pk) ?? { caption: null, mediaPath: null, duration: null });
     const collisions = new Set<string>();
     // Resolve collision membership using the SID captured during preparation,
     // so later canonicalization cannot hide either member of a source collision.
@@ -635,7 +616,7 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
       report.state = "voice";
       checkpoint();
     }
-    if (args.textOnly) {
+    if (args.textOnly || apiBackground) {
       report.state = report.sourceByType["3"] ? "voice" : "done";
       checkpoint();
       return report;
@@ -661,11 +642,18 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
     if (args.media && transcriber) {
       const skipPath = args.skipFile ?? join(dirname(args.source), "voice-skip.txt");
       if (!existsSync(skipPath)) {
+        // A folder drop waits for the owner's file; a command the owner typed refuses.
+        if (!args.background)
+          throw new WazapError(
+            "INVALID_ID",
+            "voice-skip.txt is missing, so no voice was imported.",
+            "Create voice-skip.txt beside the archive (empty to permit every chat), then rerun"
+          );
         log("iPhone voice import paused: voice-skip.txt is missing; an empty file explicitly permits all chats.");
         return report;
       }
-      // An unreadable line must never leave its chat eligible: stop before any upload.
-      const skip = new Set<string>();
+      // An unreadable line, or one naming no chat, must never leave its chat eligible: stop before any upload.
+      const listed = new Map<string, number>();
       readFileSync(skipPath, "utf8")
         .split(/\r?\n/)
         .forEach((line, index) => {
@@ -677,16 +665,97 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
               `voice-skip.txt line ${index + 1} is not an exact chat JID, so no voice was imported.`,
               "Write one JID per line, such as 40700000002@s.whatsapp.net, or remove the line"
             );
-          skip.add(canonical(db, jid));
+          if (!listed.has(canonical(db, jid))) listed.set(canonical(db, jid), index + 1);
         });
+      if (listed.size) {
+        const known = new Set<string>();
+        const chats = source.prepare(
+          "SELECT Z_PK pk,ZCONTACTJID chat FROM ZWACHATSESSION WHERE Z_PK>? ORDER BY Z_PK LIMIT 500"
+        );
+        for (let cursor = 0; ; ) {
+          const rows = chats.all(cursor);
+          if (!rows.length) break;
+          for (const row of rows) if (validJid(row.chat)) known.add(canonical(db, row.chat));
+          cursor = rows.at(-1)!.pk as number;
+        }
+        for (const [jid, line] of listed)
+          if (!known.has(jid))
+            throw new WazapError(
+              "INVALID_ID",
+              `voice-skip.txt line ${line} matches no chat in the archive, so no voice was imported.`,
+              "Check the number, or remove the line"
+            );
+      }
+      const skip = new Set(listed.keys());
       report.voice.skipped = 0;
       report.voice.missing = 0;
       report.voice.failed = voiceTerminalFailures;
+      // What one note needs before it is sent: undefined to ignore it silently, a word to count it, else the work.
+      const candidate = (r: Row) => {
+        const binding = getVoicePage(r.pk)[String(r.pk)];
+        if (binding?.collision || binding?.failure) return undefined;
+        const input = convertIosRow(db, r, owner, collisions);
+        if (typeof input === "string") return undefined;
+        const sid = identity(db, r)!;
+        const message = db.messages.get(sid);
+        const targetId = binding?.id;
+        if (
+          targetId === undefined ||
+          message === null ||
+          message.id !== targetId ||
+          message.type !== "voice" ||
+          message.transcript !== null ||
+          (args.background && (message.raw !== null || db.transcripts.state(sid)?.state === "queued")) ||
+          skip.has(input.chatJid) ||
+          // An archive audio file looks like a voice note; only its length tells, so an API gets short notes only.
+          (api && !(r.duration !== null && r.duration > 0 && r.duration <= API_MAX_SECONDS))
+        )
+          return "skipped";
+        const file = typeof r.mediaPath === "string" ? mediaFile(args.media!, r.mediaPath) : null;
+        return file === null ? "missing" : { sid, targetId, file };
+      };
       // Page by the raw primary key before filtering. Sparse voices must not
       // turn one synchronous source read into an archive-wide scan.
       const voicePage = source.prepare(`${SELECT} WHERE m.Z_PK>? ORDER BY m.Z_PK LIMIT 500`);
+      if (api && args.announce) {
+        let notes = 0;
+        for (let cursor = 0; ; ) {
+          const sourceRows = voicePage.all(cursor) as unknown as Row[];
+          if (!sourceRows.length) break;
+          for (const row of sourceRows)
+            if (row.nativeType === 3 && typeof candidate(enrich(row)) === "object") notes++;
+          cursor = sourceRows.at(-1)!.pk;
+          await pause();
+        }
+        if (notes > 0) args.announce(notes, args.settings!.provider!);
+      }
       let cursor = 0;
       let paused = false;
+      let retry = false; // a note failed for its own sake and has attempts left: the pass is not finished
+      // Until one note succeeds in this run, a note's own failure may be the host's (a full temp disk, whisper killed
+      // for memory), so it is held, not charged. Three of them with no success pause the pass and charge nothing,
+      // until that has happened in three runs in a row: then the notes are the cause, and they are charged.
+      let succeeded = false;
+      let held: number[] = [];
+      const charge = (pk: number) => {
+        const attempts = (getVoicePage(pk)[String(pk)]?.attempts ?? 0) + 1;
+        if (attempts < NOTE_ATTEMPTS) {
+          putVoice(pk, { attempts });
+          retry = true;
+        } else {
+          putVoice(pk, { attempts, failure: "attempts" });
+          voiceTerminalFailures++;
+        }
+      };
+      const chargeHeld = () => {
+        if (!held.length) return;
+        guard();
+        db.transaction(() => {
+          for (const pk of held) charge(pk);
+          checkpoint();
+        });
+        held = [];
+      };
       let dispatchFailed = false;
       for (;;) {
         if (stopped() || paused) break;
@@ -702,31 +771,13 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
                 if (stopped() || paused || dispatchFailed) return;
                 guard();
                 const r = enrich(voices[next++]!);
-                const binding = getVoicePage(r.pk)[String(r.pk)];
-                if (binding?.collision) continue;
-                const input = convertIosRow(db, r, owner, collisions);
-                if (typeof input === "string") continue;
-                const sid = identity(db, r)!;
-                const message = db.messages.get(sid);
-                const targetId = binding?.id;
-                if (binding?.failure) continue;
-                if (
-                  targetId === undefined ||
-                  message === null ||
-                  message.id !== targetId ||
-                  message.type !== "voice" ||
-                  message.transcript !== null ||
-                  (args.background && (message.raw !== null || db.transcripts.state(sid)?.state === "queued")) ||
-                  skip.has(input.chatJid)
-                ) {
-                  report.voice.skipped++;
+                const work = candidate(r);
+                if (work === undefined) continue;
+                if (work === "skipped" || work === "missing") {
+                  report.voice[work]++;
                   continue;
                 }
-                const file = typeof r.mediaPath === "string" ? mediaFile(args.media!, r.mediaPath) : null;
-                if (file === null) {
-                  report.voice.missing++;
-                  continue;
-                }
+                const { sid, targetId, file } = work;
                 // Once an upload is accepted, persist its result even during graceful shutdown.
                 guard();
                 let result: Transcript;
@@ -741,12 +792,30 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
                       if (failure.kind === "permanent" || failure.kind === "gone") {
                         putVoice(r.pk, { failure: failure.kind });
                         voiceTerminalFailures++;
-                      } else paused = true; // a retryable failure: start no further uploads this run
+                      } else if (!noteFault(failure)) paused = true; // the provider is failing: start no further uploads this run
+                      else if (apiTimeout(failure)) {
+                        charge(r.pk);
+                        paused = true;
+                      } else if (succeeded) charge(r.pk);
+                      else {
+                        held.push(r.pk);
+                        if (held.length >= BROKEN_RUN_FAULTS) {
+                          paused = true;
+                          if (++heldRuns >= BROKEN_RUNS) for (const pk of held) charge(pk);
+                          else log("iPhone voice import paused: the first notes of this run all failed, so no attempt is charged to them.");
+                          held = []; // a note that succeeds after this must not charge them
+                        }
+                      }
                       report.voice.failed++;
                       checkpoint();
                     });
                   }
                   continue;
+                }
+                if (!succeeded) {
+                  succeeded = true;
+                  heldRuns = 0;
+                  chargeHeld();
                 }
                 const persisted = db.transaction(() => {
                   guard();
@@ -783,12 +852,14 @@ export async function importIos(args: IosArgs): Promise<IosReport> {
         await yieldLoop();
         guard();
       }
-      if (paused || stopped()) {
+      // Fewer than three held failures with no success: a short run, so they are the notes' own.
+      if (!paused && !stopped()) chargeHeld();
+      if (paused || retry || stopped()) {
         checkpoint();
         return report;
       }
       // A background pass leaves live-provider notes alone, so it does not stand for an explicit one.
-      if (!args.background) voicePass = true;
+      voicePass = args.background ? (voicePass ?? "background") : true;
     }
     report.state = stopped() ? "voice" : "done";
     checkpoint();

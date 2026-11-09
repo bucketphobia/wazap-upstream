@@ -221,33 +221,6 @@ test("archive voice refuses existing text targets at capture, upload, and result
   }
 });
 
-test("legacy deferred replies cannot claim a replacement child from its current SID", async () => {
-  const t = reviewFixture([
-    { pk: 1, type: 0, parent: 2 },
-    { pk: 2, type: 0 },
-  ]);
-  try {
-    await importIos({ db: t.db, source: t.source, textOnly: true });
-    const root = JSON.parse(t.db.getMeta("ios_import_v1"));
-    delete root.format;
-    delete root.generation;
-    delete root.replyCursor;
-    root.voiceBindings = 1;
-    root.report.state = "replies";
-    root.replies = [{ child: `false_${PEER}_key1`, parent: 2 }];
-    t.db.setMeta("ios_import_v1", JSON.stringify(root));
-    t.db.setMeta("ios_voice_targets_v1", "{}");
-    const raw = new (sqlite().DatabaseSync)(t.path);
-    raw.prepare("UPDATE messages SET quoted_sid=NULL,quoted_from_me=NULL,quoted_key_id=NULL WHERE key_id='key1'").run();
-    raw.close();
-    await importIos({ db: t.db, source: t.source, textOnly: true });
-    assert.equal(t.db.getMeta("ios_import_error"), "legacy_reply_bindings_missing");
-    assert.equal(t.db.messages.get(`false_${PEER}_key1`).quotedSid, null);
-  } finally {
-    t.db.close();
-  }
-});
-
 test("one checkpoint exception stops new voice dispatch while accepted uploads drain", async () => {
   const t = reviewFixture(Array.from({ length: 8 }, (_, i) => ({ pk: i + 1 })));
   try {

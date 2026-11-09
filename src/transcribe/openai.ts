@@ -17,6 +17,12 @@ const TIMEOUT_MS = 2 * 60 * 1000;
 const RETRY_AFTER_MS = 2000;
 const RESPONSE_MAX_BYTES = 1024 * 1024;
 const KEY_FIX = "Run `wazap config transcribe openai`";
+/** Reasons other code tells apart: an answer that held no text, and a request that ran out of time. */
+export const ANSWER_UNREADABLE = "provider answer unreadable";
+export const TIMED_OUT = "provider timed out";
+export const FILE_UNREADABLE = "audio file unreadable";
+/** Read errors that mean this file cannot be read by this process; others (EMFILE, ENOMEM, EIO) may pass later. */
+const FILE_REFUSED = new Set(["EACCES", "EISDIR", "EPERM", "ENOENT"]);
 
 const MIME: Record<string, string> = {
   ".ogg": "audio/ogg",
@@ -53,8 +59,7 @@ function refusal(status: number): { kind: FailureKind; reason: string } {
   return { kind: "permanent", reason: `provider refused the audio (HTTP ${status})` };
 }
 
-async function post(settings: TranscribeSettings, key: string, file: string, language: string, signal?: AbortSignal): Promise<Response> {
-  const bytes = await readFile(file);
+async function post(settings: TranscribeSettings, key: string, file: string, bytes: NonSharedBuffer, language: string, signal?: AbortSignal): Promise<Response> {
   const extension = extname(file).toLowerCase();
   const type = MIME[extension] ?? "application/octet-stream";
   const name = basename(file);
@@ -82,10 +87,19 @@ export const openaiProvider: Provider = {
     if (key === null) throw new WazapError("TRANSCRIBE_UNAVAILABLE", "No transcription API key is set.", KEY_FIX);
     const language = opts.language ?? settings.language;
 
+    // A file this process cannot read is the note's problem, not a provider that could not be reached.
+    let bytes: NonSharedBuffer;
+    try {
+      bytes = await readFile(file);
+    } catch (err) {
+      const refused = FILE_REFUSED.has((err as NodeJS.ErrnoException).code ?? "");
+      throw failed("The audio file could not be read.", key, undefined, refused ? "permanent" : "transient", FILE_UNREADABLE);
+    }
+
     let response: Response;
     for (let attempt = 0; ; attempt++) {
       try {
-        response = await post(settings, key, file, language, opts.signal);
+        response = await post(settings, key, file, bytes, language, opts.signal);
       } catch (err) {
         if (opts.signal?.aborted === true) throw cancelled();
         const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
@@ -94,7 +108,7 @@ export const openaiProvider: Provider = {
           key,
           undefined,
           "transient",
-          timedOut ? "provider timed out" : "provider unreachable"
+          timedOut ? TIMED_OUT : "provider unreachable"
         );
       }
       if (response.ok) break;
@@ -128,11 +142,11 @@ export const openaiProvider: Provider = {
         key,
         undefined,
         "transient",
-        "provider answer unreadable"
+        ANSWER_UNREADABLE
       );
     }
     if (parsed === null || typeof parsed !== "object" || !("text" in parsed) || typeof parsed.text !== "string") {
-      throw failed("Transcription API sent no text field.", key, undefined, "transient", "provider answer unreadable");
+      throw failed("Transcription API sent no text field.", key, undefined, "transient", ANSWER_UNREADABLE);
     }
     return {
       text: parsed.text.replace(/\s+/g, " ").trim(),

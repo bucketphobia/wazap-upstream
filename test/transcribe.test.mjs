@@ -473,6 +473,35 @@ test("openaiProvider retries a 429 once and then succeeds", async () => {
   assert.deepEqual(transcript, { text: "second try" });
 });
 
+test("a file the process cannot read is the note's failure, not an unreachable provider", async () => {
+  let hits = 0;
+  const error = await withServer(
+    (req, res) => {
+      hits += 1;
+      req.resume();
+      res.end("{}");
+    },
+    (url) => openaiProvider.transcribe(openaiSettings(url), scratch("unreadable"), {}).catch((err) => err)
+  );
+  assert.equal(hits, 0);
+  assert.deepEqual(classifyFailure(error), { kind: "permanent", reason: "audio file unreadable" });
+});
+
+test("a read error that may pass later stays a transient failure of the note", async (t) => {
+  const { default: fsp } = await import("node:fs/promises");
+  const { syncBuiltinESMExports } = await import("node:module");
+  t.mock.method(fsp, "readFile", async () => {
+    throw Object.assign(new Error("private"), { code: "EMFILE" });
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const error = await openaiProvider.transcribe(openaiSettings("http://127.0.0.1:1"), audioFile(), {}).catch((err) => err);
+  assert.deepEqual(classifyFailure(error), { kind: "transient", reason: "audio file unreadable" });
+});
+
 test("a 401 that echoes the key back never carries it outward", async () => {
   const file = audioFile();
   let hits = 0;

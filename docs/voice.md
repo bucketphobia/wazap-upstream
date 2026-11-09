@@ -161,7 +161,7 @@ its words are searchable, recalled and carried by the webhook event.
 
 Audio *files* are left alone, since one can be an hour long, and so are notes
 WhatsApp gave no length for, and with an API provider the notes you recorded; call
-`get_media(message_id)` for those. `WAZAP_TRANSCRIBE_AUTO=all` with
+`get_media(message_id)` for those. The one exception is `wazap import ios --media`, which the owner types and which sends an iPhone archive's stored voice notes of up to ten minutes to an API provider (see [iPhone import](iphone-import.md#add-voice-transcription)); the folder-drop import sends none to an API. `WAZAP_TRANSCRIBE_AUTO=all` with
 `WAZAP_TRANSCRIBE_ALLOW_API=1` sends your own notes to the API too, but only
 new ones recorded live after the server started, never history or a stored note. `WAZAP_TRANSCRIBE_AUTO=0` keeps that and
 stops the background work; with it, or with the provider switched

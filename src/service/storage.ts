@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { accountPolicy, type AccountRecord } from "../accounts.js";
 import type { AccountPaths, Config } from "../config.js";
 import { AccountDb, purgePreMigrationBackups, StorageError } from "../db/index.js";
-import { IOS_ERROR, IOS_RETENTION_REFUSED, importIos, readIosReport } from "../ios-import/index.js";
+import { IOS_CHECKPOINT_UNSUPPORTED, IOS_ERROR, IOS_RETENTION_REFUSED, importIos, readIosReport } from "../ios-import/index.js";
 import { initializeIosBinding, sealIosBindingBeforeOwnerChange, IOS_BARRIER, IOS_SELECTION_REQUIRED } from "../ios-import/binding.js";
 import { IosSourceError } from "../ios-import/source.js";
 import { readTranscribeSettings } from "../transcribe/index.js";
@@ -371,12 +371,18 @@ export class AccountStorage {
                     ? "history_disabled"
                     : err instanceof WazapError && err.message === IOS_RETENTION_REFUSED
                       ? "retention_unsupported"
-                      : err instanceof WazapError && err.message.startsWith("voice-skip.txt line ")
-                        ? "voice_skip_invalid"
-                        : err instanceof WazapError && err.message.startsWith("Voice transcription was requested")
-                          ? "voice_unavailable"
-                          : "import_failed";
-    db.setMeta(IOS_ERROR, reason);
+                      : err instanceof WazapError && err.message === IOS_CHECKPOINT_UNSUPPORTED
+                        ? "checkpoint_unsupported"
+                        : err instanceof WazapError && err.message.startsWith("voice-skip.txt line ")
+                          ? "voice_skip_invalid"
+                          : err instanceof WazapError && err.message.startsWith("Voice transcription was requested")
+                            ? "voice_unavailable"
+                            : "import_failed";
+    try {
+      db.setMeta(IOS_ERROR, reason);
+    } catch {
+      // A full or read-only database fails the import, never the account; the log carries the cause.
+    }
     log(`iPhone import stopped (${reason}). Use wazap import ios --reset to clear its saved progress.`);
   }
 

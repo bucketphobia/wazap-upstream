@@ -28,11 +28,11 @@ export function openScratch(parent: string) {
     chmodSync(path, 0o600);
     db.exec(`PRAGMA journal_mode=OFF; PRAGMA cache_size=-4096; PRAGMA temp_store=FILE;
       CREATE TABLE identities(pk INTEGER PRIMARY KEY,sid TEXT); CREATE INDEX identities_sid ON identities(sid);
-      CREATE TABLE media(message INTEGER PRIMARY KEY,caption TEXT,path TEXT);`);
+      CREATE TABLE media(message INTEGER PRIMARY KEY,caption TEXT,path TEXT,duration REAL);`);
     const opened = db;
     const identity = db.prepare("INSERT INTO identities VALUES(?,?)");
-    const media = db.prepare("INSERT OR IGNORE INTO media VALUES(?,?,?)");
-    const getMedia = db.prepare("SELECT caption, path mediaPath FROM media WHERE message=?");
+    const media = db.prepare("INSERT OR IGNORE INTO media VALUES(?,?,?,?)");
+    const getMedia = db.prepare("SELECT caption, path mediaPath, duration FROM media WHERE message=?");
     return {
       db,
       identity,

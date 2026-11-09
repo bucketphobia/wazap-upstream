@@ -41,6 +41,11 @@ export async function runIosImport(config: Config): Promise<void> {
       reset: config.importReset,
       retention: config.retention,
       settings: permitted ? settings : undefined,
+      // Stderr, like every other line here, so --json keeps stdout to the report.
+      announce: (notes, provider) =>
+        say(
+          `iPhone import: sending ${notes} voice note${notes === 1 ? "" : "s"} to the ${provider} transcription provider at ${new URL(settings!.baseUrl).host}.`
+        ),
     });
     // A failed ownership file at boot is over once an import has run.
     if (!config.dryRun && db.getMeta(IOS_ERROR) === "ownership_file_failed") db.setMeta(IOS_ERROR, null);

@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { sqlite } from "../dist/db/sqlite.js";
 import { openTemp, ME, PEER, GROUP, T0, textMessage } from "./db-fixtures.mjs";
 import { markFailure } from "../dist/transcribe/index.js";
+import { readTranscribeSettings } from "../dist/transcribe/settings.js";
 import { MessageViews } from "../dist/service/views.js";
 import { initializeIosBinding } from "../dist/ios-import/binding.js";
 import { importIos, readIosReport } from "../dist/ios-import/index.js";
@@ -31,12 +32,25 @@ function source(dir, rows) {
       r.parent ?? null
     );
     if (r.caption || r.file)
-      d.prepare("INSERT INTO ZWAMEDIAITEM VALUES(?,?,?,?,?)").run(r.pk, r.pk, r.caption ?? null, r.file ?? null, 42);
+      d.prepare("INSERT INTO ZWAMEDIAITEM VALUES(?,?,?,?,?)").run(r.pk, r.pk, r.caption ?? null, r.file ?? null, r.duration === undefined ? 42 : r.duration);
   }
   d.close();
   // Voice uploads require an explicit skip file; empty is the synthetic fixture consent.
   writeFileSync(join(dir, "voice-skip.txt"), "");
   return path;
+}
+/** A folder drop sends nothing to an API, so background passes in these tests run on "local", answered by the test's HTTP server. */
+async function localTalksToServer(t) {
+  const { PROVIDERS } = await import("../dist/transcribe/index.js");
+  const local = PROVIDERS.local.transcribe;
+  PROVIDERS.local.transcribe = (settings, file, opts) => PROVIDERS.openai.transcribe(settings, file, opts);
+  t.after(() => {
+    PROVIDERS.local.transcribe = local;
+  });
+}
+/** Settings as the service reads them; the provider decides what an import may do with them. */
+function providerSettings(dir, provider, extra = {}) {
+  return readTranscribeSettings({ WAZAP_TRANSCRIBE: provider, WAZAP_TRANSCRIBE_API_KEY: "synthetic", ...extra }, dir);
 }
 function target() {
   const t = openTemp();
@@ -50,36 +64,6 @@ function voiceEntries(db) {
   const progress = JSON.parse(db.getMeta("ios_import_v1"));
   const prefix = `ios_import_v2:${progress.generation}:voice:`;
   return Object.assign({}, ...db.scanMeta(prefix).map(({ value }) => JSON.parse(value)));
-}
-function legacyProgress(db) {
-  const current = JSON.parse(db.getMeta("ios_import_v1"));
-  const entries = voiceEntries(db);
-  const legacy = {
-    hash: current.hash,
-    last: current.last,
-    report: current.report,
-    replies: [],
-    voiceBindings: 1,
-    collisionRows: Object.entries(entries)
-      .filter(([, row]) => row.collision)
-      .map(([pk]) => Number(pk)),
-    voiceFailureRows: Object.fromEntries(
-      Object.entries(entries)
-        .filter(([, row]) => row.failure)
-        .map(([pk, row]) => [pk, row.failure])
-    ),
-  };
-  db.setMeta(
-    "ios_voice_targets_v1",
-    JSON.stringify(
-      Object.fromEntries(
-        Object.entries(entries)
-          .filter(([, row]) => row.id !== undefined)
-          .map(([pk, row]) => [pk, row.id])
-      )
-    )
-  );
-  return legacy;
 }
 
 test("maps all supported types, captions, skip counts, and readonly source", async () => {
@@ -335,13 +319,14 @@ for (const checkpointFailure of [false, true]) {
         server.close();
       });
       const changes = {
-        WAZAP_TRANSCRIBE: "openai",
+        WAZAP_TRANSCRIBE: "local",
         WAZAP_TRANSCRIBE_AUTO: "all",
         WAZAP_TRANSCRIBE_API_KEY: "synthetic-test-key",
         WAZAP_TRANSCRIBE_URL: `http://127.0.0.1:${server.address().port}/v1`,
       };
       const saved = Object.fromEntries(Object.keys(changes).map((k) => [k, process.env[k]]));
       Object.assign(process.env, changes);
+      await localTalksToServer(t);
       t.after(() => {
         for (const [k, v] of Object.entries(saved)) {
           if (v === undefined) delete process.env[k];
@@ -433,13 +418,14 @@ test("expired shutdown grace aborts uploads and leaves voice progress resumable"
     server.close();
   });
   const changes = {
-    WAZAP_TRANSCRIBE: "openai",
+    WAZAP_TRANSCRIBE: "local",
     WAZAP_TRANSCRIBE_AUTO: "all",
     WAZAP_TRANSCRIBE_API_KEY: "synthetic-test-key",
     WAZAP_TRANSCRIBE_URL: `http://127.0.0.1:${server.address().port}/v1`,
   };
   const saved = Object.fromEntries(Object.keys(changes).map((k) => [k, process.env[k]]));
   Object.assign(process.env, changes);
+  await localTalksToServer(t);
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
@@ -765,7 +751,11 @@ test("missing voice skip file fails closed; empty file explicitly allows every v
       return { text: "synthetic" };
     };
     unlinkSync(join(dir, "voice-skip.txt"));
-    await importIos({ db, source: path, media: dir, transcriber });
+    // A command the owner typed refuses; a folder drop waits for the file.
+    await assert.rejects(importIos({ db, source: path, media: dir, transcriber }), /voice-skip\.txt is missing/);
+    assert.equal(readIosReport(db).state, "voice");
+    const waiting = await importIos({ db, source: path, media: dir, transcriber, background: true });
+    assert.equal(waiting.state, "voice");
     assert.equal(calls, 0);
     writeFileSync(join(dir, "voice-skip.txt"), "");
     assert.equal((await importIos({ db, source: path, media: dir, transcriber })).voice.transcribed, 1);
@@ -875,7 +865,7 @@ test("boot completes text before connection and connected voice runs once in bac
     server.close();
   });
   const changes = {
-    WAZAP_TRANSCRIBE: "openai",
+    WAZAP_TRANSCRIBE: "local",
     WAZAP_TRANSCRIBE_AUTO: "all",
     WAZAP_TRANSCRIBE_URL: `http://127.0.0.1:${server.address().port}/v1`,
     WAZAP_TRANSCRIBE_API_KEY: "synthetic",
@@ -883,6 +873,7 @@ test("boot completes text before connection and connected voice runs once in bac
   };
   const saved = Object.fromEntries(Object.keys(changes).map((k) => [k, process.env[k]]));
   Object.assign(process.env, changes);
+  await localTalksToServer(t);
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
@@ -942,16 +933,24 @@ test("transient voice failure remains resumable rather than becoming a terminal 
   try {
     const path = source(dir, [{ pk: 1, type: 3, file: "note.opus" }]);
     writeFileSync(join(dir, "note.opus"), "audio");
+    const settings = providerSettings(dir, "openai");
     const first = await importIos({
       db,
       source: path,
       media: dir,
+      settings,
       transcriber: async () => {
-        throw markFailure(Error("private"), "transient", "provider busy");
+        throw markFailure(Error("private"), "transient", "provider unavailable (HTTP 503)");
       },
     });
     assert.equal(first.state, "voice");
-    const next = await importIos({ db, source: path, media: dir, transcriber: async () => ({ text: "recovered" }) });
+    const next = await importIos({
+      db,
+      source: path,
+      media: dir,
+      settings,
+      transcriber: async () => ({ text: "recovered" }),
+    });
     assert.equal(next.state, "done");
     assert.equal(next.voice.transcribed, 1);
     assert.equal(next.voice.failed, 0);
@@ -960,44 +959,35 @@ test("transient voice failure remains resumable rather than becoming a terminal 
   }
 });
 
-for (const legacy of [false, true]) {
-  test(`${legacy ? "legacy completed" : "persisted completed"} collision exclusions cannot transcribe an existing live row`, async () => {
-    const fixture = target();
-    let db = fixture.db;
-    const dir = fixture.dir;
-    try {
-      db.messages.upsert(textMessage(PEER, "collision", T0, "live", { type: "voice" }));
-      const path = source(dir, [
-        { pk: 1, type: 3, key: "collision", file: "note.opus" },
-        { pk: 2, type: 3, key: "collision", file: "note.opus" },
-      ]);
-      writeFileSync(join(dir, "note.opus"), "audio");
-      await importIos({ db, source: path, textOnly: true });
-      assert.equal(readIosReport(db).quarantineReasons.identity_collision, 2);
-      if (legacy) {
-        const progress = legacyProgress(db);
-        delete progress.collisionRows;
-        progress.collisionSids = [`false_${PEER}_collision`];
-        db.setMeta("ios_import_v1", JSON.stringify(progress));
-      }
-      db.close();
-      const { AccountDb } = await import("../dist/db/index.js");
-      db = AccountDb.open(fixture.path);
-      let calls = 0;
-      const transcriber = async () => {
-        calls++;
-        return { text: "must not attach to live" };
-      };
-      await importIos({ db, source: path, media: dir, transcriber });
-      await importIos({ db, source: path, media: dir, transcriber });
-      assert.equal(calls, 0);
-      assert.equal(db.messages.get(`false_${PEER}_collision`).transcript, null);
-      if (legacy) assert.equal(db.getMeta("ios_import_error"), "voice_collision_exclusions_missing");
-    } finally {
-      db.close();
-    }
-  });
-}
+test("persisted completed collision exclusions cannot transcribe an existing live row", async () => {
+  const fixture = target();
+  let db = fixture.db;
+  const dir = fixture.dir;
+  try {
+    db.messages.upsert(textMessage(PEER, "collision", T0, "live", { type: "voice" }));
+    const path = source(dir, [
+      { pk: 1, type: 3, key: "collision", file: "note.opus" },
+      { pk: 2, type: 3, key: "collision", file: "note.opus" },
+    ]);
+    writeFileSync(join(dir, "note.opus"), "audio");
+    await importIos({ db, source: path, textOnly: true });
+    assert.equal(readIosReport(db).quarantineReasons.identity_collision, 2);
+    db.close();
+    const { AccountDb } = await import("../dist/db/index.js");
+    db = AccountDb.open(fixture.path);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "must not attach to live" };
+    };
+    await importIos({ db, source: path, media: dir, transcriber });
+    await importIos({ db, source: path, media: dir, transcriber });
+    assert.equal(calls, 0);
+    assert.equal(db.messages.get(`false_${PEER}_collision`).transcript, null);
+  } finally {
+    db.close();
+  }
+});
 test("explicit reset reselects a changed archive without overwriting imported rows", async () => {
   const { db, dir, path: targetPath } = target();
   const archive = source(dir, [{ pk: 1 }]);
@@ -1038,51 +1028,42 @@ test("unsupported archive rows are counted before any identity quarantine", asyn
   }
 });
 
-for (const legacy of [false, true]) {
-  test(`${legacy ? "SID-only legacy" : "source-row"} collision exclusions survive learnLidPhone and restart`, async () => {
-    const fixture = target();
-    let db = fixture.db;
-    try {
-      const lid = "123456789012345@lid";
-      const live = textMessage(PEER, "collision", T0, "live", { type: "voice" });
-      db.messages.upsert(live);
-      const before = db.messages.get(live.sid, { includeHidden: true });
-      const path = source(fixture.dir, [
-        { pk: 1, type: 3, key: "collision", file: "note.opus" },
-        { pk: 2, type: 3, key: "collision", file: "note.opus" },
-      ]);
-      const raw = new (sqlite().DatabaseSync)(path);
-      raw.prepare("UPDATE ZWACHATSESSION SET ZCONTACTJID=? WHERE Z_PK=1").run(lid);
-      raw.close();
-      writeFileSync(join(fixture.dir, "note.opus"), "synthetic audio");
-      await importIos({ db, source: path, textOnly: true });
-      assert.equal(readIosReport(db).quarantineReasons.identity_collision, 2);
-      if (legacy) {
-        const progress = legacyProgress(db);
-        delete progress.collisionRows;
-        progress.collisionSids = [`false_${PEER}_collision`];
-        db.setMeta("ios_import_v1", JSON.stringify(progress));
-      }
-      await db.learnLidPhone(lid, PEER);
-      assert.equal(db.identity.canonicalJid(lid), PEER);
-      db.close();
-      const { AccountDb } = await import("../dist/db/index.js");
-      db = AccountDb.open(fixture.path);
-      let uploads = 0;
-      const transcriber = async () => {
-        uploads++;
-        return { text: "ambiguous archive audio" };
-      };
-      await importIos({ db, source: path, media: fixture.dir, transcriber });
-      await importIos({ db, source: path, media: fixture.dir, transcriber });
-      assert.equal(uploads, 0);
-      assert.deepEqual(db.messages.get(live.sid, { includeHidden: true }), before);
-      if (legacy) assert.equal(db.getMeta("ios_import_error"), "voice_collision_exclusions_missing");
-    } finally {
-      db.close();
-    }
-  });
-}
+test("source-row collision exclusions survive learnLidPhone and restart", async () => {
+  const fixture = target();
+  let db = fixture.db;
+  try {
+    const lid = "123456789012345@lid";
+    const live = textMessage(PEER, "collision", T0, "live", { type: "voice" });
+    db.messages.upsert(live);
+    const before = db.messages.get(live.sid, { includeHidden: true });
+    const path = source(fixture.dir, [
+      { pk: 1, type: 3, key: "collision", file: "note.opus" },
+      { pk: 2, type: 3, key: "collision", file: "note.opus" },
+    ]);
+    const raw = new (sqlite().DatabaseSync)(path);
+    raw.prepare("UPDATE ZWACHATSESSION SET ZCONTACTJID=? WHERE Z_PK=1").run(lid);
+    raw.close();
+    writeFileSync(join(fixture.dir, "note.opus"), "synthetic audio");
+    await importIos({ db, source: path, textOnly: true });
+    assert.equal(readIosReport(db).quarantineReasons.identity_collision, 2);
+    await db.learnLidPhone(lid, PEER);
+    assert.equal(db.identity.canonicalJid(lid), PEER);
+    db.close();
+    const { AccountDb } = await import("../dist/db/index.js");
+    db = AccountDb.open(fixture.path);
+    let uploads = 0;
+    const transcriber = async () => {
+      uploads++;
+      return { text: "ambiguous archive audio" };
+    };
+    await importIos({ db, source: path, media: fixture.dir, transcriber });
+    await importIos({ db, source: path, media: fixture.dir, transcriber });
+    assert.equal(uploads, 0);
+    assert.deepEqual(db.messages.get(live.sid, { includeHidden: true }), before);
+  } finally {
+    db.close();
+  }
+});
 test("an archive response cannot overwrite a transcript stored while the upload was pending", async () => {
   const { db, dir } = target();
   try {
@@ -1159,7 +1140,7 @@ test("a background archive transcript wakes an idle embedding feed before the ne
   });
   const changes = {
     WAZAP_RECALL: "off",
-    WAZAP_TRANSCRIBE: "openai",
+    WAZAP_TRANSCRIBE: "local",
     WAZAP_TRANSCRIBE_AUTO: "all",
     WAZAP_TRANSCRIBE_API_KEY: "synthetic",
     WAZAP_TRANSCRIBE_ALLOW_API: "1",
@@ -1167,6 +1148,7 @@ test("a background archive transcript wakes an idle embedding feed before the ne
   };
   const saved = Object.fromEntries(Object.keys(changes).map((k) => [k, process.env[k]]));
   Object.assign(process.env, changes);
+  await localTalksToServer(t);
   t.after(() => {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];
@@ -1293,44 +1275,35 @@ test("explicit desktop CLI still transcribes a raw live overlap under its writer
     reopened.close();
   }
 });
-for (const legacy of [false, true]) {
-  test(`${legacy ? "legacy SID-only" : "source-row"} permanent voice failure stays excluded after learnLidPhone and restart`, async () => {
-    const fixture = target();
-    let db = fixture.db;
-    try {
-      const lid = "123456789012345@lid",
-        path = source(fixture.dir, [{ pk: 1, type: 3, file: "note.opus" }]);
-      const raw = new (sqlite().DatabaseSync)(path);
-      raw.prepare("UPDATE ZWACHATSESSION SET ZCONTACTJID=? WHERE Z_PK=1").run(lid);
-      raw.close();
-      writeFileSync(join(fixture.dir, "note.opus"), "audio");
-      let calls = 0;
-      const transcriber = async () => {
-        calls++;
-        throw markFailure(Error("private body"), "permanent", "audio refused");
-      };
-      await importIos({ db, source: path, media: fixture.dir, transcriber });
-      assert.equal(calls, 1);
-      assert.equal(readIosReport(db).state, "done");
-      if (legacy) {
-        const progress = legacyProgress(db);
-        delete progress.voiceFailureRows;
-        progress.voiceFailures = { [`false_${lid}_key1`]: "permanent" };
-        db.setMeta("ios_import_v1", JSON.stringify(progress));
-      }
-      await db.learnLidPhone(lid, PEER);
-      db.close();
-      const { AccountDb } = await import("../dist/db/index.js");
-      db = AccountDb.open(fixture.path);
-      await importIos({ db, source: path, media: fixture.dir, transcriber });
-      assert.equal(calls, 1);
-      assert.equal(db.messages.get(`false_${PEER}_key1`).transcript, null);
-      if (legacy) assert.equal(db.getMeta("ios_import_error"), "voice_failure_exclusions_missing");
-    } finally {
-      db.close();
-    }
-  });
-}
+test("source-row permanent voice failure stays excluded after learnLidPhone and restart", async () => {
+  const fixture = target();
+  let db = fixture.db;
+  try {
+    const lid = "123456789012345@lid",
+      path = source(fixture.dir, [{ pk: 1, type: 3, file: "note.opus" }]);
+    const raw = new (sqlite().DatabaseSync)(path);
+    raw.prepare("UPDATE ZWACHATSESSION SET ZCONTACTJID=? WHERE Z_PK=1").run(lid);
+    raw.close();
+    writeFileSync(join(fixture.dir, "note.opus"), "audio");
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      throw markFailure(Error("private body"), "permanent", "audio refused");
+    };
+    await importIos({ db, source: path, media: fixture.dir, transcriber });
+    assert.equal(calls, 1);
+    assert.equal(readIosReport(db).state, "done");
+    await db.learnLidPhone(lid, PEER);
+    db.close();
+    const { AccountDb } = await import("../dist/db/index.js");
+    db = AccountDb.open(fixture.path);
+    await importIos({ db, source: path, media: fixture.dir, transcriber });
+    assert.equal(calls, 1);
+    assert.equal(db.messages.get(`false_${PEER}_key1`).transcript, null);
+  } finally {
+    db.close();
+  }
+});
 test("distinct source voice rows keep original targets across physical reopen and LID fold", async () => {
   const fixture = target();
   let db = fixture.db;
@@ -1437,16 +1410,15 @@ test("voice target bindings commit with chunks and survive interruption and phys
     db.close();
   }
 });
-test("legacy completed voice without original target bindings fails closed without reconstructing targets", async () => {
+test("completed voice without original target bindings fails closed without reconstructing targets", async () => {
   const { db, dir } = target();
   try {
     const path = source(dir, [{ pk: 1, type: 3, file: "note.opus" }]);
     writeFileSync(join(dir, "note.opus"), "audio");
     await importIos({ db, source: path, textOnly: true });
-    const progress = legacyProgress(db);
+    const progress = JSON.parse(db.getMeta("ios_import_v1"));
     delete progress.voiceBindings;
     db.setMeta("ios_import_v1", JSON.stringify(progress));
-    db.setMeta("ios_voice_targets_v1", null);
     db.messages.get = () => {
       throw Error("must not reconstruct original target bindings");
     };
@@ -1512,7 +1484,7 @@ test("target binding writes and rows roll back when their chunk checkpoint fails
     db.close();
   }
 });
-test("legacy interrupted text resumes rows but cannot invent bindings for its earlier chunk", async () => {
+test("interrupted text without target bindings resumes rows but cannot invent them for its earlier chunk", async () => {
   const fixture = target();
   let db = fixture.db;
   try {
@@ -1534,7 +1506,7 @@ test("legacy interrupted text resumes rows but cannot invent bindings for its ea
       }),
       /interrupted/
     );
-    const progress = legacyProgress(db);
+    const progress = JSON.parse(db.getMeta("ios_import_v1"));
     delete progress.voiceBindings;
     db.setMeta("ios_import_v1", JSON.stringify(progress));
     db.close();
@@ -1605,7 +1577,7 @@ for (const phase of ["voice", "done"]) {
 
 async function importSafetyFixture(
   t,
-  { policy = "account", allowApi = false, command = "serve", voices = 1, hold = false, automatic = true } = {}
+  { policy = "account", allowApi = false, command = "serve", voices = 1, hold = false, automatic = true, provider = "local" } = {}
 ) {
   const { createServer } = await import("node:http");
   const { WhatsAppService } = await import("../dist/whatsapp.js");
@@ -1628,7 +1600,7 @@ async function importSafetyFixture(
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const changes = {
-    WAZAP_TRANSCRIBE: "openai",
+    WAZAP_TRANSCRIBE: provider,
     WAZAP_TRANSCRIBE_AUTO: "1",
     WAZAP_TRANSCRIBE_ALLOW_API: allowApi ? "1" : "0",
     WAZAP_TRANSCRIBE_API_KEY: "synthetic-import-safety-key",
@@ -1636,6 +1608,7 @@ async function importSafetyFixture(
   };
   const saved = Object.fromEntries(Object.keys(changes).map((key) => [key, process.env[key]]));
   Object.assign(process.env, changes);
+  if (provider === "local") await localTalksToServer(t);
   let svc;
   t.after(async () => {
     svc?.storage.stopImport();
@@ -1670,7 +1643,7 @@ for (const entry of ["boot", "cli"]) {
   for (const policy of ["global", "account"]) {
     for (const allowApi of [false, true]) {
       test(`import safety: ${entry} ${policy} read-only ${allowApi ? "allows explicit API consent" : "refuses unapproved API uploads"}`, async (t) => {
-        const fixture = await importSafetyFixture(t, { policy, allowApi });
+        const fixture = await importSafetyFixture(t, { policy, allowApi, provider: "openai" });
         const { svc, folder, archive } = fixture;
         await svc.bootStorage();
         if (entry === "boot") {
@@ -1690,13 +1663,15 @@ for (const entry of ["boot", "cli"]) {
           if (allowApi) await run;
           else await assert.rejects(run, /no usable provider/);
         }
-        assert.equal(fixture.calls(), allowApi ? 1 : 0);
+        // The folder drop never sends archive voice to an API; only the command the owner typed does.
+        const sent = entry === "cli" && allowApi;
+        assert.equal(fixture.calls(), sent ? 1 : 0);
         const { AccountDb } = await import("../dist/db/index.js");
         const read = AccountDb.open(svc.databasePath, { readOnly: true });
         try {
           assert.equal(
             read.messages.get(`false_${PEER}_key1`).transcript,
-            allowApi ? "synthetic importer safety transcript" : null
+            sent ? "synthetic importer safety transcript" : null
           );
         } finally {
           read.close();
@@ -1830,7 +1805,7 @@ for (const allowApi of [false, true]) {
     const { connectedService } = await import("./helpers.mjs");
     const { runIosImport } = await import("../dist/ios-import/cli.js");
     const { AccountDb } = await import("../dist/db/index.js");
-    const fixture = await importSafetyFixture(t, { allowApi });
+    const fixture = await importSafetyFixture(t, { allowApi, provider: "openai" });
     await fixture.svc.bootStorage();
     await fixture.svc.stop();
     const other = "40700000077@s.whatsapp.net";
@@ -1953,37 +1928,23 @@ test(
   }
 );
 
-for (const refusal of ["reply", "collision", "failure"]) {
-  test(`boot preserves the actionable legacy ${refusal} refusal and blocks background voice`, async (t) => {
-    const fixture = await importSafetyFixture(t, { policy: "writable" });
-    const { svc, archive } = fixture;
-    await importIos({ db: svc.db, source: archive, textOnly: true });
-    const legacy = legacyProgress(svc.db);
-    let reason;
-    if (refusal === "reply") {
-      legacy.replies = [{ child: `false_${PEER}_key1`, parent: 1 }];
-      reason = "legacy_reply_bindings_missing";
-    } else if (refusal === "collision") {
-      delete legacy.collisionRows;
-      legacy.report.quarantineReasons.identity_collision = 1;
-      reason = "voice_collision_exclusions_missing";
-    } else {
-      delete legacy.voiceFailureRows;
-      legacy.voiceFailures = { [`false_${PEER}_key1`]: "permanent" };
-      reason = "voice_failure_exclusions_missing";
-    }
-    const progress = JSON.stringify(legacy);
-    svc.db.setMeta("ios_import_v1", progress);
-    svc.db.setMeta("ios_import_error", "source_changed");
-    await svc.bootStorage();
-    assert.equal(svc.getStatus().storage.state, "ready");
-    assert.equal(svc.getStatus().storage.ios_import_error, reason);
-    assert.equal(svc.db.getMeta("ios_import_v1"), progress);
-    svc.storage.startImportVoice();
-    assert.equal(svc.storage.iosImport, null);
-    assert.equal(fixture.calls(), 0);
-  });
-}
+test("boot refuses a checkpoint in an unknown format, keeps it, and blocks background voice", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable" });
+  const { svc, archive } = fixture;
+  await importIos({ db: svc.db, source: archive, textOnly: true });
+  const unknown = JSON.parse(svc.db.getMeta("ios_import_v1"));
+  delete unknown.format;
+  const progress = JSON.stringify(unknown);
+  svc.db.setMeta("ios_import_v1", progress);
+  svc.db.setMeta("ios_import_error", "source_changed");
+  await svc.bootStorage();
+  assert.equal(svc.getStatus().storage.state, "ready");
+  assert.equal(svc.getStatus().storage.ios_import_error, "checkpoint_unsupported");
+  assert.equal(svc.db.getMeta("ios_import_v1"), progress);
+  svc.storage.startImportVoice();
+  assert.equal(svc.storage.iosImport, null);
+  assert.equal(fixture.calls(), 0);
+});
 
 test("a successful boot retry clears a stale source refusal and permits background voice", async (t) => {
   const fixture = await importSafetyFixture(t, { policy: "writable" });
@@ -2303,8 +2264,9 @@ test("a transient voice failure stops new uploads; accepted ones still persist",
       db,
       source: path,
       media: dir,
+      settings: providerSettings(dir, "openai"),
       transcriber: async () => {
-        if (++calls === 1) throw markFailure(Error("private"), "transient", "provider busy");
+        if (++calls === 1) throw markFailure(Error("private"), "transient", "provider unavailable (HTTP 429)");
         await new Promise((resolve) => setImmediate(resolve));
         return { text: "accepted" };
       },
@@ -2437,6 +2399,11 @@ test("a seal that could not be written leaves a barrier: no import binds the old
     config: { ...config },
   }).svc;
   t.after(() => restarted.stop());
+  // A valid selection for the new owner is what an unsealed archive would bind to, so only the barrier can refuse it.
+  writeFileSync(
+    join(dirname(restarted.databasePath), "ios-import-binding.json"),
+    JSON.stringify({ version: 1, state: "awaiting-source", owner: other })
+  );
   await restarted.storage.claimDatabase(other);
   await restarted.bootStorage();
   assert.equal(restarted.db.messages.get(`false_${PEER}_key1`), null);
@@ -2483,5 +2450,490 @@ test("a successful CLI import clears a stale ownership_file_failed notice and no
     assert.equal(again.getMeta("ios_import_error"), "existing_refusal");
   } finally {
     again.close();
+  }
+});
+
+/** Writes the audio files the fixture rows name and returns the rows. */
+function voiceRows(dir, count, extra = () => ({})) {
+  const rows = Array.from({ length: count }, (_, i) => ({ pk: i + 1, type: 3, file: `n${i}.opus`, ...extra(i) }));
+  for (const row of rows) writeFileSync(join(dir, row.file), "audio");
+  return rows;
+}
+
+test("a note that fails for its own sake is stored as failed on the third run, and the pass goes on", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 4));
+    const settings = providerSettings(dir, "local");
+    const calls = {};
+    const transcriber = async (file) => {
+      calls[file] = (calls[file] ?? 0) + 1;
+      if (file.endsWith("n0.opus")) throw markFailure(Error("private"), "transient", "whisper.cpp timed out");
+      return { text: "words" };
+    };
+    const run = () => importIos({ db, source: path, media: dir, settings, transcriber });
+    const first = await run();
+    assert.equal(first.state, "voice");
+    assert.equal(first.voice.transcribed, 3, "the other notes are not held up by the failing one");
+    assert.equal(voiceEntries(db)[1].attempts, 1);
+    assert.equal(voiceEntries(db)[1].failure, undefined);
+    assert.equal((await run()).state, "voice");
+    assert.equal(voiceEntries(db)[1].attempts, 2);
+    const third = await run();
+    assert.equal(third.state, "done");
+    assert.equal(third.voice.failed, 1);
+    assert.equal(voiceEntries(db)[1].failure, "attempts");
+    await run();
+    assert.equal(calls[join(dir, "n0.opus")], 3, "a note given up on is not sent again");
+    assert.equal(db.messages.get(`false_${PEER}_key4`).transcript, "words");
+  } finally {
+    db.close();
+  }
+});
+
+test("a provider failure does not count against the notes it hit, however often it repeats", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 3));
+    const settings = providerSettings(dir, "openai");
+    const transcriber = async () => {
+      throw markFailure(Error("private"), "transient", "provider unreachable");
+    };
+    for (let run = 0; run < 5; run++) {
+      const report = await importIos({ db, source: path, media: dir, settings, transcriber });
+      assert.equal(report.state, "voice");
+    }
+    for (const entry of Object.values(voiceEntries(db))) {
+      assert.equal(entry.attempts, undefined);
+      assert.equal(entry.failure, undefined);
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test("a real API answer with no text counts against its note; a 503 does not", async (t) => {
+  const { createServer } = await import("node:http");
+  let mode = "no-text";
+  const server = createServer(async (req, res) => {
+    for await (const _ of req) {
+      /* Drain the synthetic upload. */
+    }
+    if (mode === "503") {
+      res.statusCode = 503;
+      res.end();
+    } else res.end("{}");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 1));
+    const settings = providerSettings(dir, "openai", {
+      WAZAP_TRANSCRIBE_URL: `http://127.0.0.1:${server.address().port}/v1`,
+    });
+    await importIos({ db, source: path, media: dir, settings });
+    assert.equal(voiceEntries(db)[1].attempts, 1);
+    mode = "503";
+    assert.equal((await importIos({ db, source: path, media: dir, settings })).state, "voice");
+    assert.equal(voiceEntries(db)[1].attempts, 1, "the busy provider is not the note's fault");
+  } finally {
+    db.close();
+  }
+});
+
+test("an API that times out on a note counts it against the note and stops the pass", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 6));
+    const settings = providerSettings(dir, "openai");
+    const calls = [];
+    const transcriber = async (file) => {
+      calls.push(file);
+      throw markFailure(Error("private"), "transient", "provider timed out");
+    };
+    const first = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(first.state, "voice");
+    assert.equal(calls.length, 3, "the three calls in flight finish and no further upload starts");
+    assert.equal(Object.values(voiceEntries(db)).filter((entry) => entry.attempts === 1).length, 3);
+    // A note that always times out is given up on after three runs instead of stalling every run.
+    const stuck = async (file) => {
+      if (file.endsWith("n0.opus")) throw markFailure(Error("private"), "transient", "provider timed out");
+      return { text: "words" };
+    };
+    for (let run = 0; run < 3; run++) await importIos({ db, source: path, media: dir, settings, transcriber: stuck });
+    assert.equal(voiceEntries(db)[1].failure, "attempts");
+    assert.equal((await importIos({ db, source: path, media: dir, settings, transcriber: stuck })).state, "done");
+  } finally {
+    db.close();
+  }
+});
+
+test("a run whose first three notes all fail for their own sake pauses and charges none of them, the first two times", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 5));
+    const settings = providerSettings(dir, "local");
+    let broken = true;
+    const transcriber = async () => {
+      if (broken) throw markFailure(Error("private"), "transient", "ffmpeg failed (SIGKILL)");
+      return { text: "words" };
+    };
+    for (let run = 0; run < 2; run++) {
+      const report = await importIos({ db, source: path, media: dir, settings, transcriber });
+      assert.equal(report.state, "voice");
+    }
+    for (const entry of Object.values(voiceEntries(db))) {
+      assert.equal(entry.attempts, undefined, "a broken host does not use up the notes' attempts");
+      assert.equal(entry.failure, undefined);
+    }
+    broken = false;
+    const report = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(report.state, "done");
+    assert.equal(report.voice.transcribed, 5);
+  } finally {
+    db.close();
+  }
+});
+
+test("bad notes at the head of the archive are charged after three held runs, so the notes behind them are reached", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 8));
+    const settings = providerSettings(dir, "local");
+    const bad = (file) => /n[012]\.opus$/.test(file);
+    const transcriber = async (file) => {
+      if (bad(file)) throw markFailure(Error("private"), "transient", "whisper.cpp timed out");
+      return { text: "words" };
+    };
+    let state;
+    for (let run = 0; run < 14 && state !== "done"; run++)
+      state = (await importIos({ db, source: path, media: dir, settings, transcriber })).state;
+    assert.equal(state, "done");
+    for (let pk = 1; pk <= 3; pk++) assert.equal(voiceEntries(db)[pk].failure, "attempts");
+    for (let key = 4; key <= 8; key++) assert.equal(db.messages.get(`false_${PEER}_key${key}`).transcript, "words");
+  } finally {
+    db.close();
+  }
+});
+
+test("a note that succeeds after a run paused on three held failures does not charge them", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 5));
+    const settings = providerSettings(dir, "local");
+    const transcriber = async (file) => {
+      if (/n[012]\.opus$/.test(file)) throw markFailure(Error("private"), "transient", "whisper.cpp timed out");
+      await new Promise((resolve) => setTimeout(resolve, 30)); // still in flight when the third failure pauses the run
+      return { text: "words" };
+    };
+    const report = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(report.state, "voice");
+    assert.equal(report.voice.transcribed, 2, "the in-flight notes are stored");
+    for (const entry of Object.values(voiceEntries(db))) assert.equal(entry.attempts, undefined);
+  } finally {
+    db.close();
+  }
+});
+
+test("a bad note met before any success is still charged once a note succeeds", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 3));
+    const settings = providerSettings(dir, "local");
+    const transcriber = async (file) => {
+      if (file.endsWith("n0.opus")) throw markFailure(Error("private"), "transient", "whisper.cpp timed out");
+      return { text: "words" };
+    };
+    await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(voiceEntries(db)[1].attempts, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a folder-drop pass with an API provider does not flag missing voice bindings", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 1));
+    const api = providerSettings(dir, "openai");
+    // A checkpoint that predates binding capture: only a pass that would upload needs the bindings.
+    await importIos({ db, source: path, media: dir, background: true, settings: api });
+    const progress = JSON.parse(db.getMeta("ios_import_v1"));
+    delete progress.voiceBindings;
+    db.setMeta("ios_import_v1", JSON.stringify(progress));
+    const report = await importIos({ db, source: path, media: dir, background: true, settings: api });
+    assert.equal(report.state, "voice");
+    assert.equal(db.getMeta("ios_import_error"), null);
+  } finally {
+    db.close();
+  }
+});
+
+test("after a provider failure the accepted uploads stay stored and only the failed note goes again", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 3));
+    const settings = providerSettings(dir, "openai");
+    const calls = {};
+    let busy = true;
+    const transcriber = async (file) => {
+      calls[file] = (calls[file] ?? 0) + 1;
+      await new Promise((resolve) => setImmediate(resolve));
+      if (busy && file.endsWith("n0.opus")) throw markFailure(Error("private"), "transient", "provider unavailable (HTTP 429)");
+      return { text: "accepted" };
+    };
+    const first = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(first.voice.transcribed, 2, "uploads in flight when the provider failed are stored");
+    assert.equal(db.messages.get(`false_${PEER}_key2`).transcript, "accepted");
+    assert.equal(db.messages.get(`false_${PEER}_key3`).transcript, "accepted");
+    busy = false;
+    const second = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(second.state, "done");
+    assert.deepEqual(Object.values(calls), [2, 1, 1]);
+  } finally {
+    db.close();
+  }
+});
+
+test("a folder-drop pass with an API provider uploads nothing; with local it still transcribes", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 0, text: "hello" }, ...voiceRows(dir, 1).map((row) => ({ ...row, pk: 2 }))]);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "words" };
+    };
+    const api = providerSettings(dir, "openai");
+    for (let run = 0; run < 2; run++) {
+      const report = await importIos({ db, source: path, media: dir, background: true, settings: api, transcriber });
+      assert.equal(report.inserted, 2, "text and the voice row's name still import");
+      assert.equal(report.state, "voice");
+    }
+    assert.equal(calls, 0);
+    const local = await importIos({
+      db,
+      source: path,
+      media: dir,
+      background: true,
+      settings: providerSettings(dir, "local"),
+      transcriber,
+    });
+    assert.equal(calls, 1);
+    assert.equal(local.state, "done");
+  } finally {
+    db.close();
+  }
+});
+
+test("an API gets only notes of known length up to ten minutes, announced once before the first upload", async () => {
+  const { db, dir } = target();
+  try {
+    const rows = voiceRows(dir, 3, (i) => ({ duration: [42, 601, null][i] }));
+    const path = source(dir, rows);
+    const events = [];
+    const report = await importIos({
+      db,
+      source: path,
+      media: dir,
+      settings: providerSettings(dir, "openai"),
+      announce: (notes, provider) => events.push(`announce ${notes} ${provider}`),
+      transcriber: async () => {
+        events.push("upload");
+        return { text: "words" };
+      },
+    });
+    assert.deepEqual(events, ["announce 1 openai", "upload"]);
+    assert.equal(report.voice.transcribed, 1);
+    assert.equal(report.voice.skipped, 2, "the long file and the one without a length are left alone");
+    // Local costs nothing, so no cap and no notice.
+    const other = target();
+    try {
+      const localPath = source(other.dir, voiceRows(other.dir, 3, (i) => ({ duration: [42, 601, null][i] })));
+      const local = [];
+      const done = await importIos({
+        db: other.db,
+        source: localPath,
+        media: other.dir,
+        settings: providerSettings(other.dir, "local"),
+        announce: () => local.push("announce"),
+        transcriber: async () => ({ text: "words" }),
+      });
+      assert.equal(done.voice.transcribed, 3);
+      assert.deepEqual(local, []);
+    } finally {
+      other.db.close();
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test("nothing is announced when every note is excluded", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 2));
+    writeFileSync(join(dir, "voice-skip.txt"), `${PEER}\n`);
+    let announced = 0;
+    const report = await importIos({
+      db,
+      source: path,
+      media: dir,
+      settings: providerSettings(dir, "openai"),
+      announce: () => announced++,
+      transcriber: async () => assert.fail("must not upload"),
+    });
+    assert.equal(announced, 0);
+    assert.equal(report.voice.skipped, 2);
+  } finally {
+    db.close();
+  }
+});
+
+test("the CLI tells stderr how many notes go to which API provider, and keeps --json stdout to the report", async (t) => {
+  const fixture = await importSafetyFixture(t, { policy: "writable", allowApi: true, voices: 2, provider: "openai" });
+  const { svc, archive, folder } = fixture;
+  const { runIosImport } = await import("../dist/ios-import/cli.js");
+  await svc.stop();
+  const out = [];
+  const err = [];
+  const originalOut = process.stdout.write;
+  const originalErr = console.error;
+  process.stdout.write = function (chunk, ...rest) {
+    if (typeof chunk !== "string") return originalOut.call(this, chunk, ...rest);
+    out.push(chunk);
+    return true;
+  };
+  console.error = (...args) => err.push(args.join(" "));
+  try {
+    await runIosImport({ ...svc.config, command: "import", args: ["ios", archive], importMedia: folder, json: true });
+  } finally {
+    process.stdout.write = originalOut;
+    console.error = originalErr;
+  }
+  assert.equal(out.length, 1);
+  assert.equal(JSON.parse(out[0]).voice.transcribed, 2);
+  assert.deepEqual(
+    err.filter((line) => /voice note/.test(line)).map((line) => line.replace(/:\d+\.$/, ".")),
+    ["iPhone import: sending 2 voice notes to the openai transcription provider at 127.0.0.1."]
+  );
+});
+
+test("a voice-skip.txt line that names no chat in the archive stops the pass like a malformed one", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 1));
+    writeFileSync(join(dir, "voice-skip.txt"), `\n${GROUP}\n40700000009@s.whatsapp.net\n`);
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "words" };
+    };
+    await assert.rejects(
+      importIos({ db, source: path, media: dir, transcriber }),
+      (e) => /voice-skip\.txt line 3 matches no chat/.test(e.message) && !e.message.includes("40700000009")
+    );
+    assert.equal(calls, 0);
+    assert.equal(readIosReport(db).state, "voice");
+    writeFileSync(join(dir, "voice-skip.txt"), `${GROUP}\n`);
+    assert.equal((await importIos({ db, source: path, media: dir, transcriber })).voice.transcribed, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a finished background pass is not repeated at every start, yet --media still runs its own", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1, type: 3, file: "late.opus" }]);
+    const settings = providerSettings(dir, "local");
+    let calls = 0;
+    const transcriber = async () => {
+      calls++;
+      return { text: "words" };
+    };
+    const first = await importIos({ db, source: path, media: dir, background: true, settings, transcriber });
+    assert.equal(first.state, "done");
+    assert.equal(first.voice.missing, 1);
+    writeFileSync(join(dir, "late.opus"), "audio");
+    await importIos({ db, source: path, media: dir, background: true, settings, transcriber });
+    assert.equal(calls, 0, "the next start does not run the whole pass again");
+    const explicit = await importIos({ db, source: path, media: dir, settings, transcriber });
+    assert.equal(explicit.voice.transcribed, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("an import left in the voice state is not hashed again at the next start", async (t) => {
+  const { default: fs } = await import("node:fs");
+  const { syncBuiltinESMExports } = await import("node:module");
+  const { db, dir } = target();
+  try {
+    const path = source(dir, voiceRows(dir, 1));
+    assert.equal((await importIos({ db, source: path, textOnly: true })).state, "voice");
+    let reads = 0;
+    const original = fs.createReadStream;
+    t.mock.method(fs, "createReadStream", function (file, ...rest) {
+      if (String(file).endsWith("ChatStorage.sqlite")) reads++;
+      return original.call(this, file, ...rest);
+    });
+    syncBuiltinESMExports();
+    try {
+      await importIos({ db, source: path, textOnly: true });
+    } finally {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    assert.equal(reads, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("a full disk while recording an import failure fails the import, not the account", async (t) => {
+  const { WhatsAppService } = await import("../dist/whatsapp.js");
+  const { connectedService } = await import("./helpers.mjs");
+  const { svc } = connectedService(WhatsAppService, {
+    prefix: "wazap-ios-fulldisk-",
+    id: ME,
+    name: "Owner",
+    config: { importIos: true, persistHistory: true },
+  });
+  t.after(() => svc.stop());
+  await svc.storage.claimDatabase(ME);
+  const folder = join(dirname(svc.databasePath), "import");
+  mkdirSync(folder, { recursive: true });
+  writeFileSync(join(folder, "ChatStorage.sqlite"), "not a sqlite database");
+  const original = svc.db.setMeta;
+  t.mock.method(svc.db, "setMeta", function (key, ...rest) {
+    if (key === "ios_import_error") throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+    return original.call(this, key, ...rest);
+  });
+  await svc.bootStorage();
+  assert.equal(svc.getStatus().storage.state, "ready");
+  assert.equal((await svc.listChats("all", 20)).sync, "done");
+});
+
+test("a checkpoint in an unknown format fails closed with a reset hint; --reset recovers", async () => {
+  const { db, dir } = target();
+  try {
+    const path = source(dir, [{ pk: 1 }]);
+    await importIos({ db, source: path });
+    const unknown = JSON.parse(db.getMeta("ios_import_v1"));
+    delete unknown.format;
+    const saved = JSON.stringify(unknown);
+    db.setMeta("ios_import_v1", saved);
+    await assert.rejects(importIos({ db, source: path }), (e) => /unsupported format/.test(e.message) && /--reset/.test(e.fix));
+    assert.equal(db.getMeta("ios_import_v1"), saved);
+    const reset = await importIos({ db, source: path, explicit: true, reset: true });
+    assert.equal(reset.skippedExisting, 1);
+    assert.equal(JSON.parse(db.getMeta("ios_import_v1")).format, 2);
+  } finally {
+    db.close();
   }
 });
