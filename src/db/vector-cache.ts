@@ -8,6 +8,7 @@ import { TopK } from "./vectors.js";
 
 export const ADMISSION_CAP = 4096;
 const DIRTY_THRESHOLD = 4096;
+const EXTERNAL_LIMIT = 10; // Warms in a row undone by another connection's writes before the cache gives up.
 const BOOKKEEPING_BYTES = 56; // IDs plus three reusable (ID, slot) indexes.
 export interface ScanRequest {
   vectors: SharedArrayBuffer;
@@ -78,7 +79,7 @@ export class VectorCache {
   private reason: string | undefined;
   private blocked = false;
   private recoveries = 0;
-  private externals = 0; // Consecutive warms undone by another connection's write: they back off, but spend no attempt.
+  private externals = 0; // Consecutive warms undone by another connection's write: they back off, spend no attempt, and EXTERNAL_LIMIT of them fail the cache.
   private attempting = false; // A recovery warm is under way: an external change that ends it gives its attempt back.
   private capFallbacks = 0;
   private retryAt = 0;
@@ -308,6 +309,7 @@ export class VectorCache {
         this.loaded = true;
         this.reason = undefined;
         this.attempting = false;
+        this.externals = 0; // A warm that finished breaks the run of external changes.
         this.state = "ready";
       } catch (error) {
         if (!(error instanceof CacheCancelled)) this.failQuietly(error);
@@ -563,10 +565,13 @@ export class VectorCache {
             )
             .map((row) => row.id)
         );
+        // A hit edited or deleted during the scan scored old content, and dropping it would leave the list short of
+        // what SQLite ranks from current data: the whole search goes to SQLite instead.
+        if (changed.size > 0) return null;
         // A search served from the recovered cache closes the incident.
         this.recoveries = this.externals = 0;
         this.attempting = false;
-        return hits.filter((hit) => !changed.has(hit.id));
+        return hits;
       } catch (error) {
         if (!(error instanceof CacheCancelled)) this.failQuietly(error);
         return null;
@@ -592,13 +597,15 @@ export class VectorCache {
       error instanceof CacheLimit ? error.message : error instanceof RangeError ? "allocation_failed" : code;
     if (this.attempting && this.reason === "external_change" && this.recoveries > 0) this.recoveries--;
     this.attempting = false;
-    this.state = error instanceof CacheLimit ? "disabled" : permanent || this.recoveries >= 3 ? "failed" : "recovering";
-    this.blocked = permanent || this.recoveries >= 3;
+    const streak = this.reason === "external_change" ? this.externals++ : this.recoveries;
+    // A writer that never pauses would keep the cache warming forever: after EXTERNAL_LIMIT in a row it stays on SQLite.
+    const exhausted = this.recoveries >= 3 || this.externals >= EXTERNAL_LIMIT;
+    this.state = error instanceof CacheLimit ? "disabled" : permanent || exhausted ? "failed" : "recovering";
+    this.blocked = permanent || exhausted;
     if (this.blocked) {
       clearInterval(this.timer);
       this.dropTracking();
     }
-    const streak = this.reason === "external_change" ? this.externals++ : this.recoveries;
     this.retryAt = Date.now() + this.recoveryDelayMs * 2 ** Math.min(streak, 6);
     void this.stopWorkers();
     this.release();

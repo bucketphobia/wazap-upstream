@@ -155,8 +155,8 @@ keep using SQLite.
 
 Dirty embeddings reconcile in background batches; a query encountering a large
 backlog uses SQLite immediately. Queries and reconciliation share one queue so
-workers read immutable buffers. Candidates edited or deleted after dispatch are
-omitted; those changes enter the next scan. A connection's `PRAGMA data_version`
+workers read immutable buffers. A candidate edited or deleted after dispatch sends
+that search to SQLite; the change enters the next scan. A connection's `PRAGMA data_version`
 invalidates the cache when another connection commits, including during a scan.
 The next warm uses current data. No persistent schema migration is needed.
 
@@ -165,7 +165,8 @@ allow at most three consecutive background recovery attempts (1, 2 and 4 second
 delays). The attempts come back once a search is served from the recovered cache,
 so a failure that recurs after every warm still ends in failed. A write from
 another connection during a warm uses no attempt; such warms retry with a growing
-delay (up to 64 times the base) until a search is served. Any error inside the cache
+delay (up to 64 times the base) until a warm finishes or a search is served, and ten
+in a row end in failed. Any error inside the cache
 fails the cache the same way; it never reaches the search or the server.
 Warm operations have a 60-second deadline and worker responses a 15-second
 deadline. Recall status includes advisory `cache` state, reason, shared bytes,

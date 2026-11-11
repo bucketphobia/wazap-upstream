@@ -439,10 +439,14 @@ test("newer messages append to the sorted index and a removal falls back to the 
 test("A-S4 size limit refuses a cache before allocating its vector payload", async (t) => {
   const { cache } = rawFixture(t, 2000, 3072);
   cache.maxBytes = 1048576;
+  let allocations = 0;
+  const allocate = cache.allocate.bind(cache);
+  cache.allocate = (...args) => (allocations++, allocate(...args));
   await cache.warm("m");
   assert.equal(cache.status().state, "disabled");
   assert.equal(cache.status().reason, "size_limit");
   assert.equal(cache.status().sharedBytes, 0);
+  assert.equal(allocations, 0, "the count alone refuses the cache: nothing is allocated, not even up to the limit");
 });
 
 test("A-S6 a warm deadline is bounded and reported without content", async (t) => {
@@ -596,4 +600,104 @@ test("external invalidation during background reconciliation rewarms before publ
   assert.equal(changed, true);
   assert.equal(cache.loaded, true);
   assert.deepEqual(await db.vectors.hybridAsync(input), db.vectors.hybrid(input));
+});
+
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a top hit edited while the workers scan sends the search to SQLite, not its old score", async (t) => {
+  const { db } = openTemp();
+  t.after(() => db.close());
+  seed(db, [2, 1, 2, 3]);
+  await db.vectors.warmCache("m");
+  const before = await db.vectors.hybridAsync(input);
+  assert.equal(before.hits[0].message.keyId, "R3");
+  const cache = db.vectors.cache;
+  const pending = db.vectors.hybridAsync(input);
+  await turn();
+  assert.ok(cache.pending.size > 0, "the edit lands while the workers scan");
+  db.messages.upsert(textMessage(PEER, "R3", T0 + 3000, "fixture 3 edited", { editedAt: T0 + 100000 }));
+  const result = await pending;
+  assert.ok(!result.hits.some((hit) => hit.message.keyId === "R3"), "the edited message keeps no score from its old words");
+  assert.deepEqual(result, db.vectors.hybrid(input));
+  assert.equal(result.hits.length, input.limit, "a full list, not one short of the dropped hit");
+});
+
+test("closing the database ends every search worker", async () => {
+  const { db } = openTemp();
+  seed(db, [2, 1, 2, 3]);
+  await db.vectors.warmCache("m");
+  await db.vectors.hybridAsync(input);
+  const workers = [...db.vectors.cache.workers];
+  assert.ok(workers.length > 0);
+  const exited = Promise.all(workers.map((worker) => new Promise((resolve) => worker.once("exit", resolve))));
+  // The maintenance timer would fail a cache whose connection closed and stop its workers that way: only close may.
+  db.vectors.cache.maintain = () => {};
+  db.close();
+  let timer;
+  await Promise.race([
+    exited,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error("a search worker outlived close")), 2000);
+    }),
+  ]).finally(() => clearTimeout(timer));
+});
+
+test("a clear barrier raised while the workers scan, before its purge, sends the search to SQLite", async (t) => {
+  const { db } = openTemp();
+  t.after(() => db.close());
+  // Older messages score higher, so the barrier hides the cached top while leaving newer ones to rank.
+  seed(db, [90, 80, 70, 60, 50, 40, 30, 20, 10]);
+  const query = { ...input, limit: 5, semanticCandidates: 5 };
+  await db.vectors.warmCache("m");
+  await db.vectors.hybridAsync(query);
+  const cache = db.vectors.cache;
+  const pending = db.vectors.hybridAsync(query);
+  await turn();
+  assert.ok(cache.pending.size > 0, "the barrier lands while the workers scan");
+  // What clearChat does first; its purge, which would mark the embeddings changed, has not run.
+  db.messages.raiseBarrier(PEER, T0 + 3000);
+  assert.equal(db.messages.purgePending(), true);
+  const result = await pending;
+  assert.deepEqual(result, db.vectors.hybrid(query));
+  assert.equal(result.hits.length, 5, "the newer messages fill the list the hidden ones left");
+});
+
+test("ten warms in a row undone by external writes end in failed and leave searches on SQLite", async (t) => {
+  const { cache, raw } = rawFixture(t, 128);
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  for (let i = 0; i < 20 && cache.status().state !== "failed"; i++) {
+    assert.equal(cache.status().state, "recovering");
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.status().state, "failed");
+  assert.equal(cache.status().reason, "external_change");
+  assert.equal(cache.externals, 10);
+  assert.equal(cache.status().recoveries, 0, "external writes still spend no recovery attempt");
+  assert.deepEqual(trackingNames(raw), []);
+  assert.equal(await cache.rank("m", Float64Array.of(1, 0), 2, 0), null);
+});
+
+test("a warm that finishes breaks the run of external changes", async (t) => {
+  const { cache } = rawFixture(t, 128);
+  let version = 0;
+  cache.dataVersion = () => ++version;
+  cache.recoveryDelayMs = 1;
+  await cache.warm("m");
+  for (let i = 0; i < 8; i++) {
+    cache.retryAt = 0;
+    cache.maintain();
+    await cache.tail;
+  }
+  assert.equal(cache.externals, 9);
+  delete cache.dataVersion;
+  cache.retryAt = 0;
+  cache.maintain();
+  await cache.tail;
+  assert.equal(cache.status().state, "ready");
+  assert.equal(cache.externals, 0);
 });
