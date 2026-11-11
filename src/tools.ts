@@ -30,7 +30,7 @@ import { mediaCaptionOf } from "./media-details.js";
 import { kilobytes, mediaAnswer, oneLine, parsePages, UNTRUSTED_TEXT_NOTE } from "./media-answer.js";
 import { captionTravels, mimeOfSource } from "./outgoing-media.js";
 import { getMessageView, getMessageViewAcross, resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
-import { clockLabel, isoWithOffset } from "./messages.js";
+import { clockLabel, isoWithOffset, namedMentions } from "./messages.js";
 import { MAX_ID_SECOND } from "./db/ids.js";
 import { assessSearch, parseMoment, planSearch } from "./search-query.js";
 import { checkSearchSource, finalizeSearch, searchOwner, SEARCH_CHANGED } from "./search-finalize.js";
@@ -531,7 +531,7 @@ const GUIDE_IDS = `## Ids and accounts
 
 ## Message shape
 Media may carry transcript. An unsaved sender name is unverified.
-mentions: [{id, name}]. get_message
+mentions: [{id, name, token}]; text names each as @<token>. get_message
 includes reactions, votes and receipts. Calls: kind/direction/outcome/duration_seconds;
 system: action/actor/targets/value. timestamp is ISO 8601.
 `;
@@ -707,7 +707,7 @@ const TOOLS: readonly ToolDef[] = [
       until: moment,
       types: messageTypes,
       include_previews: includePreviews,
-      hours: z.number().int().min(1).max(24).optional().describe('"status" only: how far back, 24 by default'),
+      hours: z.number().int().min(1).max(24).optional().describe('The last N hours; "status": 24 by default'),
       full_text: fullText,
       // Named again so the handler sees it typed: an explicit account keeps a name's lookup on it.
       account_id: ACCOUNT_ID.optional(),
@@ -753,22 +753,24 @@ const TOOLS: readonly ToolDef[] = [
           previewBlocks(previews)
         );
       }
-      if (hours !== undefined) {
-        throw new WazapError("INVALID_ID", 'hours applies to chat_id "status" only.', "Page back through a chat with before instead");
+      if (hours !== undefined && since !== undefined) {
+        throw new WazapError("INVALID_ID", "hours and since both say where the window starts.", "Pass one of them");
       }
-      const window = readWindow(since, until);
+      // The last N hours are a window that starts N hours ago: read, noted and echoed as one that since opened.
+      const from = hours === undefined ? since : isoWithOffset(Date.now() - hours * 3_600_000);
+      const window = readWindow(from, until);
       // Without a window the service is asked as it always was.
       const result = await (window.sinceMs === undefined && window.untilMs === undefined ? wa.readMessages(chat_id, limit, before, types) : wa.readMessages(chat_id, limit, before, types, window));
       const previews = include_previews ? await wa.previews(newestFirst(result.data), MAX_PREVIEWS, ctx.signal) : [];
       const unconfirmed = result.unconfirmedSends ?? [];
       const noOlder = result.older?.received === 0 ? OLDER_NONE_NOTE : null;
-      const span = [since === undefined ? null : `since ${since}`, until === undefined ? null : `until ${until}`].filter(Boolean).join(", ");
+      const span = [hours === undefined ? null : `last ${hours}h`, since === undefined ? null : `since ${since}`, until === undefined ? null : `until ${until}`].filter(Boolean).join(", ");
       const windowNote = windowNoteOf(result, span, window.untilMs);
       const notes = [...unconfirmed.map(unconfirmedNote), noOlder, windowNote, previewGap(result.data, previews, include_previews)];
       return ok(
         [
           renderMessages(
-            `Messages in ${named === undefined ? chat_id : `${named.name} (${chat_id}), whom "${named.asked}" names`}${span === "" ? "" : ` (${span})`}`,
+            `Messages in ${named === undefined ? chatTitle(wa, chat_id) : `${named.name} (${chat_id}), whom "${named.asked}" names`}${span === "" ? "" : ` (${span})`}`,
             result.data,
             previewLabels(previews),
             [previewNote(previews), ...notes],
@@ -889,7 +891,8 @@ const TOOLS: readonly ToolDef[] = [
         ...(chat_id === undefined ? { private: await privateRule(ctx.hub, ctx.accountId) } : {}),
         ...waitSignal(ctx),
       });
-      return ok(renderWait(result), { ...result, count: result.messages.length });
+      const named = { ...result, messages: withChatNames(ctx.wa, result.messages) };
+      return ok(renderWait(named), { ...named, count: named.messages.length });
     },
   }),
 
@@ -961,7 +964,7 @@ const TOOLS: readonly ToolDef[] = [
           const rankedMessages = result.data.hits.map(({ message: _message, ...rank }, i) => ({ ...identified[i]!, ...rank }));
           const final = ctx.deferSearchFinalization ? { messages: rankedMessages, contexts: result.data.contexts, changed: false }
             : finalizeSearch(wa, rankedMessages, result.data.contexts, chat_id, { ...filters, private: finalRule }, plan.query);
-          const hits = final.messages.map(({ score, rank_score, similarity, matched, from_index, ...message }) => ({ score, rank_score, similarity, matched, from_index, message }));
+          const hits = withChatNames(wa, final.messages).map(({ score, rank_score, similarity, matched, from_index, ...message }) => ({ score, rank_score, similarity, matched, from_index, message }));
           const capped = result.data.lexicalCapped === true;
           const answer: IdentifiedRecallAnswer = { ...result.data, hits, contexts: final.contexts, index: result.data.index, lexicalCapped: capped };
           const assessment = assessSearch(query, hits.map((hit) => hit.message));
@@ -1006,7 +1009,7 @@ const TOOLS: readonly ToolDef[] = [
       checkSearchSource(ctx.hub, ctx.accountId, wa, owner);
       const final = ctx.deferSearchFinalization ? { messages: identified, contexts: found.contexts, changed: false }
         : finalizeSearch(wa, identified, found.contexts, chat_id, { ...filters, private: finalRule }, plan.query);
-      const messages = final.messages;
+      const messages = withChatNames(wa, final.messages);
       const assessment = assessSearch(query, messages, plan.match === "words");
       const cov = searchCoverage(wa, chat_id, { sinceMs, untilMs, ...(tag === undefined ? {} : { tag }) });
       const notes = [
@@ -1067,11 +1070,11 @@ const TOOLS: readonly ToolDef[] = [
           ? await getMessageViewAcross(hub, resolved, message_id)
           : { binding: resolved, message: await getMessageView(wa, message_id) };
       const [identified] = await withSenderIdentity(binding.wa, [message]);
-      const view = identified ?? message;
+      const [view] = withChatNames(binding.wa, [identified ?? message]) as [AnyMessage];
       // The one message in full: neither its words nor the words it quotes are cut.
       const media = view.media === undefined ? null : `  media: ${[view.media.mime, view.media.filename, view.media.size === undefined ? null : kilobytes(view.media.size)].filter(Boolean).join(", ")} (get_media opens it)`;
       const text = [
-        renderMessages(`Message in ${view.chat_id}`, [view], new Map(), null, null, null),
+        renderMessages(`Message in ${chatRef(view)}`, [view], new Map(), null, null, null),
         media,
         reactionLine(view),
         voteLines(view),
@@ -1942,6 +1945,34 @@ function renderJoin(r: JoinGroupResult): string {
 /** A rendered message, with or without the resolved sender identity fields. */
 type AnyMessage = MessageView | IdentifiedMessage;
 
+/**
+ * Messages with their chat's name beside its id, where the account can name
+ * it: a search's hits come from several chats, and an id alone says which
+ * group only after another call.
+ */
+function withChatNames<T extends { chat_id: string }>(wa: WhatsAppApi, messages: readonly T[]): Array<T & { chat_name?: string }> {
+  const names = wa.chatNames?.([...new Set(messages.map((m) => m.chat_id))]) ?? {};
+  return messages.map((m) => {
+    const name = names[m.chat_id];
+    return name === undefined || name === "" || name === m.chat_id ? m : { ...m, chat_name: name };
+  });
+}
+
+/** A chat an id named, as a title says it: "Bloc 12 (…@g.us)", or the id as given when the account has no name for it. */
+function chatTitle(wa: WhatsAppApi, chatId: string): string {
+  const name = wa.chatNames?.([chatId])[chatId];
+  return name === undefined || name === "" || name === chatId ? chatId : `${name} (${chatId})`;
+}
+
+/**
+ * The chat as a line or a heading names it: its name and the id every tool
+ * takes. The id alone when nothing names the chat, and under a message of the
+ * other person in a one-to-one chat, whose name the line already opens with.
+ */
+function chatRef(m: { chat_id: string; chat_name?: string; from_me: boolean; sender: { id: string } }): string {
+  return m.chat_name === undefined || (!m.from_me && m.sender.id === m.chat_id) ? m.chat_id : `${m.chat_name} (${m.chat_id})`;
+}
+
 /** "❤️×2 😍": each emoji once, in the order it first came, counted when more than one person chose it. */
 function reactionTag(reactions: ReadonlyArray<{ emoji: string }>): string {
   const counts = new Map<string, number>();
@@ -2044,22 +2075,25 @@ function renderMessages(
       day = m.timestamp.slice(0, 10);
       lines.push(`## ${dayHeading(day, today)}`);
     }
+    const text = truncate(namedMentions(m.text, m.mentions), textCap);
+    // A mention the words above already show as "@Ana" is not said again.
+    const mentioned = (m.mentions ?? []).filter((person) => !text.includes(`@${person.name}`));
     const tags = [
       labels.get(m.message_id) ?? null,
       typeTag(m),
       m.forwarded ? "forwarded" : null,
       m.edited ? "edited" : null,
       m.reactions?.length ? reactionTag(m.reactions) : null,
-      m.mentions?.length ? `mentions ${m.mentions.map((person) => person.name).join(", ")}` : null,
+      mentioned.length ? `mentions ${mentioned.map((person) => person.name).join(", ")}` : null,
       voteTag(m),
       deliveryTag(m),
       m.private ? "private" : null,
     ].filter(Boolean);
-    const where = chats.size > 1 && m.chat_id !== chat ? ` · in ${m.chat_id}` : "";
+    const where = chats.size > 1 && m.chat_id !== chat ? ` · in ${chatRef(m)}` : "";
     chat = m.chat_id;
     lines.push(`- ${m.timestamp.slice(11, 16)} ${senderLabel(m, introduced)}${tags.length ? ` [${tags.join(", ")}]` : ""}${where} · ${m.message_id}`);
     if (m.quoted) lines.push(`  > ${truncate(m.quoted.text, quoteCap)}${shown.has(m.quoted.message_id) ? "" : ` (${m.quoted.message_id})`}`);
-    lines.push(`  ${truncate(m.text, textCap)}`);
+    lines.push(`  ${text}`);
     if (m.transcript !== undefined && m.transcript !== "") lines.push(`  transcript: ${truncate(m.transcript, textCap)}`);
   }
   return lines.join("\n");
@@ -2165,11 +2199,11 @@ function renderRecall(
       m.edited ? "edited" : null,
       m.private ? "private" : null,
     ].filter(Boolean);
-    const where = m.chat_id !== chat ? ` · in ${m.chat_id}` : "";
+    const where = m.chat_id !== chat ? ` · in ${chatRef(m)}` : "";
     chat = m.chat_id;
     lines.push(`- ${m.timestamp.slice(0, 10)} ${m.timestamp.slice(11, 16)} ${senderLabel(m, introduced)} [${tags.join(", ")}]${where} · ${m.message_id}`);
     if (m.quoted) lines.push(`  > ${truncate(m.quoted.text, 160)}${shown.has(m.quoted.message_id) ? "" : ` (${m.quoted.message_id})`}`);
-    lines.push(`  ${truncate(m.text, textCap)}`);
+    lines.push(`  ${truncate(namedMentions(m.text, m.mentions), textCap)}`);
     if (m.transcript !== undefined && m.transcript !== "") lines.push(`  transcript: ${truncate(m.transcript, textCap)}`);
   }
   return lines.join("\n");
@@ -2215,10 +2249,10 @@ function renderWait(result: WaitResult): string {
   for (const m of result.messages) {
     if (m.chat_id !== chat) {
       chat = m.chat_id;
-      lines.push(`## ${chat}`);
+      lines.push(`## ${chatRef(m)}`);
     }
     const kind = typeTag(m);
-    lines.push(`- ${shortStamp(m.timestamp, today)} ${senderLabel(m, introduced)}${kind === null ? "" : ` [${kind}]`}: ${truncate(m.text, 500)} · ${m.message_id}`);
+    lines.push(`- ${shortStamp(m.timestamp, today)} ${senderLabel(m, introduced)}${kind === null ? "" : ` [${kind}]`}: ${truncate(namedMentions(m.text, m.mentions), 500)} · ${m.message_id}`);
     if (m.transcript !== undefined && m.transcript !== "") lines.push(`  transcript: ${truncate(m.transcript, 500)}`);
   }
   lines.push("", tail);

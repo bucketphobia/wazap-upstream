@@ -63,6 +63,23 @@ test("since and until read one window, oldest to newest, a bare date meaning its
   assert.equal(untilYesterday.structuredContent.unconfirmed_sends, undefined);
 });
 
+test("hours reads the last hours of a chat as a window, and is refused beside since", async (t) => {
+  const { call, arrive } = setup(t);
+  arrive("ieri", Date.now() - 26 * 3_600_000);
+  arrive("acum trei ore", Date.now() - 3 * 3_600_000);
+  arrive("acum o oră", Date.now() - 3_600_000);
+  const result = await call("read_messages", { chat_id: ANA, hours: 2 });
+  assert.deepEqual(result.structuredContent.messages.map((m) => m.text), ["acum o oră"]);
+  assert.ok(Math.abs(Date.parse(result.structuredContent.since) - (Date.now() - 2 * 3_600_000)) < 5000, "echoed as the window it is");
+  assert.match(result.content[0].text, /\(last 2h\)/);
+  const day = await call("read_messages", { chat_id: ANA, hours: 24 });
+  assert.deepEqual(day.structuredContent.messages.map((m) => m.text), ["acum trei ore", "acum o oră"]);
+
+  const both = await call("read_messages", { chat_id: ANA, hours: 2, since: dayOf(-1) });
+  assert.equal(textError(both).error, "INVALID_ID");
+  assert.match(textError(both).message, /hours and since/);
+});
+
 test("a window holding more than limit says so, and before pages on inside it without asking the phone", async (t) => {
   const { call, arrive, sock } = setup(t);
   let asked = 0;

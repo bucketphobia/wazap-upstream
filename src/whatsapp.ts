@@ -1115,6 +1115,10 @@ export class WhatsAppService implements WhatsAppApi {
     return this.reads.refreshSearch(...args);
   }
 
+  chatNames(chatIds: readonly string[]): Record<string, string> {
+    return Object.fromEntries(chatIds.map((id) => [id, this.identity.displayName(id)]));
+  }
+
   /** The recent exchange and the user's style in a chat, for a contact find_contact resolved. */
   syncContacts(): Promise<ContactSyncResult> {
     return this.contacts.syncContacts();

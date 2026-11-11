@@ -309,9 +309,17 @@ export interface MessageSender {
   tags?: string[];
 }
 
+export interface Mention {
+  id: string;
+  name: string;
+  token?: string;
+}
+
 export interface MessageView {
   message_id: string;
   chat_id: string;
+  /** The chat's name, where an answer spans chats or shows one message (search, get_message, wait_for_messages): a group's subject, the other person's name. */
+  chat_name?: string;
   from_me: boolean;
   sender: MessageSender;
   type: MessageType;
@@ -328,8 +336,12 @@ export interface MessageView {
   forwarded: boolean;
   /** One per person who reacted; `name` resolves `sender` the way a message's sender is. */
   reactions?: Array<{ emoji: string; sender: string; name: string }>;
-  /** Who the message @-mentions, each once, resolved the way a reaction's sender is. */
-  mentions?: Array<{ id: string; name: string }>;
+  /**
+   * Who the message @-mentions, each once, resolved the way a reaction's sender
+   * is. `token` is the digits `text` names them by after its "@" (a lid's, or a
+   * number's), when the text carries them.
+   */
+  mentions?: Mention[];
   /** A group notice spelled out: who made which change, to whom. */
   system?: SystemEvent;
   /** On a poll: its options, each with who chose it. */
@@ -1040,6 +1052,8 @@ export interface WhatsAppApi {
   /** Moves `client`'s catch-up mark to the top of `window`, while it still is the window's `expected` (compare-and-set). */
   catchUpAdvance?(client: string, window: CatchupWindow): Promise<{ advanced: boolean }>;
   hasChat(jid: string): boolean;
+  /** Each chat's name as views show it, by id: a group's subject, a person's name. Local, never asks WhatsApp; optional, so a stand-in need not name. */
+  chatNames?(chatIds: readonly string[]): Record<string, string>;
   hasMessage(id: string): boolean;
   /** What search ran across by words; optional, so a stand-in need not count. */
   searchCoverage?(chatId: string | undefined, opts?: { sinceMs?: number; untilMs?: number; tag?: string }): SearchCoverage | null;

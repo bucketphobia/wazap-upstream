@@ -15,6 +15,7 @@ import type {
   DeliveryStatus,
   EventParty,
   EventResponses,
+  Mention,
   MessageType,
   MessageView,
   PollResults,
@@ -1455,7 +1456,7 @@ export function buildMessageView(raw: WAMessage, ctx: MessageViewContext): Messa
   if (ctx.reactions.length > 0) {
     view.reactions = ctx.reactions.map((r) => ({ ...r, name: ctx.nameFor(ctx.canonical(r.sender)) }));
   }
-  const mentions = mentionsView(context, ctx);
+  const mentions = mentionsView(context, ctx, text);
   if (mentions.length > 0) view.mentions = mentions;
   if (event) view.system = event.system;
   const poll = pollOf(raw);
@@ -1505,13 +1506,48 @@ function deliveryView(receipt: Receipt, ctx: MessageViewContext): Delivery | und
   return delivery;
 }
 
-/** Each person the message @-mentions, once and in the order named: a lid and its number are the same person. */
-function mentionsView(context: proto.IContextInfo | undefined, ctx: MessageViewContext): Voter[] {
-  const ids = new Set<string>();
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** "@<digits>" as a text names a mention: a longer number that starts with these digits is someone else. */
+function mentionToken(user: string): RegExp {
+  return new RegExp(`@${escapeRegExp(user)}(?!\\d)`);
+}
+
+/**
+ * Each person the message @-mentions, once and in the order named: a lid and
+ * its number are the same person. The text names a mention by the user part of
+ * the jid WhatsApp put on the message, which for a lid is not a number anyone
+ * knows, so the digits it uses are kept as `token`.
+ */
+function mentionsView(context: proto.IContextInfo | undefined, ctx: MessageViewContext, text: string): Mention[] {
+  const found = new Map<string, Mention>();
   for (const jid of context?.mentionedJid ?? []) {
-    if (typeof jid === "string" && jid.length > 0) ids.add(ctx.canonical(jid));
+    if (typeof jid !== "string" || jid.length === 0) continue;
+    const id = ctx.canonical(jid);
+    const mention = found.get(id) ?? { id, name: ctx.nameFor(id) };
+    found.set(id, mention);
+    if (mention.token !== undefined) continue;
+    const token = [jid, id].map((named) => named.split("@")[0] ?? "").find((user) => user !== "" && mentionToken(user).test(text));
+    if (token !== undefined) mention.token = token;
   }
-  return [...ids].map((id) => ({ id, name: ctx.nameFor(id) }));
+  return [...found.values()];
+}
+
+/**
+ * `text` as the phone shows it: "@Ana" where it carries a mention's digits.
+ * Someone wazap cannot name keeps their digits. Some texts carry the profile
+ * name after the digits ("@<digits>~<name>"): the name is then said once.
+ */
+export function namedMentions(text: string, mentions: readonly Mention[] | undefined): string {
+  const names = new Map<string, string>();
+  for (const { token, name } of mentions ?? []) {
+    if (token !== undefined && name !== "" && name !== "unknown" && !name.startsWith("unknown (")) names.set(token, name);
+  }
+  if (names.size === 0) return text;
+  const tokens = [...names.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
+  let result = text.replace(new RegExp(`@(${tokens.join("|")})(?!\\d)`, "g"), (_whole, token: string) => `@${names.get(token)!}`);
+  for (const name of new Set(names.values())) result = result.replaceAll(`@${name}~${name}`, `@${name}`);
+  return result;
 }
 
 function voterOf(jid: string, ctx: MessageViewContext): Voter {
