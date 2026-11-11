@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.7.2
+
+- **zod 4.6.7, for a dependency advisory.** `npm audit` reported GHSA-mrhx-c7xc-m3w5 (zod before 4.6.6: a large array that fails validation can exhaust memory), reached through wazap's own zod 3 and through jimp's plugins, which Baileys falls back to for profile pictures and thumbnails where sharp does not load. wazap now depends on zod ^4.6.7, and an override gives jimp's plugins the same one, so an install holds a single zod and the audit is clean. Tool names, titles, descriptions, arguments and error codes are unchanged, and tools/list still says each tool takes its arguments and no others. What a client sees differently there: `manage_chat`'s `pin_hours` is `anyOf` of three constants where it was `enum: [24, 168, 720]`, `remember`'s `fields` gains `propertyNames`, and `send_message`'s `forward` gains its description; in a full-format session's output schemas, `additionalProperties` is `{}` where it was `true`, integers carry safe-integer bounds and records `propertyNames`. The list is 23,169 bytes in a local write session and 22,864 in a remote one (22,971 and 22,666 in 1.7.1), since shared sub-schemas are written out where they were references.
+
 ## 1.7.1
 
 - **A chat is named, not only numbered.** A `search` hit in a group read `in 120363…@g.us`, and an agent needed another call to learn which group that was. `search`, `get_message` and `wait_for_messages` now carry `chat_name` on each message, and the text says `in Bloc 12 (120363…@g.us)`; `read_messages` titles a chat read by its id with its name too. Under the other person's own line in a one-to-one chat the id stays alone, since the line already opens with their name. The name is read locally, the way a sender's is; no call to WhatsApp.
