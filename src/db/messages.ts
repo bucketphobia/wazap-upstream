@@ -11,7 +11,7 @@
  * 4. an older version never overwrites a newer stored edit.
  */
 import { performance } from "node:perf_hooks";
-import type { Connection } from "./connection.js";
+import { sqlLimit, type Connection } from "./connection.js";
 import { StorageError } from "./errors.js";
 import { checkInstant, checkTimestamp, firstIdOfSecond, idLowerBound, idUpperBound, SEQ_SPAN } from "./ids.js";
 import { parseSid, sidOf, type Identity, type MessageKey } from "./identity.js";
@@ -188,6 +188,15 @@ function earliest(a: number | null, b: number | null): number | null {
   if (a === null) return b;
   if (b === null) return a;
   return Math.min(a, b);
+}
+
+/** A message as a cursor over a chat keeps it: no words, no protobuf (Messages.chatRefs). */
+export interface MessageRefRow {
+  id: number;
+  keyId: string;
+  fromMe: boolean;
+  ts: number;
+  type: string;
 }
 
 function pageOf(items: StoredMessage[], limit: number): Page<StoredMessage> {
@@ -540,6 +549,19 @@ export class Messages {
     });
   }
 
+  /**
+   * A live message's protobuf, stored again with fresh media fields: the url
+   * and directPath WhatsApp handed out when the phone uploaded expired media
+   * again. Not an edit (no version, no new words); a tombstone stays one.
+   */
+  refreshRaw(sid: string, raw: Uint8Array): boolean {
+    return this.c.write(() => {
+      const key = this.visibleKey(sid);
+      if (key === null) return false;
+      return this.c.run("UPDATE messages SET raw = ? WHERE id = ? AND deleted_at IS NULL AND raw IS NOT NULL", raw, key.id) > 0;
+    });
+  }
+
   /** Delivery status only rises, in statusRank's order. */
   setStatus(sid: string, status: number): boolean {
     return this.c.write(() => {
@@ -786,7 +808,7 @@ export class Messages {
     const chat = this.c.write(() => {
       const raised = this.raiseBarrier(chatJid, through);
       for (const chatId of this.identity.chatIdsOf(raised)) {
-        this.c.run("UPDATE chats SET archived = 0, pinned = NULL, unread = 0, proto = NULL WHERE id = ?", chatId);
+        this.c.run("UPDATE chats SET archived = 0, pinned = NULL, unread = 0, proto = NULL, described_ts = NULL WHERE id = ?", chatId);
         this.c.run("DELETE FROM handled WHERE chat_id = ?", chatId);
       }
       return raised;
@@ -1276,6 +1298,35 @@ export class Messages {
       limit + 1
     );
     return pageOf(rows.map(messageFromRow), limit);
+  }
+
+  /**
+   * chatPage's messages without their content: what a cursor over them keeps
+   * (id, key, direction, time, type), from the same rows in the same order,
+   * without reading a word or a protobuf. get_recent_messages' first call
+   * walks every chat active in its window this way.
+   */
+  chatRefs(chatJid: string, options: { before?: number; limit: number; since?: number }): Page<MessageRefRow> {
+    const limit = clampLimit(options.limit);
+    const chat = this.identity.chat(chatJid);
+    if (chat === null) return { items: [], hasMore: false, nextBefore: null };
+    const family = this.identity.chatIdsOf(chat);
+    const inChat = chatCondition(family);
+    const once = foldTwinCondition(family, chat.id);
+    const since = options.since === undefined ? null : checkTimestamp(options.since, "since");
+    const rows = this.c.all<{ id: number; key_id: string; from_me: number; ts: number; type: string }>(
+      `SELECT m.id, m.key_id, m.from_me, m.ts, m.type FROM ${MESSAGE_FROM}
+       WHERE ${inChat.sql} AND m.id < ? AND m.id >= ? AND m.ts >= ? AND ${VISIBLE} ${once.sql} ORDER BY m.id DESC LIMIT ${sqlLimit(limit + 1)}`,
+      ...inChat.params,
+      options.before ?? NO_UPPER_BOUND,
+      since === null ? 0 : idLowerBound(since),
+      since ?? 0,
+      this.c.now(),
+      ...once.params
+    );
+    const hasMore = rows.length > limit;
+    const items = (hasMore ? rows.slice(0, limit) : rows).map((row) => ({ id: row.id, keyId: row.key_id, fromMe: row.from_me === 1, ts: row.ts, type: row.type }));
+    return { items, hasMore, nextBefore: hasMore ? items[items.length - 1]!.id : null };
   }
 
   /**

@@ -23,11 +23,11 @@ import {
   type CatchupTagJids,
   type CatchupWindow,
 } from "../catchup-scan.js";
-import { secondOfId, type ChatKind, type StoredMessage } from "../db/index.js";
+import { idLowerBound, idUpperBound, secondOfId, type AccountDb, type ActivityKey, type ActivityRow, type ChatKind, type MessageRefRow, type Page, type StoredMessage } from "../db/index.js";
 import { draftContextFor, styleCheckFor, type DraftContext, type StyleCheck } from "../draft-style.js";
 import { isGroupId, isNoiseJid, STATUS_JID } from "../ids.js";
-import { decodeChat } from "../store.js";
-import { formatAge, isoWithOffset, mentionedJids, protoNumber, quotedSenderJid, viewText } from "../messages.js";
+import { decodeChatBytes } from "../store.js";
+import { formatAge, isoWithOffset, mentionedJids, quotedSenderJid, viewText } from "../messages.js";
 import { normalizeTag, withoutPrivateQuote, withoutWords } from "../private-contacts.js";
 import { frozenReceiptText } from "../drafts.js";
 import { STORY_TTL_MS } from "./ingest.js";
@@ -36,6 +36,7 @@ import type { SearchCoverage } from "../coverage.js";
 import type {
   ChatFilter,
   ChatRead,
+  ReadWindow,
   ChatSummary,
   ConnectionStatus,
   MessageType,
@@ -79,6 +80,11 @@ const UNANSWERED_SCAN = 30;
 /** Messages read_messages walks past a type filter before it answers with what it found. */
 const TYPE_FILTER_SCAN = 10_000;
 
+/** Where read_messages' bounded walk stopped, when it did: the id `before` goes on from. */
+function scanStop(stoppedAt: StoredMessage | undefined): Pick<ChatRead, "scanStoppedAt"> {
+  return stoppedAt === undefined ? {} : { scanStoppedAt: stoppedAt.sid };
+}
+
 /** Post-filters (private sources, literal prefixes, stories) must not turn small searches into full-history scans. */
 const SEARCH_FILTER_SCAN = 2_000;
 const SEARCH_FILTER_BATCH = 64;
@@ -118,7 +124,7 @@ export class AccountReads {
       await this.host.waitForSync();
       // The lookup can teach a pairing, and a pairing folds a lid chat into its
       // number's: it comes first, and the fold is let land before the list is read.
-      const lidChats = this.storage.db.identity.listChats().filter((chat) => chat.jid.endsWith("@lid") && this.views.listed(chat));
+      const lidChats = this.storage.db.identity.lidChats().filter((chat) => this.views.listed(chat));
       await this.identity.learnLidPhones(lidChats.map((chat) => chat.jid));
       await this.host.foldsSettled();
       const db = this.storage.db;
@@ -126,62 +132,138 @@ export class AccountReads {
       const tagged = tag === undefined ? null : new Set(db.identity.chatIdsTagged(tag));
       // A cursor holds on to the list it came from: the filter, and the tag when there is one.
       const listing = tag === undefined ? filter : `${filter}#${tag}`;
-      const entries = db.identity
-        .listChats()
-        .filter((chat) => this.views.listed(chat) && this.views.matchesChatFilter(chat, filter) && (tagged === null || tagged.has(chat.id)))
-        .map((chat) => ({ chat, proto: chat.proto === null ? null : decodeChat(Buffer.from(chat.proto).toString("base64")) }));
-      const activity = (entry: (typeof entries)[number]): number => {
-        const described = protoNumber(entry.proto?.conversationTimestamp);
-        if (described !== undefined && described !== null) return described;
-        return entry.chat.lastTs === null ? 0 : Math.floor(entry.chat.lastTs / 1000);
-      };
-      const key = (entry: (typeof entries)[number]): number[] => [activity(entry), entry.chat.lastMessageId ?? 0, entry.chat.id];
-      const compare = (a: number[], b: number[]): number => b[0]! - a[0]! || b[1]! - a[1]! || b[2]! - a[2]!;
-      let after: number[] | null = null;
+      let after: ActivityKey | null = null;
       if (opts.cursor !== undefined) {
         try {
           if (!/^[A-Za-z0-9_-]{1,512}$/.test(opts.cursor)) throw new Error();
           const parsed: unknown = JSON.parse(Buffer.from(opts.cursor, "base64url").toString("utf8"));
           if (!Array.isArray(parsed) || parsed.length !== 4 || parsed[0] !== listing || !parsed.slice(1).every(n => typeof n === "number" && Number.isFinite(n) && n >= 0)) throw new Error();
-          after = parsed.slice(1) as number[];
+          after = parsed.slice(1) as unknown as ActivityKey;
         } catch {
           throw new WazapError("INVALID_ID", "Invalid list_chats cursor, or its filter or tag changed.", "Start listing again without a cursor");
         }
       }
-      const ordered = entries.sort((a, b) => compare(key(a), key(b))).filter(entry => after === null || compare(key(entry), after) > 0);
-      const selected = ordered.slice(0, limit);
+      // Newest first off chats_activity (what WhatsApp's description says the
+      // chat's time is, else its newest message's), a batch at a time, until
+      // the page and one more chat are found: only the page is decoded.
+      const selected: ActivityRow[] = [];
+      let more = false;
+      const batch = Math.min(500, limit + 1 + 32);
+      for (let from = after; ; ) {
+        const rows = db.identity.chatsByActivity({
+          after: from,
+          limit: batch,
+          ...(filter === "archived" ? { archived: true } : { archived: false }),
+          ...(filter === "unread" ? { unread: true } : {}),
+        });
+        for (const row of rows) {
+          if (!this.views.listed(row.chat) || !this.views.matchesChatFilter(row.chat, filter) || (tagged !== null && !tagged.has(row.chat.id))) continue;
+          if (selected.length === limit) {
+            more = true;
+            break;
+          }
+          selected.push(row);
+        }
+        if (more || rows.length < batch) break;
+        from = rows.at(-1)!.key;
+      }
       const people = this.identity.privateScope(opts.private);
-      const chats = selected.map(entry => this.views.chatSummary(entry.chat, entry.proto, people));
-      const nextCursor = ordered.length > limit && selected.length > 0
-        ? Buffer.from(JSON.stringify([listing, ...key(selected.at(-1)!)])).toString("base64url") : null;
+      const chats = selected.map(({ chat }) => this.views.chatSummary(chat, chat.proto === null ? null : decodeChatBytes(chat.proto), people));
+      const nextCursor = more && selected.length > 0 ? Buffer.from(JSON.stringify([listing, ...selected.at(-1)!.key])).toString("base64url") : null;
       return { ...this.host.synced(chats), nextCursor };
     });
   }
 
-  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[]): Promise<ChatRead> {
+  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[], window: ReadWindow = {}): Promise<ChatRead> {
     return this.host.guarded(async () => {
       const sock = this.host.ensureConnected();
       const jid = this.identity.resolveId(chatId);
       await this.host.waitForSync();
       await this.groups.learnParticipants(jid);
       await this.identity.learnLidPhones([jid]);
+      const windowed = window.sinceMs !== undefined || window.untilMs !== undefined;
 
       if (before === undefined) {
-        const read: ChatRead = this.host.synced(this.views.viewsOfStored(this.pageOf(jid, limit, undefined, types)));
+        const { page, stoppedAt } = this.walk(jid, limit, undefined, types, window);
+        const read: ChatRead = {
+          ...this.host.synced(this.views.viewsOfStored(page)),
+          ...scanStop(stoppedAt),
+          ...(windowed ? this.windowFacts(jid, page, limit, types, window, stoppedAt) : {}),
+        };
         // The newest page is where a send handed to WhatsApp would show: until its echo comes, say it may be on its way.
-        const unconfirmed = types === undefined ? this.unconfirmedSends(jid) : [];
+        const unconfirmed = types === undefined && window.untilMs === undefined ? this.unconfirmedSends(jid) : [];
         return unconfirmed.length === 0 ? read : { ...read, unconfirmedSends: unconfirmed };
       }
 
       const anchor = this.views.storedOrThrow(before);
       const inChat = this.storage.db.identity.chat(jid)?.jid === anchor.chatJid;
-      let older = inChat ? this.pageOf(jid, limit, anchor.id, types) : [];
-      if (older.length > 0) return this.host.synced(this.views.viewsOfStored(older));
-      await this.host.fetchOlder(sock, anchor, limit);
-      older = inChat ? this.pageOf(jid, limit, anchor.id, types) : [];
+      const stored = inChat ? this.walk(jid, limit, anchor.id, types, window) : { page: [] };
+      // A walk the scan bound stopped has not reached what is stored before it: the phone is not asked, the page says where to go on.
+      if (stored.page.length > 0 || stored.stoppedAt !== undefined) {
+        return {
+          ...this.host.synced(this.views.viewsOfStored(stored.page)),
+          ...scanStop(stored.stoppedAt),
+          ...(windowed ? this.windowFacts(jid, stored.page, limit, types, window, stored.stoppedAt) : {}),
+        };
+      }
+      let asked = anchor;
+      if (inChat && windowed) {
+        // A window whose start is already stored ends here: anything older than it is outside, and the phone is not asked for it.
+        if (window.sinceMs !== undefined && this.storedBefore(jid, idLowerBound(window.sinceMs))) {
+          return { ...this.host.synced([]), window: { more: false, storedFrom: null } };
+        }
+        // What else the window holds is older than the chat's stored history, whichever id `before` named
+        // (one newer than the window, or the oldest of a type): the phone is asked for what precedes that history.
+        const first = this.storage.db.messages.coverage(jid).oldest;
+        const oldest = first === null || first.id >= anchor.id ? null : this.storage.db.messages.get(first.sid);
+        if (oldest !== null) asked = oldest;
+      }
+      await this.host.fetchOlder(sock, asked, limit);
+      const fetched = inChat ? this.walk(jid, limit, anchor.id, types, window) : { page: [] };
       // The phone may hold more than it sent in time: an empty answer says it was asked, never that the chat starts here.
-      return { ...this.host.synced(this.views.viewsOfStored(older)), older: { askedPhone: true, received: older.length } };
+      return {
+        ...this.host.synced(this.views.viewsOfStored(fetched.page)),
+        older: { askedPhone: true, received: fetched.page.length },
+        ...scanStop(fetched.stoppedAt),
+        ...(windowed ? this.windowFacts(jid, fetched.page, limit, types, window, fetched.stoppedAt, asked.id) : {}),
+      };
     });
+  }
+
+  /** Whether the chat stores any message older than the id `before`. */
+  private storedBefore(jid: string, before: number): boolean {
+    return this.storage.db.messages.chatPage(jid, { limit: 1, before }).items.length > 0;
+  }
+
+  /**
+   * What a window read says beside its page: whether the window holds older
+   * messages than the page showed, and, when the window reaches back past the
+   * chat's stored history (nothing is stored before `since`, or there is no
+   * `since`), where that history starts and the id it starts with, whatever
+   * `types` kept: the phone may hold what came before. The id is left out
+   * when the phone was just asked from it (`askedFrom`) and sent nothing older.
+   * A walk the scan bound stopped (`stoppedAt`) has more of the window to
+   * read, and so has a full page whose probe for one more was stopped by it.
+   */
+  private windowFacts(
+    jid: string,
+    page: readonly StoredMessage[],
+    limit: number,
+    types: MessageType[] | undefined,
+    window: ReadWindow,
+    stoppedAt: StoredMessage | undefined,
+    askedFrom?: number
+  ): Pick<ChatRead, "window"> {
+    const oldest = page[0];
+    const probe = () => {
+      const next = this.walk(jid, 1, oldest!.id, types, window);
+      return next.page.length > 0 || next.stoppedAt !== undefined;
+    };
+    const more = stoppedAt !== undefined || (page.length >= limit && oldest !== undefined && probe());
+    if (more || (window.sinceMs !== undefined && this.storedBefore(jid, idLowerBound(window.sinceMs)))) return { window: { more, storedFrom: null } };
+    const first = this.storage.db.messages.coverage(jid).oldest;
+    const from = first === null || first.id === askedFrom ? {} : { storedFromId: first.sid };
+    return { window: { more, storedFrom: first?.ts ?? null, ...from, startsInside: true } };
   }
 
   /**
@@ -203,26 +285,36 @@ export class AccountReads {
   /**
    * The newest `limit` messages of a chat older than `before`, oldest first.
    * A type filter pages on past what it leaves out, so `limit` counts
-   * messages the caller asked for, up to a bounded walk.
+   * messages the caller asked for, up to a bounded walk; a walk that bound
+   * stops short of `limit` with older messages still stored names the oldest
+   * message it looked at (`stoppedAt`), which `before` goes on from.
    */
-  private pageOf(jid: string, limit: number, before: number | undefined, types?: MessageType[]): StoredMessage[] {
+  private walk(jid: string, limit: number, before: number | undefined, types?: MessageType[], window: ReadWindow = {}): { page: StoredMessage[]; stoppedAt?: StoredMessage } {
     const db = this.storage.db;
     const wanted = types === undefined || types.length === 0 ? null : new Set<string>(types);
     const out: StoredMessage[] = [];
-    let cursor = before;
+    // A window's end bounds the ids from above (a second at a time) and its exact millisecond below; its start is the store's own `since`.
+    const top = window.untilMs === undefined ? undefined : idUpperBound(window.untilMs);
+    let cursor = before === undefined ? top : top === undefined ? before : Math.min(before, top);
     let walked = 0;
     for (;;) {
-      const page = db.messages.chatPage(jid, { limit: wanted === null ? limit : Math.max(limit, 200), ...(cursor === undefined ? {} : { before: cursor }) });
+      const page = db.messages.chatPage(jid, {
+        limit: wanted === null ? limit : Math.max(limit, 200),
+        ...(cursor === undefined ? {} : { before: cursor }),
+        ...(window.sinceMs === undefined ? {} : { since: window.sinceMs }),
+      });
       for (const message of page.items) {
         walked++;
+        if (window.untilMs !== undefined && message.ts > window.untilMs) continue;
         if (wanted !== null && !wanted.has(message.type)) continue;
         out.push(message);
         if (out.length >= limit) break;
       }
-      if (out.length >= limit || page.nextBefore === null || walked >= TYPE_FILTER_SCAN) break;
+      if (out.length >= limit || page.nextBefore === null) break;
+      if (walked >= TYPE_FILTER_SCAN) return { page: out.reverse(), stoppedAt: page.items.at(-1)! };
       cursor = page.nextBefore;
     }
-    return out.reverse();
+    return { page: out.reverse() };
   }
 
   getRecentMessages(
@@ -267,7 +359,7 @@ export class AccountReads {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
       await this.host.waitForSync();
-      const chosen = await this.recentStored(options.hours, options.filter, options.types);
+      const chosen = await this.recentRows(options.hours, options.filter, options.types, (db, jid, page) => db.messages.chatRefs(jid, page));
       const refs: RecentMessageRefs[] = [];
       for (const { jid, stored } of chosen) {
         const visible = stored.filter((message) => options.includeSystem || message.type !== "system");
@@ -323,7 +415,21 @@ export class AccountReads {
     });
   }
 
-  private async recentStored(hours: number, filter: Exclude<ChatFilter, "archived">, types?: MessageType[]): Promise<Array<{ jid: string; stored: StoredMessage[] }>> {
+  private recentStored(hours: number, filter: Exclude<ChatFilter, "archived">, types?: MessageType[]): Promise<Array<{ jid: string; stored: StoredMessage[] }>> {
+    return this.recentRows(hours, filter, types, (db, jid, page) => db.messages.chatPage(jid, page));
+  }
+
+  /**
+   * Each chat active in the window, with its newest messages there (at most
+   * RECENT_PER_CHAT_MAX), as `read` takes them: whole rows to render, or
+   * only what a cursor keeps (chatRefs), which reads no words.
+   */
+  private async recentRows<T extends MessageRefRow>(
+    hours: number,
+    filter: Exclude<ChatFilter, "archived">,
+    types: MessageType[] | undefined,
+    read: (db: AccountDb, jid: string, page: { limit: number; since: number; before?: number }) => Page<T>
+  ): Promise<Array<{ jid: string; stored: T[] }>> {
     const cutoff = Date.now() - hours * 3_600_000;
     const active = this.storage.db.identity.listChats().filter((chat) => chat.lastTs !== null && chat.lastTs >= cutoff);
     await this.identity.learnLidPhones(active.map((chat) => chat.jid));
@@ -336,14 +442,14 @@ export class AccountReads {
 
     const db = this.storage.db;
     const wanted = types === undefined || types.length === 0 ? null : new Set<string>(types);
-    const chosen: Array<{ jid: string; stored: StoredMessage[] }> = [];
+    const chosen: Array<{ jid: string; stored: T[] }> = [];
     for (const chat of active) {
       if (chat.kind === "status" || isNoiseJid(chat.jid) || !this.views.matchesChatFilter(chat, filter)) continue;
       // Each chat's newest messages in the window, at most as many as main's per-chat ring held.
-      const newestFirst: StoredMessage[] = [];
+      const newestFirst: T[] = [];
       for (let before: number | undefined; newestFirst.length < RECENT_PER_CHAT_MAX; ) {
         const limit = Math.min(500, RECENT_PER_CHAT_MAX - newestFirst.length);
-        const page = db.messages.chatPage(chat.jid, { limit, since: cutoff, ...(before === undefined ? {} : { before }) });
+        const page = read(db, chat.jid, { limit, since: cutoff, ...(before === undefined ? {} : { before }) });
         newestFirst.push(...page.items);
         if (page.nextBefore === null) break;
         before = page.nextBefore;

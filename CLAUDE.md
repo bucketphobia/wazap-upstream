@@ -35,7 +35,9 @@ canary tests against the newest Baileys (a red canary blocks nothing).
 
 `npm run hooks:install` (once per clone) turns on the pre-push hook in
 `scripts/git-hooks/`, which runs the gate. Skip it only consciously:
-`git push --no-verify` or `SKIP_GATE=1 git push`.
+`git push --no-verify` or `SKIP_GATE=1 git push`. The hook also runs on
+`git push --delete`, so skip it there. A new worktree has no `node_modules`:
+run `npm ci` before its first push, or the hook fails on a missing `eslint`.
 
 ## Commit style
 
@@ -58,6 +60,11 @@ Registry, then the GitHub Release with the `.mcpb`. When a step fails after
 `npm publish`, do not re-run the whole workflow (npm refuses a version twice):
 `scripts/release-registry.sh` redoes the registry step, and a failed `release`
 job can be re-run alone.
+
+The wait for npm gives up after 10 minutes, and npm can take longer; the
+registry, the image and the Release are then skipped. Check all three after a
+tag; `finish-release.yml` redoes them. A `.mcpb` packed locally carries your
+machine's sharp: build it in CI, or in Docker `linux/amd64`.
 
 ## Rules that must never break
 
@@ -83,3 +90,16 @@ settings: `WAZAP_TEST_WAIT_SCALE`, `WAZAP_NO_UPDATE_CHECK`, `WAZAP_NO_SHARE`,
 `WAZAP_EMBED_MODEL`, `WAZAP_EMBED_BIN`, `WAZAP_EMBED_URL`,
 `WAZAP_RECALL_MIN_SIMILARITY`, `WAZAP_DEBUG_CALLS`. Do not document them as
 settings, and do not remove one while a test sets it.
+
+## Gotchas
+
+- `offlineConfig` (`test/helpers.mjs`) keeps no history: a service booted
+  with it on a copy of real data deletes every stored message. Time real data
+  with `npm run bench:tools`, which boots on a copy without `auth/`.
+- Moving a member out of `src/whatsapp.ts`: tests replace it on any service
+  variable (`svc.x = …`, `work.x = …`) or wrap `.bind(svc)`; grep for both.
+- Run `npm run check:linux` before pushing SQL, `node:sqlite` calls or a test
+  near a filesystem limit: Node 22.16.0 cannot bind `?1` (write `?`), and
+  ext4 refuses the sparse petabyte file macOS takes (EFBIG): stub the limit.
+- Setup, login and the QR branch on `isTTY`, and the suite has no terminal:
+  run a change there in a real one before calling it done.

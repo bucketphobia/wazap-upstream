@@ -11,6 +11,7 @@ import { proto } from "baileys";
 import { z } from "zod";
 
 import { withMentionTokens } from "../dist/drafts.js";
+import { namedMentions } from "../dist/messages.js";
 import { registerTools } from "../dist/tools.js";
 import { WhatsAppService } from "../dist/whatsapp.js";
 import { asToolSource, connectedService } from "./helpers.mjs";
@@ -427,7 +428,7 @@ test("a message's pushName names its sender only: a mentioned or reacting person
 
   const view = await svc.getMessage(`false_${GROUP}_NAMES1`);
   assert.equal(view.sender.name, "Maria");
-  assert.deepEqual(view.mentions, [{ id: NOBODY, name: "40700000006" }]);
+  assert.deepEqual(view.mentions, [{ id: NOBODY, name: "40700000006", token: "40700000006" }]);
   assert.deepEqual(
     view.reactions.map((reaction) => [reaction.sender, reaction.name]),
     [[STRANGER, "40700000007"]]
@@ -629,7 +630,7 @@ test("a join takes exactly one of invite or message_id, and refuses a bad one wi
   await svc.stop();
 });
 
-test("a message's @-mentions come back once each, canonical and named, and read as a tag", async () => {
+test("a message's @-mentions come back once each, canonical and named, and read as names in its words", async () => {
   const { svc, sock } = writableService();
   sock.ev.emit("lid-mapping.update", { lid: DAN_LID, pn: DAN });
   const mentioning = arrive(sock, GROUP, {
@@ -645,16 +646,89 @@ test("a message's @-mentions come back once each, canonical and named, and read 
 
   const view = await svc.getMessage(mentioning);
   assert.deepEqual(view.mentions, [
-    { id: DAN, name: "Dan" },
-    { id: ME, name: "Răzvan" },
+    { id: DAN, name: "Dan", token: "40700000003" },
+    { id: ME, name: "Răzvan", token: "40700000000" },
   ]);
+  assert.equal(view.text, "@40700000003 @40700000000 vii?", "the stored words stay as WhatsApp sent them");
   assert.equal("mentions" in (await svc.getMessage(plain)), false);
 
   const server = fakeServer();
   registerTools(server, asToolSource(svc), { allowWrite: false });
   const result = await server.tools.get("get_message").handler({ message_id: mentioning });
-  assert.match(result.content[0].text, /\[.*mentions Dan, Răzvan.*\]/);
+  assert.match(result.content[0].text, /\n {2}@Dan @Răzvan vii\?/);
+  assert.doesNotMatch(result.content[0].text, /mentions Dan/, "a mention the words show is not said twice");
   assert.deepEqual(result.structuredContent.mentions, view.mentions);
+  await svc.stop();
+});
+
+test("a mention written as a lid's digits reads as the person's name; one the words do not carry stays a tag", async () => {
+  const { svc, sock } = writableService();
+  sock.ev.emit("lid-mapping.update", { lid: DAN_LID, pn: DAN });
+  const byLid = arrive(sock, GROUP, {
+    participant: ANA,
+    message: { extendedTextMessage: { text: "Se ocupă @987654321012345 de factură", contextInfo: { mentionedJid: [DAN_LID] } } },
+  });
+  const silent = arrive(sock, GROUP, {
+    participant: ANA,
+    message: { extendedTextMessage: { text: "vii?", contextInfo: { mentionedJid: [DAN] } } },
+  });
+
+  assert.deepEqual((await svc.getMessage(byLid)).mentions, [{ id: DAN, name: "Dan", token: "987654321012345" }]);
+  assert.deepEqual((await svc.getMessage(silent)).mentions, [{ id: DAN, name: "Dan" }]);
+
+  const server = fakeServer();
+  registerTools(server, asToolSource(svc), { allowWrite: false });
+  const read = await server.tools.get("read_messages").handler({ chat_id: GROUP, limit: 20 });
+  const text = read.content[0].text;
+  assert.match(text, /\n {2}Se ocupă @Dan de factură/);
+  assert.doesNotMatch(text, /987654321012345/);
+  assert.match(text, /\[mentions Dan\][^\n]*\n {2}vii\?/, "nothing in these words names Dan, so the tag does");
+  await svc.stop();
+});
+
+test("namedMentions puts a name where the words carry a mention's digits, and leaves the rest alone", () => {
+  const ana = { id: ANA, name: "Ana", token: "40700000002" };
+  const dan = { id: DAN, name: "Dan", token: "987654321012345" };
+  assert.equal(namedMentions("@40700000002 și @987654321012345, veniți?", [ana, dan]), "@Ana și @Dan, veniți?");
+  assert.equal(namedMentions("@407000000021 vii?", [ana]), "@407000000021 vii?", "a longer number is someone else");
+  assert.equal(namedMentions("@40700000002 @40700000002", [ana]), "@Ana @Ana");
+  assert.equal(namedMentions("vii?", [{ id: ANA, name: "Ana" }]), "vii?");
+  assert.equal(namedMentions("@40700000002 vii?", undefined), "@40700000002 vii?");
+  assert.equal(
+    namedMentions("@987654321012345 vii?", [{ id: DAN_LID, name: "unknown (lid …2345)", token: "987654321012345" }]),
+    "@987654321012345 vii?",
+    "someone wazap cannot name keeps the digits"
+  );
+  assert.equal(
+    namedMentions("se ocupă @987654321012345~dan@firma.ro  de factură", [{ id: DAN, name: "dan@firma.ro", token: "987654321012345" }]),
+    "se ocupă @dan@firma.ro  de factură",
+    "a profile name the text repeats after the digits is said once"
+  );
+  assert.equal(namedMentions("costă $1 @40700000002", [{ ...ana, name: "A$1&B" }]), "costă $1 @A$1&B", "a name is text, never a replacement pattern");
+});
+
+test("a search across chats names each hit's chat beside its id, and get_message and a wait name theirs", async () => {
+  const { svc, sock } = writableService();
+  sock.ev.emit("groups.upsert", [{ id: GROUP, subject: "Bloc 12", participants: [] }]);
+  const inGroup = arrive(sock, GROUP, { participant: DAN, message: { conversation: "factura pe bloc e la mine" }, ageSeconds: 60 });
+  arrive(sock, ANA, { message: { conversation: "ți-am trimis factura" }, ageSeconds: 120 });
+  arrive(sock, ANA, { fromMe: true, message: { conversation: "am primit factura, mersi" }, ageSeconds: 30 });
+
+  const server = fakeServer();
+  registerTools(server, asToolSource(svc), { allowWrite: false });
+  const found = await server.tools.get("search").handler({ query: "factura", match: "words", limit: 20, include_context: false });
+  const text = found.content[0].text;
+  assert.match(text, new RegExp(`· in Bloc 12 \\(${GROUP.replace(".", "\\.")}\\) ·`), "a group by its subject");
+  assert.match(text, new RegExp(`me[^\\n]*· in Ana \\(${ANA.replace(".", "\\.")}\\) ·`), "the user's own message says whose chat it is in");
+  assert.match(text, new RegExp(`Ana[^\\n(]*· in ${ANA.replace(".", "\\.")} ·`), "her own line already opens with her name");
+  const byId = new Map(found.structuredContent.messages.map((m) => [m.chat_id, m.chat_name]));
+  assert.deepEqual([byId.get(GROUP), byId.get(ANA)], ["Bloc 12", "Ana"]);
+
+  const one = await server.tools.get("get_message").handler({ message_id: inGroup });
+  assert.match(one.content[0].text, new RegExp(`^# Message in Bloc 12 \\(${GROUP.replace(".", "\\.")}\\)`));
+  assert.equal(one.structuredContent.chat_name, "Bloc 12");
+  const read = await server.tools.get("read_messages").handler({ chat_id: GROUP, limit: 5 });
+  assert.match(read.content[0].text, new RegExp(`^# Messages in Bloc 12 \\(${GROUP.replace(".", "\\.")}\\) \\(1\\)`), "a chat read by its id is titled by its name too");
   await svc.stop();
 });
 
@@ -721,7 +795,7 @@ test("the manage_chat schema takes every new action, message_id and pin_hours, a
   const pinPreview = await call({ chat_id: ANA, action: "pin_message", message_id: messageId, pin_hours: 24 });
   assert.equal(calls.length, 0, "preview performs no mutation");
   const pinned = await call({ chat_id: ANA, action: "pin_message", confirmation_id: pinPreview.structuredContent.confirmation_id });
-  assert.equal(pinned.content[0].text, "pin_message for 24h");
+  assert.equal(pinned.content[0].text, `pin_message for 24h (${messageId})`);
   assert.equal(pinned.structuredContent.message_id, messageId);
   assert.equal(calls.at(-1)[2].time, 86_400);
   for (const action of ["unpin_message", "star_message", "unstar_message"]) {
@@ -739,10 +813,10 @@ test("the manage_chat schema takes every new action, message_id and pin_hours, a
   for (const action of ["pin_message", "star_message", "clear", "delete", "block"]) {
     assert.match(meta.description, new RegExp(action));
   }
-  const guide = (await server.tools.get("learn").handler({})).content[0].text;
+  const guide = (await server.tools.get("learn").handler({ topic: "all" })).content[0].text;
   assert.match(guide, /manage_group join/);
   assert.match(guide, /for_everyone: false/);
-  assert.match(guide, /mentions: \[\{id, name\}\]/);
+  assert.match(guide, /mentions: \[\{id, name, token\}\]; text names each as @<token>/);
   await svc.stop();
 });
 

@@ -37,7 +37,7 @@ import type { EmbedFeed } from "../recall/index.js";
 import { IMPORT_UNVERIFIED_META, importProgress } from "../storage-status.js";
 import type { StorageInfo } from "../wa-types.js";
 import type { AccountIdentity } from "./identity.js";
-import { insideDir, leftGroup } from "./util.js";
+import { chatActivity, insideDir, leftGroup } from "./util.js";
 
 /** The account database's file, beside the account's credentials. */
 const DB_FILE = "wazap.sqlite";
@@ -168,7 +168,7 @@ export class AccountStorage {
    */
   openDatabase(): void {
     try {
-      const db = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, now: () => Date.now() });
+      const db = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, chatActivity, now: () => Date.now() });
       this.accountDb = db;
       this.host.adoptDatabase(db);
       this.host.recoverSends(db);
@@ -227,7 +227,7 @@ export class AccountStorage {
       } else {
         log(`account ${this.accountRecord.id}: a different number is linked; its earlier database was set aside`);
       }
-      const next = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, now: () => Date.now() });
+      const next = AccountDb.open(this.databasePath, { scrubQuote, leftGroup, chatActivity, now: () => Date.now() });
       this.accountDb = next;
       if (restore === null && (imported || legacyFilesPresent(this.config.dataDir, this.paths))) next.setMeta(IMPORT_META.state, "skipped");
       carryLegacyRecord(legacy, next);

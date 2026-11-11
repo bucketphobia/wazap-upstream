@@ -97,8 +97,9 @@ const vocabulary = new Set(TOOL_NAMES);
 for (const meta of tools.values()) {
   for (const [arg, shape] of Object.entries(meta.inputSchema ?? {})) {
     vocabulary.add(arg);
-    const def = shape?._def?.innerType?._def ?? shape?._def;
-    for (const value of def?.values ?? []) vocabulary.add(value);
+    // An enum, bare or under one optional/default wrapper: `options` is its public list of values.
+    const inner = shape?._def?.innerType ?? shape;
+    for (const value of inner?.options ?? []) vocabulary.add(value);
   }
   const out = meta.outputSchema;
   for (const key of Object.keys(out?.shape ?? out ?? {})) vocabulary.add(key);
@@ -167,7 +168,7 @@ test("the counts the document states are the registry's own", () => {
 test("the integration six are the six the contract test pins, with mark_read still an action", () => {
   const six = contractTools();
   assert.equal(six.length, 6, `the contract test now pins ${six.length} tools`);
-  const actions = tools.get("manage_chat").inputSchema.action._def.values;
+  const actions = tools.get("manage_chat").inputSchema.action.options;
   const cited = identifiers(paragraph("Six tools are an exact contract for an integration:"));
   assert.deepEqual(
     cited.filter((name) => !actions.includes(name)).sort(),

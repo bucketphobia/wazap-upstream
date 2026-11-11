@@ -108,7 +108,7 @@ test("wait_for_messages returns the message that lands while it waits, and nothi
     [["Ana", "ești liber mâine la 10?"]]
   );
   assert.match(result.content[0].text, /1 new message/);
-  assert.match(result.content[0].text, /cursor: `/);
+  assert.match(result.content[0].text, /cursor: \S+ \(pass it to the next wait_for_messages\)/);
 });
 
 test("a burst that follows the first message comes back in the same answer", async () => {
@@ -204,7 +204,27 @@ test("include_previews attaches the preview WhatsApp shipped with a photo and la
     mimeType: "image/jpeg",
   });
   assert.match(read.content[0].text, /1 preview attached/);
-  assert.match(read.content[0].text, /\[preview 1, image\]/);
+  // The line says which message the preview is of; "[image]" opens its text, so no tag repeats it.
+  assert.match(read.content[0].text, /\[preview 1\] · false_/);
+});
+
+test("a read attaches at most six previews, names each one's message, and counts the photos left without", async () => {
+  const { call, arrive } = setup();
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+  const photos = Array.from({ length: 8 }, (_, i) => arrive(ANA, { imageMessage: { mimetype: "image/jpeg", jpegThumbnail: jpeg, caption: `poza ${i + 1}` } }, { at: Date.now() - (8 - i) * 60_000 }));
+  const read = await call("read_messages", { chat_id: ANA, include_previews: true });
+  assert.equal(read.structuredContent.preview_count, 6);
+  assert.equal(read.content.filter((block) => block.type === "image").length, 6);
+  // Newest first, each named by its message_id in the text and in `previews`.
+  const ids = photos.map((id) => `false_${ANA}_${id}`).reverse().slice(0, 6);
+  assert.deepEqual(read.structuredContent.previews, ids);
+  const text = read.content[0].text;
+  ids.forEach((id, i) => {
+    assert.ok(text.includes(`preview ${i + 1} is ${id}`), `preview ${i + 1}`);
+    assert.match(text, new RegExp(`\\[preview ${i + 1}\\] · ${id}`));
+  });
+  assert.match(text, /2 photos without a preview \(over 6 per call/);
+  assert.ok(read.structuredContent.notes.some((note) => text.includes(note)), "the note, word for word");
 });
 
 test("a photo that shipped no preview is downloaded once, shrunk here, and remembered", async () => {
@@ -425,7 +445,7 @@ test("in a group, read_messages counts the reactions and get_message says who le
   react("❤️", ME);
 
   const read = await call("read_messages", { chat_id: GROUP });
-  assert.match(read.content[0].text, /\[image, ❤️×2 😍\]/);
+  assert.match(read.content[0].text, /\[❤️×2 😍\]/);
 
   const id = `false_${GROUP}_${photo}`;
   let one = await call("get_message", { message_id: id });

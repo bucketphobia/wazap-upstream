@@ -93,6 +93,8 @@ export interface ScheduleHost {
   displayName(jid: string): string;
   webhook(): WebhookSink;
   outbox(): WebhookOutbox;
+  /** Scheduled messages went, closed or were cancelled: the media they pinned may go too. */
+  settled?(): void;
 }
 
 export class AccountSchedule {
@@ -210,6 +212,8 @@ export class AccountSchedule {
       this.lastSweep = this.now();
       this.write(db, () => db.schedule.sweep(this.now(), 200));
     }
+    // What went, closed or was missed may have pinned media nothing else names now.
+    this.host.settled?.();
   }
 
   /**
@@ -507,7 +511,10 @@ export class AccountSchedule {
       const cancelled = db.schedule.cancelScheduled(scheduleId, this.now());
       const row = db.schedule.scheduled(scheduleId);
       if (row === null) throw notFound("scheduled message", scheduleId);
-      if (cancelled) this.kick();
+      if (cancelled) {
+        this.kick();
+        this.host.settled?.();
+      }
       return { cancelled, scheduled: this.scheduledView(row) };
     });
   }

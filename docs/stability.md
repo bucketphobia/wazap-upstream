@@ -28,18 +28,39 @@ The 23, each with what it requires: `learn` (), `get_status` (),
 `list_contacts` (), `link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
 `confirm_send` (`draft_id`), `manage_group` (`action`),
 `read_messages` (`chat_id`), `remember` (`chat_id`), `get_message`
-(`message_id`), `get_media` (`message_id`), `send_message` (`chat_id`, `text`),
+(`message_id`), `get_media` (), `send_message` (`chat_id`, `text`),
 `edit_message` (`message_id`, `text`), `react_to_message` (`message_id`,
 `emoji`), `delete_message` (`message_id`, `for_everyone`), `manage_chat`
 (`chat_id`, `action`), `scheduled_messages` (), `reminder` ().
 An empty argument list means the tool requires nothing.
 
+`get_media` is the one exception the list cannot show: it takes exactly one of
+`message_id` and `message_ids`, which its schema cannot say, so neither is
+required there; a call with neither or both is refused with `INVALID_ID`.
+
 16 declare an output schema and answer in that shape, as an SDK client's
 own validator checks it; the seven without one are the six of the integration
 contract and `learn` (`test/output-schema.test.mjs`). A refusal is an error result carrying
 `{ error, message, fix }`, with `account_id` added when the tool declares an
-output schema; `error` is one of the 53 codes, and `learn` documents every one
-of them. Guarded by: `test/tools.test.mjs`.
+output schema (and `candidates` when a read named its chat by a name that fits
+several chats or none); `error` is one of the 53 codes, and `learn` documents every one
+of them (its `errors` topic). `fix` is always there: the refusal's own, or else
+what `learn` says about its code. Guarded by: `test/tools.test.mjs`.
+
+**Which sessions get structured content.** The structured contract above —
+output schemas, structured answers, every answer field this file names —
+holds for a session whose answer format is `full`: any client that does not
+name itself as an assistant, on a static token, over OAuth or over stdio, which
+is what a program built on wazap is, and every session under
+`WAZAP_ANSWER_FORMAT=full`. A session whose client is an assistant (Claude
+Code, claude.ai, Codex, Cursor, ChatGPT, Gemini CLI, by the name it gives at
+`initialize`), whatever its credential, gets the `text` format instead: the same tools, arguments and error
+codes, a tool list with no `outputSchema`, and each answer as its text and
+image blocks alone, which carry every id and cursor a later call takes. Its
+refusals are the same `{ error, message, fix }` with `account_id`, as text.
+`WAZAP_ANSWER_FORMAT=full` restores structured content for every session, and
+`text` gives the text format to every one (`test/answer-format.test.mjs`,
+`test/answer-text.test.mjs`).
 
 **What "stable" means here.** A new optional argument, a new value in an enum
 such as `manage_chat`'s or `manage_group`'s `action`, and a new field in an
@@ -71,9 +92,16 @@ Six tools are an exact contract for an integration: `send_message`,
   `last_message` (`null`, or `at` and `direction` `in` or `out`), and takes
   `order`, `limit` up to 500 and `cursor`.
 - Over HTTP, a well-formed request carrying a session id wazap does not hold
-  (expired, evicted or lost to a restart) answers 404, as the MCP
-  specification says, and a fresh `initialize` recovers; one with no session
-  id that is not `initialize` answers 400. With `WAZAP_READ_TOKEN` set as well
+  answers 404, as the MCP specification says, and a fresh `initialize`
+  recovers; one with no session id that is not `initialize` answers 400. The
+  exception is an id wazap itself minted for the same credential, lost to a
+  restart, the idle sweep or an eviction: that session is served again under
+  the same id, so the client never sees the 404, as long as wazap would hand
+  its client the same tools and instructions (the same version, the same
+  write permission, the same accounts) and there is room for it without
+  closing a session that is answering a request. A session its client ended with
+  DELETE is not revived: its id answers 404 from then on (wazap remembers the
+  last 1,024 ended ids until it restarts). With `WAZAP_READ_TOKEN` set as well
   as `WAZAP_WRITE_TOKEN`, a token wazap does not hold answers 401; with the
   write token alone, a request without it is served as the anonymous reader,
   which only loopback allows. Each of these is a JSON-RPC error, and an
@@ -203,7 +231,7 @@ whenever that event is enabled.
 ## 5. Data on disk
 
 - The account database carries its schema version in `PRAGMA user_version`; it
-  is 6 in this release.
+  is 8 in this release.
 - Migrations run forward only, in order, and every released version has a chain
   test, so a new migration cannot ship without one. A released migration is
   never edited — a new shape is a new migration at the end — and the chain test
@@ -237,7 +265,7 @@ code or the tests supports a third-party reader.
 
 Stable: the 34 `WAZAP_*` listed in `.env.example` and in the settings table of
 `docs/settings.md` — `WAZAP_DATA_DIR`, `WAZAP_READ_ONLY`, `WAZAP_PERSIST_HISTORY`,
-`WAZAP_HOST`, `WAZAP_PORT`, `WAZAP_READ_TOKEN`, `WAZAP_WRITE_TOKEN`,
+`WAZAP_HOST`, `WAZAP_PORT`, `WAZAP_READ_TOKEN`, `WAZAP_WRITE_TOKEN`, `WAZAP_ANSWER_FORMAT`,
 `WAZAP_PUBLIC_URL`, `WAZAP_OAUTH_PASSWORD`, `WAZAP_TRUST_PROXY`,
 `WAZAP_TRANSCRIBE`, `WAZAP_TRANSCRIBE_API_KEY`, `WAZAP_TRANSCRIBE_AUTH`, `WAZAP_TRANSCRIBE_ALLOW_API`,
 `WAZAP_TRANSCRIBE_AUTO`, `WAZAP_RECALL`, `WAZAP_RECALL_CACHE_MAX_MB`,
@@ -283,7 +311,13 @@ code or the process backs a wider one yet.
 
 - **Exact error text.** The `error` code is stable; `message` and `fix` are
   written to be read and may be rewritten at any time. Nor is field order in any
-  answer, or the rendered text blocks tools return beside structured content.
+  answer, or the wording and layout of the rendered text blocks. What the text
+  promises is only that it carries every id, cursor, note and next step its
+  structured answer does (`test/answer-text.test.mjs`), so a `text` session
+  loses nothing a later call takes; a program reads the structured content.
+  The one transcript is the compact presentation of a cached connector's old
+  recent-messages read: its text names each chat's id, the next page's cursor
+  and the notes, not each message's id (the full presentation gives them).
 - **Skill content.** The five skills under `skills/` are prompts, rewritten
   whenever they read better.
 - **What an AI model does with any of this.** The cases under `eval/` measure

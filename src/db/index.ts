@@ -69,7 +69,7 @@ import { Connection, type CheckpointResult, type ConnectionOptions, type Connect
 import { Digest } from "./digest.js";
 import { StorageError } from "./errors.js";
 import { Events } from "./events.js";
-import { Identity } from "./identity.js";
+import { Identity, type ChatActivity } from "./identity.js";
 import { Merger } from "./merge.js";
 import { Messages, type ScrubQuote } from "./messages.js";
 import { Search } from "./search.js";
@@ -83,16 +83,17 @@ export { StorageError, type StorageErrorCode } from "./errors.js";
 export { SCHEMA_VERSION } from "./schema.js";
 export { SEQ_SPAN, idLowerBound, idUpperBound, secondOfId } from "./ids.js";
 export { chatKindOf, isLidJid, normalizeJid, parseSid, sidOf } from "./identity.js";
+export type { ActivityKey, ActivityRow, ChatActivity } from "./identity.js";
 export { mergeNotes } from "./merge.js";
 export { foldText, DEFAULT_SCAN_CAP, DEFAULT_TRIGRAM_CAP } from "./search.js";
 export { contentHash, hybridTokens, hybridWords, int8Similarity, quantizeVector, unitVector, RRF_K } from "./vectors.js";
 export { isSqliteExperimentalWarning } from "./sqlite.js";
-export type { FlagDetector, RecentExchangeItem, ScrubQuote } from "./messages.js";
+export type { FlagDetector, MessageRefRow, RecentExchangeItem, ScrubQuote } from "./messages.js";
 export { messageStyle, styleOf, type MessageStyle, type StyleStats } from "./style.js";
 export { FLAGS_BACKFILL_META, FLAGS_BACKFILL_WINDOW_MS } from "./messages.js";
 export { MESSAGE_FLAGS } from "./types.js";
 export type { CatchupAdvance, CatchupMark, CatchupMarks } from "./catchup.js";
-export { DIGEST_MEDIA } from "./digest.js";
+export { DIGEST_MEDIA, OPENED_MEDIA } from "./digest.js";
 export type { Digest, DigestContact, DigestMedia, DigestSpan, InboundAggregate, TailMessage, WindowMessage } from "./digest.js";
 export { ADDRESS_BOOK_MAX_PAGE, FIND_SCORES, LOOKUP_MIN_DIGITS } from "./contacts.js";
 export type { AddressBookEntry, AddressBookInput, AddressBookKey, AddressBookOrder, AddressBookPage, ContactCandidate, Contacts, FindInput, FindKind, FindResult, FindVerdict, LeftGroup, LookupInput, MatchClass, MatchSource, QualifierHit, QualifierSource } from "./contacts.js";
@@ -161,6 +162,8 @@ export interface AccountDbOptions extends ConnectionOptions {
   scrubQuote?: ScrubQuote;
   /** Tells a group the account left from its stored chat protobuf; see LeftGroup. */
   leftGroup?: LeftGroup;
+  /** Reads the time a stored chat protobuf states, which list_chats orders by (v7); see ChatActivity. */
+  chatActivity?: ChatActivity;
 }
 
 export class AccountDb {
@@ -183,7 +186,7 @@ export class AccountDb {
   private readonly merger: Merger;
 
   private constructor(private readonly connection: Connection, options: AccountDbOptions) {
-    this.identity = new Identity(connection);
+    this.identity = new Identity(connection, options.chatActivity ?? null);
     this.messages = new Messages(connection, this.identity, options.scrubQuote ?? null);
     this.search = new Search(connection, this.identity, this.messages);
     this.vectors = new Vectors(connection, this.identity, this.messages, this.search);
@@ -199,7 +202,15 @@ export class AccountDb {
 
   /** Opens (creating and migrating when writable) the database at `path`. */
   static open(path: string, options: AccountDbOptions = {}): AccountDb {
-    return new AccountDb(Connection.open(path, options), options);
+    const db = new AccountDb(Connection.open(path, options), options);
+    try {
+      // A file that held chat descriptions before v7 has their times read once, after the migration (and its copy).
+      db.identity.backfillChatActivity();
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+    return db;
   }
 
   get path(): string {
@@ -216,6 +227,11 @@ export class AccountDb {
 
   get isOpen(): boolean {
     return this.connection.isOpen;
+  }
+
+  /** Moves whenever a write may have changed what a jid is named, noted or tagged as (see Connection.namesVersion). */
+  get namesVersion(): number {
+    return this.connection.namesVersion;
   }
 
   settings(): ConnectionSettings {
@@ -254,6 +270,15 @@ export class AccountDb {
    */
   transaction<T>(body: () => T): T {
     return this.connection.write(body);
+  }
+
+  /**
+   * One part of a transaction that may fail alone: an error undoes only what
+   * this part wrote and goes to `failed`, and the transaction keeps the rest.
+   * Outside a transaction the part is one of its own.
+   */
+  attempt(body: () => void, failed: (err: unknown) => void): void {
+    this.connection.attempt(body, failed);
   }
 
   /**

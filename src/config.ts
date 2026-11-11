@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import dotenv from "dotenv";
+import type { AnswerFormatSetting } from "./client-name.js";
 import { WazapError } from "./errors.js";
 import { mediaKeepSettings, mediaKeepWarnings, type MediaKeepSettings } from "./media-keep.js";
 import { trustedProxies } from "./proxy-trust.js";
@@ -68,7 +69,9 @@ export interface Config {
   maxInFlightTotal?: number;
   /** HTTP POSTs to /mcp per credential per minute; 240 outside tests. */
   httpPostBudget?: number;
-  sources: Record<"dataDir" | "readOnly" | "transport" | "transcribe" | "webhook" | "recall", Source>;
+  /** WAZAP_ANSWER_FORMAT: how tool answers are shaped per session (client-name.ts); `auto` when absent. */
+  answerFormat?: AnswerFormatSetting;
+  sources: Record<"dataDir" | "readOnly" | "transport" | "transcribe" | "webhook" | "recall" | "port", Source>;
   command: Command;
   /** The command was named on the command line rather than defaulted to serve. */
   explicitCommand: boolean;
@@ -120,6 +123,8 @@ export interface Paths {
   controlFile: string;
   serviceFile: string;
   oauthFile: string;
+  /** The key HTTP session ids are signed with, so a session outlives a restart for the credential that opened it (session-id.ts). */
+  sessionKeyFile: string;
   envFile: string;
   accountsFile: string;
 }
@@ -132,6 +137,8 @@ export interface AccountPaths {
   previewsDir: string;
   /** Media kept as it arrived (src/service/keep.ts), each file recorded against its message. */
   keptDir: string;
+  /** Media a draft fetched from a URL or was given in the call, until it is sent (src/pinned-media.ts). */
+  outgoingDir: string;
   notesFile: string;
   storeFile: string;
   qrFile: string;
@@ -147,6 +154,7 @@ export function paths(dataDir: string): Paths {
     controlFile: join(dataDir, "control.json"),
     serviceFile: join(dataDir, "service.json"),
     oauthFile: join(dataDir, "oauth.json"),
+    sessionKeyFile: join(dataDir, "session.key"),
     envFile: join(dataDir, ".env"),
     accountsFile: join(dataDir, "accounts.json"),
   };
@@ -161,6 +169,7 @@ export function accountPaths(dataDir: string, accountId: string): AccountPaths {
     historyDir: join(root, "history"),
     previewsDir: join(root, "previews"),
     keptDir: join(root, "kept"),
+    outgoingDir: join(root, "outgoing"),
     notesFile: join(root, "notes.json"),
     storeFile: join(root, "store.json"),
     qrFile: join(root, "qr.png"),
@@ -253,6 +262,20 @@ export function readOnlySetting(value: string | undefined): boolean {
   if (["", "0", "false", "no", "off"].includes(normalized)) return false;
   throw new WazapError("INVALID_ID", "WAZAP_READ_ONLY must be a boolean value.",
     "Set WAZAP_READ_ONLY to 1 to disable writes or 0 to enable them deliberately");
+}
+
+/**
+ * WAZAP_ANSWER_FORMAT: `auto` (the default) gives an assistant's session its
+ * answers as text alone and a program's the text and structured content;
+ * `full` or `text` gives every session that one. Anything else is refused at
+ * start, like WAZAP_READ_ONLY, rather than read as one of them.
+ */
+export function answerFormatSetting(value: string | undefined): AnswerFormatSetting {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "" || normalized === "auto") return "auto";
+  if (normalized === "full" || normalized === "text") return normalized;
+  throw new WazapError("INVALID_ID", "WAZAP_ANSWER_FORMAT must be auto, full or text.",
+    "Set WAZAP_ANSWER_FORMAT=full to give every session structured content, text for text alone, or leave it unset");
 }
 
 export const WRITES_ENABLE_FIX = "run `wazap config writes on`, then restart the server";
@@ -440,6 +463,7 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
       maxInFlight: 8,
       maxInFlightTotal: 32,
       httpPostBudget: 240,
+      answerFormat: answerFormatSetting(process.env.WAZAP_ANSWER_FORMAT),
       sources: {
         // Resolved before dotenv runs, so the data dir's own .env cannot name it.
         dataDir: values["data-dir"] !== undefined ? "flag" : shell.has("WAZAP_DATA_DIR") ? "env" : "default",
@@ -448,6 +472,8 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
         transcribe: sourceOf("WAZAP_TRANSCRIBE", false),
         webhook: sourceOf("WAZAP_WEBHOOK", false),
         recall: sourceOf("WAZAP_RECALL", false),
+        // An empty or non-numeric WAZAP_PORT names no port: the server takes 8766, and a reinstall keeps the service's own.
+        port: values.port === undefined && Number.isNaN(asInt(process.env.WAZAP_PORT, Number.NaN)) ? "default" : sourceOf("WAZAP_PORT", values.port !== undefined),
       },
       command,
       explicitCommand: first !== undefined,

@@ -102,6 +102,41 @@ With `WAZAP_PERSIST_HISTORY=0` the stored messages are removed at every stop
 and start, so a message event still waiting then is cancelled rather than
 posted after the restart; connection events still go out.
 
+### Cloud agents: push, not poll
+
+A cloud agent that should act on what arrives (answer a customer, flag an
+invoice, transcribe a voice note as it lands) is woken by this webhook rather
+than by sitting in a `wait_for_messages` loop. A wait holds a call open for up
+to 55 seconds and answers once, so an idle hour of watching is about 65 calls,
+each an internet round trip to the server and, for a model, a turn that reads
+its whole context again; the webhook costs nothing while nothing happens and
+reaches the agent within moments of the message.
+
+1. Point the webhook at whatever starts the agent: a Cursor Automation or an
+   n8n flow (both take a header: [A receiver that wants its own header](#a-receiver-that-wants-its-own-header)),
+   a Claude Code routine's trigger, or a [bridge](#or-a-bridge-on-your-own-machine)
+   that adds what the service asks for. The events that exist are the ones to
+   ask for: `message_received` (the default) for what other people send,
+   `reminder` for reminders coming due, `scheduled` for what became of a
+   scheduled message, `alert` for the owner.
+2. The agent starts from the POST: `chat_id`, `message_id`, `from`, `kind`
+   and `text`, and with several messages from one chat in one POST,
+   `message_ids` and `texts` ([Several messages, one POST](#several-messages-one-post)).
+   It acts through the same MCP server with its own credential:
+   `get_media` with that `message_id` (or `message_ids`) for a photo, a
+   document or a voice note, `read_messages` on `chat_id` (with `since` for
+   the stretch around it) for context, `send_message` to draft a reply. Dedupe
+   on `message_id`: an event is posted at least once.
+3. Keep `addressed`-style filtering on the receiver side or with the chat
+   filter ([Which chats are posted](#which-chats-are-posted)): a group's
+   chatter need not start an agent at all.
+
+`wait_for_messages` stays as it is, for an agent that stays on the line
+within one turn (a person waiting in the chat for an answer that is about to
+come) and for clients nothing can trigger, such as a claude.ai conversation.
+Its cursor lives in memory, so a restart starts it again from that moment; the
+webhook's outbox is in the account database and survives one.
+
 ### Which chats are posted
 
 With neither `WAZAP_WEBHOOK_CHATS` nor `WAZAP_WEBHOOK_TAG` set, every chat is

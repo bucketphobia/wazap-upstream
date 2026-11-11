@@ -327,11 +327,16 @@ test("the filing is capped, like a note, not a document", async () => {
       svc.updateContactDetails(jid, {
         addTags: Array.from({ length: 31 }, (_, i) => `t${i}`),
       }),
-    (err) => err.code === "TEXT_TOO_LONG"
+    // A contact's limit, not a message's: its fix says how to make room, not to split a message.
+    (err) => err.code === "TEXT_TOO_LONG" && err.fix === "Remove some with remove_tags, in this call or first"
+  );
+  await assert.rejects(
+    () => svc.updateContactDetails(jid, { fields: Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`f${i}`, "x"])) }),
+    (err) => err.code === "TEXT_TOO_LONG" && err.fix === "Remove some with remove_fields, in this call or first"
   );
   await assert.rejects(
     () => svc.updateContactDetails(jid, { fields: { bio: "x".repeat(201) } }),
-    (err) => err.code === "TEXT_TOO_LONG"
+    (err) => err.code === "TEXT_TOO_LONG" && err.fix === "Shorten the detail"
   );
 });
 

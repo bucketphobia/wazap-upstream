@@ -53,7 +53,7 @@ test("stories are listed by author, newest first, and show nowhere else", async 
   assert.match(result.content[0].text, /## Dan \(\+40 700 000 003\)/);
   assert.ok(!result.content[0].text.split("\n").filter((line) => line.startsWith("## ")).some((line) => line.includes("@")));
   assert.equal(result.structuredContent.messages[0].sender.id, DAN, "the machine address stays available");
-  assert.match(result.content[0].text, /- 3h ago · la mare 🌊/);
+  assert.match(result.content[0].text, /\n- (\d{4}-\d{2}-\d{2} )?\d{2}:\d{2} la mare 🌊 · false_status@broadcast_S1/);
 
   const chats = await call("list_chats", {});
   assert.equal(chats.structuredContent.count, 0, "not a chat");

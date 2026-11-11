@@ -102,11 +102,11 @@ Several WhatsApp accounts can live in one wazap (`wazap account add <id>`, then
 ## The 23 tools
 
 What every argument means, and every error code, is in
-[docs/tools.md](docs/tools.md). The assistant gets all of it by calling `learn`.
+[docs/tools.md](docs/tools.md). The assistant gets it from `learn`, one topic at a time (`ids`, `workflows`, `errors`), when it needs it.
 
 | Tool | Kind | What it does |
 | --- | --- | --- |
-| `learn` | read | The guide to every tool, id format, workflow and error code. Call it first. |
+| `learn` | read | The guide by topic: id formats and several accounts, the workflows, every error code with its fix. Called when unsure, not first. |
 | `get_status` | read | Connection, sync, linked accounts, how fresh the history is, webhook delivery, versions. |
 | `link_account` | read | Link an account from the assistant; returns the 8-character code to type into the phone. |
 | `list_chats` | read | Conversations newest-first: `all`, `unread`, `groups`, `individual` or `archived`. |
@@ -117,7 +117,7 @@ What every argument means, and every error code, is in
 | `find_contact` | read | Who "mama", a nickname, a group name or a number means, before anything is drafted. |
 | `list_contacts` | read | The phone's address book a page at a time: saved name, number, when you last talked. |
 | `get_group_info` | read | Participants, admins, group settings, the invite link for an admin. |
-| `get_media` | read | A voice note as its transcript, a photo as an image, any file saved to disk; served from the copy kept on arrival first. |
+| `get_media` | read | A voice note as its transcript, a photo as an image, a video as a contact sheet, a document as its text, for one message or up to eight at once; a local session also saves the file. Served from the copy kept on arrival first. |
 | `wait_for_messages` | read | Block up to 55 s until a message arrives, with a cursor so nothing is missed between calls. |
 | `remember` | local | A note, tags or details about a person, kept on this machine. Nothing changes on WhatsApp. |
 | `send_message` | write | Draft a message, media, poll, location or forward — and send nothing. `send_at` drafts it for a later time. |
@@ -198,7 +198,10 @@ The service recovers by itself: a dropped link is retried with backoff, a
 watchdog replaces a socket that went dead across a sleep or stopped answering,
 and when reconnecting keeps failing wazap exits so launchd or systemd starts it
 fresh. The linked session is never deleted for any of that; only WhatsApp
-unlinking the device needs a new link. Set `WAZAP_WEBHOOK_EVENTS` to include
+unlinking the device needs a new link. An agent's MCP session outlives those
+restarts and its daily token rotation too: its next call is simply served,
+and answers travel gzip-compressed to every client that accepts it
+([HTTP mode](docs/self-host.md#http-mode)). Set `WAZAP_WEBHOOK_EVENTS` to include
 `alert` to be told when the link has been down for 5 minutes, when it is back,
 and when it needs linking again ([Link alerts](docs/api-and-webhooks.md#link-alerts));
 `get_status` shows the same under `link`.

@@ -51,7 +51,7 @@ export async function runSmoke({
     assert.equal(init.error, undefined, `initialize failed: ${JSON.stringify(init.error)}`);
     assert.equal(init.result.serverInfo.name, "wazap");
     const instructions = init.result.instructions ?? "";
-    assert.match(instructions, /learn/, "the instructions must send the agent to `learn` first");
+    assert.match(instructions, /Call `learn` when unsure/, "the instructions name `learn` for when the agent is unsure");
     for (const name of SKILL_NAMES) {
       assert.ok(instructions.includes(name), `the instructions never name ${name}: ${instructions}`);
     }

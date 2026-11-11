@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   existsSync,
@@ -18,23 +19,30 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { AccountRegistry } from "../dist/accounts.js";
-import { paths, WAZAP_VERSION } from "../dist/config.js";
+import { parseCli, paths, WAZAP_VERSION } from "../dist/config.js";
 import { yieldSession } from "../dist/cli.js";
+import { ACCOUNTS_STOP_MS, drainWithin, HTTP_DRAIN_MS } from "../dist/server.js";
 import {
+  SERVICE_STOP_S,
   SUPERVISORS,
   installService,
   readService,
   runService,
   serverUnit,
   servicePath,
+  reinstallCommand,
   serviceScript,
+  serviceStopMs,
+  writeService,
 } from "../dist/service.js";
+import { spawnWazap, waitFor } from "./helpers.mjs";
 
 function dataDir() {
   return mkdtempSync(join(tmpdir(), "wazap-service-"), { mode: 0o700 });
@@ -43,8 +51,9 @@ function dataDir() {
 /** A high port nothing is listening on, so the port check cannot find a holder. */
 let nextPort = 41_000;
 
+/** A run's config with its port named (--port), as a test picks a free one; `sources.port: "default"` is one with none. */
 function config(dir, overrides = {}) {
-  return { dataDir: dir, httpPort: nextPort++, dryRun: false, args: [], ...overrides };
+  return { dataDir: dir, httpPort: nextPort++, dryRun: false, args: [], sources: { port: "flag" }, ...overrides };
 }
 
 function fakeSupervisor(dir, pid = 4242) {
@@ -137,6 +146,79 @@ test("a second install rewrites the same files and restarts instead of starting"
   assert.deepEqual(readService(dir), record, "the record must not drift on a re-run");
   assert.equal(readFileSync(record.unitFile, "utf8"), unit);
   assert.deepEqual(second.calls, ["restart com.wazap.server"]);
+});
+
+/**
+ * A tunnel forwards to the port the service listens on. A reinstall run with
+ * no port named (no --port, no WAZAP_PORT) keeps the one its record has,
+ * instead of moving the service to 8766 under the tunnel.
+ */
+test("a reinstall keeps the service's port unless one is named now", async () => {
+  const dir = dataDir();
+  const first = fakeSupervisor(dir);
+  await captured(() => installService(config(dir), first, 0));
+  const { port } = readService(dir);
+
+  for (const source of ["default", undefined]) {
+    const output = await captured(() =>
+      installService(config(dir, { httpPort: 8766, sources: source === undefined ? {} : { port: source }, dryRun: true }), fakeSupervisor(dir), 0)
+    );
+    assert.match(output, new RegExp(`--port ${source === "default" ? port : 8766}\\b`), `source ${source}`);
+  }
+  await captured(() => installService(config(dir, { httpPort: 8766, sources: { port: "default" } }), fakeSupervisor(dir), 0));
+  assert.equal(readService(dir).port, port, "no port named: the record's stays");
+  for (const source of ["flag", "env", ".env"]) {
+    const named = nextPort++;
+    await captured(() => installService(config(dir, { httpPort: named, sources: { port: source } }), fakeSupervisor(dir), 0));
+    assert.equal(readService(dir).port, named, `a port named by ${source} is the new one`);
+  }
+});
+
+test("the command that reinstalls is this process's own node and script, quoted for a shell", () => {
+  assert.equal(
+    reinstallCommand("/Users/ana/.wazap", "/opt/node-22/bin/node", "/usr/lib/node_modules/wazap-mcp/dist/index.js"),
+    "/opt/node-22/bin/node /usr/lib/node_modules/wazap-mcp/dist/index.js service install --data-dir /Users/ana/.wazap"
+  );
+  assert.equal(
+    reinstallCommand("/Users/ana/My Data/it's", "/opt/node/bin/node", "/x/index.js"),
+    "/opt/node/bin/node /x/index.js service install --data-dir '/Users/ana/My Data/it'\\''s'"
+  );
+  assert.ok(reinstallCommand("/d").includes(" service install --data-dir /d"));
+  assert.ok(reinstallCommand("/d").startsWith(process.execPath) || reinstallCommand("/d").startsWith(`'${process.execPath}`), "this process's node by default");
+});
+
+/**
+ * The unit's own --port overrides a WAZAP_PORT in .env while the service runs,
+ * so one left there (empty, or a stale 8766) goes unnoticed until the
+ * reinstall the startup log asks for reads it. The command names the port.
+ */
+test("the command the log prints keeps the service's port, whatever WAZAP_PORT .env holds", async () => {
+  const dir = dataDir();
+  await captured(() => installService(config(dir), fakeSupervisor(dir), 0));
+  const { port } = readService(dir);
+  const command = reinstallCommand(dir, "/opt/node/bin/node", "/x/index.js");
+  assert.ok(command.endsWith(` service install --data-dir ${dir} --port ${port}`), command);
+
+  const previous = process.env.WAZAP_PORT;
+  try {
+    for (const line of ["WAZAP_PORT=", "WAZAP_PORT=8766"]) {
+      delete process.env.WAZAP_PORT;
+      writeFileSync(paths(dir).envFile, `${line}\n`);
+      const { config: parsed } = parseCli(command.split(" ").slice(2));
+      const output = await captured(() => installService({ ...parsed, dryRun: true }, fakeSupervisor(dir), 0));
+      assert.match(output, new RegExp(`--port ${port}\\b`), line);
+    }
+    // An empty WAZAP_PORT names no port, so a bare reinstall keeps the service's too.
+    delete process.env.WAZAP_PORT;
+    writeFileSync(paths(dir).envFile, "WAZAP_PORT=\n");
+    const { config: bare } = parseCli(["service", "install", "--data-dir", dir]);
+    assert.equal(bare.sources.port, "default");
+    const output = await captured(() => installService({ ...bare, dryRun: true }, fakeSupervisor(dir), 0));
+    assert.match(output, new RegExp(`--port ${port}\\b`), "an empty WAZAP_PORT");
+  } finally {
+    if (previous === undefined) delete process.env.WAZAP_PORT;
+    else process.env.WAZAP_PORT = previous;
+  }
 });
 
 test("serviceScript of a global install is the real file behind that bin, not this process", () => {
@@ -242,7 +324,7 @@ function supervisorNamed(name) {
   return SUPERVISORS.find((entry) => entry.name === name);
 }
 
-test("the launchd plist keeps the job alive, throttled, with its own PATH", () => {
+test("the launchd plist keeps the job alive, throttled, with its own PATH and time to drain when it stops", () => {
   const plist = supervisorNamed("launchd").render(UNIT);
   assert.equal(
     plist,
@@ -280,6 +362,8 @@ test("the launchd plist keeps the job alive, throttled, with its own PATH", () =
 \t<string>Standard</string>
 \t<key>ThrottleInterval</key>
 \t<integer>10</integer>
+\t<key>ExitTimeOut</key>
+\t<integer>15</integer>
 \t<key>StandardOutPath</key>
 \t<string>/home/u/logs/com.wazap.server.out.log</string>
 \t<key>StandardErrorPath</key>
@@ -288,6 +372,72 @@ test("the launchd plist keeps the job alive, throttled, with its own PATH", () =
 </plist>
 `
   );
+});
+
+/**
+ * launchd SIGKILLs a job whose plist sets no ExitTimeOut about five seconds
+ * after SIGTERM (measured with `launchctl bootout`), which would cut the drain
+ * short and skip stopping the accounts altogether.
+ */
+test("the stop the installed unit allows decides the drain: the full ten seconds in a unit wazap writes now, one in an older launchd one", (t) => {
+  const dir = dataDir();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const record = (supervisor, unitFile) =>
+    writeService(dir, { supervisor, label: "com.wazap.server", unitFile, port: 8766, logDir: join(dir, "logs"), installedVersion: WAZAP_VERSION });
+
+  assert.equal(serviceStopMs(dir), null, "nothing installed");
+  const plist = join(dir, "com.wazap.server.plist");
+  record("launchd", plist);
+  assert.equal(serviceStopMs(dir), null, "a unit that cannot be read says nothing");
+  writeFileSync(plist, supervisorNamed("launchd").render(UNIT));
+  assert.equal(serviceStopMs(dir), SERVICE_STOP_S * 1000);
+  writeFileSync(plist, supervisorNamed("launchd").render(UNIT).replace(/\t<key>ExitTimeOut<\/key>\n\t<integer>\d+<\/integer>\n/, ""));
+  assert.equal(serviceStopMs(dir), 5_000, "launchd's own allowance");
+  const unit = join(dir, "wazap.service");
+  record("systemd", unit);
+  writeFileSync(unit, supervisorNamed("systemd").render(UNIT));
+  assert.equal(serviceStopMs(dir), SERVICE_STOP_S * 1000);
+  writeFileSync(unit, supervisorNamed("systemd").render(UNIT).replace(/TimeoutStopSec=\d+/, "TimeoutStopSec=0"));
+  assert.equal(serviceStopMs(dir), null, "0 is systemd's never");
+
+  assert.equal(drainWithin(null), HTTP_DRAIN_MS);
+  assert.equal(drainWithin(SERVICE_STOP_S * 1000), HTTP_DRAIN_MS);
+  assert.ok(HTTP_DRAIN_MS + ACCOUNTS_STOP_MS < SERVICE_STOP_S * 1000, "the whole shutdown fits the units wazap writes");
+  assert.equal(drainWithin(5_000), 1_000);
+  assert.ok(drainWithin(5_000) + ACCOUNTS_STOP_MS < 5_000, "and an older launchd unit's");
+  assert.equal(drainWithin(2_000), 0);
+});
+
+test("a server under a launchd unit from before ExitTimeOut says so, and still stops at once on SIGTERM", { timeout: 30_000 }, async (t) => {
+  const dir = dataDir();
+  const probe = createNetServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address();
+  await new Promise((resolve) => probe.close(resolve));
+  const plist = join(dir, "com.wazap.server.plist");
+  writeFileSync(plist, supervisorNamed("launchd").render(UNIT).replace(/\t<key>ExitTimeOut<\/key>\n\t<integer>\d+<\/integer>\n/, ""));
+  writeService(dir, { supervisor: "launchd", label: "com.wazap.server", unitFile: plist, port, logDir: join(dir, "logs"), installedVersion: WAZAP_VERSION });
+  const { child, stderr } = spawnWazap({ dataDir: dir, args: ["serve", "--http", "--port", String(port)], env: { WAZAP_NO_SHARE: "1" } });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await waitFor(
+    () => fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1_000) }).then((res) => res.ok || res.status === 503, () => false),
+    20_000,
+    "wazap serve --http to answer"
+  );
+  assert.match(
+    stderr.join(""),
+    new RegExp(
+      `the service unit allows 5 s to stop, so calls under way get 1 s at a restart; run \`\\S+node\\S* \\S+index\\.js service install --data-dir \\S+ --port ${port}\` once \\(this service's own node and script; the port stays\\) to give them 10`
+    )
+  );
+  const exited = once(child, "exit");
+  const at = Date.now();
+  child.kill("SIGTERM");
+  await exited;
+  assert.ok(Date.now() - at < 4_500, `exited ${Date.now() - at} ms after SIGTERM`);
 });
 
 /**

@@ -83,9 +83,27 @@ test("a WazapError becomes an MCP error result carrying code, message and fix", 
   assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
 });
 
-test("an error without a fix omits the field instead of emitting null", () => {
+test("an error thrown without a fix carries what the guide says to do about its code", () => {
   const result = toolError(new WazapError("WHATSAPP_ERROR", "boom"));
-  assert.deepEqual(result.structuredContent, { error: "WHATSAPP_ERROR", message: "boom" });
+  assert.deepEqual(result.structuredContent, { error: "WHATSAPP_ERROR", message: "boom", fix: ERROR_GUIDE.WHATSAPP_ERROR });
+  for (const code of Object.keys(ERROR_GUIDE)) {
+    assert.equal(toolError(new WazapError(code, "x")).structuredContent.fix, ERROR_GUIDE[code], code);
+  }
+  // Its own fix, when it has one, stands.
+  assert.equal(toolError(new WazapError("WHATSAPP_ERROR", "boom", "Ask the group's admin")).structuredContent.fix, "Ask the group's admin");
+});
+
+test("the guide's lines hold for every session and every tool that throws the code without a fix", () => {
+  for (const [code, line] of Object.entries(ERROR_GUIDE)) {
+    // A remote session is never shown file_path: no line sends an agent to it.
+    assert.doesNotMatch(line, /file_path/, code);
+  }
+  // Two tools throw NOT_OWN_MESSAGE, and only a delete has an admin's or a local way out.
+  assert.match(ERROR_GUIDE.NOT_OWN_MESSAGE, /^Only the account's own messages can be edited; deleting also takes/);
+  // Two causes: host files in a remote session, and a media URL that is not public.
+  assert.match(ERROR_GUIDE.MEDIA_ACCESS_DENIED, /may not use host files, or the media URL is not public/);
+  // A contact's tags and details are refused under it too.
+  assert.doesNotMatch(ERROR_GUIDE.TEXT_TOO_LONG, /WhatsApp's limit/);
 });
 
 test("a handler that throws a raw error is reported as WHATSAPP_ERROR, never as a crash", async () => {
@@ -100,6 +118,7 @@ test("a handler that throws a raw error is reported as WHATSAPP_ERROR, never as 
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error, "WHATSAPP_ERROR");
   assert.equal(result.structuredContent.message, "something internal broke");
+  assert.equal(result.structuredContent.fix, ERROR_GUIDE.WHATSAPP_ERROR, "an unexpected exception still says what to do");
 });
 
 function draftApi(confirm) {
@@ -214,7 +233,7 @@ test("a draft in the wrong language is written again before any preview is shown
   assert.doesNotMatch(next, /Show this preview to the user exactly/, "the step is the redraft, not this preview");
   assert.equal(wrongLanguage.structuredContent.status, "draft", "the warning blocks nothing");
   assert.deepEqual(wrongLanguage.structuredContent.style_check.warnings, ["language_mismatch"]);
-  assert.match(wrongLanguage.content[0].text, /confirm_send/, "and the rendered draft is what it was");
+  assert.ok(wrongLanguage.content[0].text.endsWith(next), "and the text gives the very same step, not a confirm");
 
   for (const warnings of [[], ["diacritics_mismatch", "address_mismatch"], ["length_outlier"]]) {
     const other = await draft(warnings);
@@ -420,15 +439,40 @@ test("get_status on a remote write session tells the agent nothing about bearer 
   assert.equal(result.structuredContent.hint, undefined);
 });
 
-test("learn documents every error code an agent can receive, within 2,000 tokens and as text only", async () => {
+test("learn documents every error code an agent can receive under its errors topic, as text only", async () => {
   const server = fakeServer();
   registerTools(server, asToolSource({}), { allowWrite: true });
-  const guide = (await server.tools.get("learn").handler({})).content[0].text;
-  for (const code of Object.keys(ERROR_GUIDE)) {
-    assert.ok(guide.includes(code), `learn must tell the agent what to do about ${code}`);
+  const learn = (args) => server.tools.get("learn").handler(args);
+  for (const topic of ["errors", "all"]) {
+    const guide = (await learn({ topic })).content[0].text;
+    for (const code of Object.keys(ERROR_GUIDE)) {
+      assert.ok(guide.includes(code), `learn ${topic} must tell the agent what to do about ${code}`);
+    }
   }
-  assert.ok(Buffer.byteLength(guide) / 4 <= 2000, `${Math.round(Buffer.byteLength(guide) / 4)} tokens`);
-  assert.equal((await server.tools.get("learn").handler({})).structuredContent, undefined, "the guide is not repeated as structured content");
+  // About 2,250 Claude tokens at the 2.45 bytes a token measured for this prose.
+  assert.ok(Buffer.byteLength((await learn({ topic: "errors" })).content[0].text) <= 5_500);
+  assert.equal((await learn({})).structuredContent, undefined, "the guide is not repeated as structured content");
+});
+
+test("learn with no topic is a short index of the topics; each topic is a part of the whole", async () => {
+  const server = fakeServer();
+  registerTools(server, asToolSource({}), { allowWrite: true });
+  const learn = async (args) => (await server.tools.get("learn").handler(args)).content[0].text;
+  const index = await learn({});
+  assert.ok(Buffer.byteLength(index) <= 500, `${Buffer.byteLength(index)} bytes`);
+  for (const topic of ["ids", "workflows", "errors", "all"]) assert.match(index, new RegExp(`- ${topic}: `));
+  assert.match(index, new RegExp(`each of the ${Object.keys(ERROR_GUIDE).length} error codes`));
+  const all = await learn({ topic: "all" });
+  for (const topic of ["ids", "workflows", "errors"]) assert.ok(all.includes((await learn({ topic })).trim()), topic);
+  // What the guide alone used to say, and every call needs, is in the instructions now.
+  const { loadSkills, skillInstructions } = await import("../dist/skills.js");
+  const instructions = skillInstructions(loadSkills(), { allowWrite: true });
+  assert.match(instructions, /Call `learn` when unsure about ids, several accounts or an error code/);
+  assert.doesNotMatch(instructions, /learn` first/);
+  assert.match(instructions, /#private shows with no words unless a call names them/);
+  assert.match(instructions, /mark_read sends a read receipt: only when the user asks/);
+  assert.match(instructions, /passed back exactly as given/);
+  assert.match(server.tools.get("manage_chat").meta.description, /mark_read runs directly, only when the user asks/);
 });
 
 test("send_message drafts one kind at a time and refuses what does not belong to it", async () => {
@@ -504,7 +548,7 @@ test("remember and learn state the #private rule the reads keep: no words unless
   // Every read that does not name the person leaves their words out (src/private-contacts.ts); one that names them shows them.
   assert.match(described, /#private keeps their words out of what you did not ask about them by name/);
   assert.doesNotMatch(described, /out of answers|out of catch_up and find_contact's draft context/);
-  const guide = (await server.tools.get("learn").handler({})).content[0].text;
+  const guide = (await server.tools.get("learn").handler({ topic: "workflows" })).content[0].text;
   assert.match(guide, /#private: a person's words come only when a call names them: their chat_id,\s+a message_id of theirs, search's from; a group's chat_id reads whole\. Elsewhere\s+their entries say private, with no words, and search counts private_omitted\./);
 });
 
@@ -601,7 +645,7 @@ test("list_chats previews retain complete UTF-16 pairs at the truncation boundar
       const result = await server.tools.get("list_chats").handler({ filter: "all", limit: 20 });
       assert.equal(result.isError, undefined);
       assert.equal(result.content[0].text.isWellFormed(), true);
-      assert.ok(result.content[0].text.includes(`- **last**: ${preview} (`));
+      assert.ok(result.content[0].text.endsWith(` · last 2026-10-09 10:00: ${preview}`), result.content[0].text);
       // Structured source text remains complete; only the human preview is bounded.
       assert.equal(result.structuredContent.chats[0].last_message.text, text);
     });

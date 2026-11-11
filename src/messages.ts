@@ -3,7 +3,7 @@
  * knows (display names, lid→pn) arrives through MessageViewContext.
  */
 
-import { getContentType, proto, type WAMessage, type WAMessageContent, type WAMessageKey } from "baileys";
+import { extractMessageContent, getContentType, proto, type WAMessage, type WAMessageContent, type WAMessageKey } from "baileys";
 import type { Receipt } from "./store.js";
 import type { TranscriptRecord } from "./transcribe/index.js";
 import type {
@@ -15,6 +15,7 @@ import type {
   DeliveryStatus,
   EventParty,
   EventResponses,
+  Mention,
   MessageType,
   MessageView,
   PollResults,
@@ -404,8 +405,23 @@ interface MediaNode {
   fileLength?: ProtoLong;
   fileName?: string | null;
   jpegThumbnail?: Uint8Array | null;
+  pngThumbnail?: Uint8Array | null;
   fileSha256?: Uint8Array | null;
   viewOnce?: boolean | null;
+  seconds?: number | null;
+}
+
+/**
+ * The node that carries a message's media: the first of MEDIA_KEYS, or the
+ * sticker a Lottie (animated vector) sticker wraps one level down, which
+ * neither the table above nor Baileys' own download unwraps.
+ */
+function mediaNodeOf(inner: WAMessageContent): MediaNode | undefined {
+  for (const mediaKey of MEDIA_KEYS) {
+    const node = inner[mediaKey] as MediaNode | null | undefined;
+    if (node) return node;
+  }
+  return (inner.lottieStickerMessage?.message?.stickerMessage as MediaNode | null | undefined) ?? undefined;
 }
 
 /** Media whose WhatsApp envelope carries a JPEG preview of a few KB. */
@@ -946,17 +962,13 @@ function analyze(raw: WAMessage): Analysis {
   const node = key === undefined ? undefined : (content?.[key] as { contextInfo?: proto.IContextInfo | null } | null);
   const inner = content ? (viewOnceInner(content) ?? content) : undefined;
   let media: Analysis["media"];
-  if (inner) {
-    for (const mediaKey of MEDIA_KEYS) {
-      const m = inner[mediaKey] as MediaNode | null | undefined;
-      if (!m) continue;
-      media = {
-        mime: m.mimetype ?? "application/octet-stream",
-        size: protoNumber(m.fileLength),
-        filename: m.fileName ?? undefined,
-      };
-      break;
-    }
+  const m = inner ? mediaNodeOf(inner) : undefined;
+  if (m) {
+    media = {
+      mime: m.mimetype ?? "application/octet-stream",
+      size: protoNumber(m.fileLength),
+      filename: m.fileName ?? undefined,
+    };
   }
 
   const a: Analysis = {
@@ -1208,14 +1220,8 @@ export function mediaInfo(raw: WAMessage): { mime: string; size?: number; filena
  */
 export function mediaSha256(raw: WAMessage): Buffer | undefined {
   const inner = analyze(raw).inner;
-  if (!inner) return undefined;
-  for (const mediaKey of MEDIA_KEYS) {
-    const node = inner[mediaKey] as MediaNode | null | undefined;
-    if (!node) continue;
-    const hash = node.fileSha256;
-    return hash && hash.length === 32 ? Buffer.from(hash) : undefined;
-  }
-  return undefined;
+  const hash = inner ? mediaNodeOf(inner)?.fileSha256 : undefined;
+  return hash && hash.length === 32 ? Buffer.from(hash) : undefined;
 }
 
 /** Whether the media is view-once: wrapped as one, or flagged on its own node. */
@@ -1224,7 +1230,96 @@ export function mediaViewOnce(raw: WAMessage): boolean {
   if (a.type === "view_once" || (a.content !== undefined && viewOnceInner(a.content) !== undefined)) return true;
   const inner = a.inner;
   if (!inner) return false;
-  return MEDIA_KEYS.some((mediaKey) => (inner[mediaKey] as MediaNode | null | undefined)?.viewOnce === true);
+  return mediaNodeOf(inner)?.viewOnce === true;
+}
+
+/** How long a video, round video or recording runs, by its envelope; undefined when it does not say. */
+export function mediaSeconds(raw: WAMessage): number | undefined {
+  const inner = analyze(raw).inner;
+  const seconds = inner ? protoNumber(mediaNodeOf(inner)?.seconds) : undefined;
+  return seconds === undefined || seconds <= 0 ? undefined : seconds;
+}
+
+/** A Lottie sticker: an animation in vector form, which nothing here can draw. */
+export function isLottieSticker(raw: WAMessage): boolean {
+  return Boolean(analyze(raw).inner?.lottieStickerMessage?.message?.stickerMessage);
+}
+
+/** The PNG a sticker may ship as its thumbnail: all a Lottie sticker offers to look at. */
+export function stickerThumbnail(raw: WAMessage): Buffer | undefined {
+  const inner = analyze(raw).inner;
+  const bytes = inner ? (inner.stickerMessage ?? inner.lottieStickerMessage?.message?.stickerMessage)?.pngThumbnail : undefined;
+  return bytes && bytes.length > 0 ? Buffer.from(bytes) : undefined;
+}
+
+/**
+ * The message as Baileys' download reads it: a Lottie sticker's inner sticker
+ * brought up a level, since Baileys calls its wrapper "not a media message".
+ * Any other message is returned as it is.
+ */
+export function downloadableMessage(raw: WAMessage): WAMessage {
+  const inner = analyze(raw).inner?.lottieStickerMessage?.message;
+  return inner?.stickerMessage ? { ...raw, message: inner } : raw;
+}
+
+/** A media `url` Baileys may fetch: https on WhatsApp's CDN (`*.whatsapp.net`), its own port, no credentials. */
+export function cdnUrl(url: unknown): string | undefined {
+  if (typeof url !== "string" || url === "") return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "https:" || parsed.port !== "" || parsed.username !== "" || parsed.password !== "") return undefined;
+  return parsed.hostname === "whatsapp.net" || parsed.hostname.endsWith(".whatsapp.net") ? url : undefined;
+}
+
+/** A media `directPath` that stays a path when Baileys puts a host in front of it: one leading "/", nothing that could start another host. */
+export function cdnPath(path: unknown): string | undefined {
+  if (typeof path !== "string" || !path.startsWith("/") || path.includes("//")) return undefined;
+  for (const char of path) if (char <= " " || char === "\u007f" || char === "@" || char === "\\") return undefined;
+  return path;
+}
+
+/**
+ * The message as wazap hands it to Baileys' download: its media node (the one
+ * Baileys picks, by Baileys' own functions) brought up a level, with a `url`
+ * off WhatsApp's CDN and a path that is not a path set to null. The sender
+ * writes the media node, inside the encrypted message, and Baileys fetches
+ * `url` as it is when there is no directPath and `https://<url's host><directPath>`
+ * otherwise: left alone, a stranger's message makes this machine GET any
+ * host, port and path it names, on arrival when media is kept. With only
+ * directPath left, Baileys fetches from mmg.whatsapp.net, or fails. Keys are
+ * set only where the node had them, since Baileys tells a sticker's thumbnail
+ * link apart by whether `url` is there at all. Baileys unwraps at most five
+ * wrappers, and unwraps again when it downloads: a node that is not one of
+ * MEDIA_KEYS (a sixth wrapper, say) is handed over as null, so Baileys finds
+ * no media in it rather than five more wrappers to open.
+ */
+export function cdnOnlyMessage(raw: WAMessage): WAMessage {
+  const content = extractMessageContent(raw.message);
+  const type = content ? getContentType(content) : undefined;
+  const node = type === undefined ? undefined : (content?.[type] as unknown);
+  if (type === undefined || node === null || typeof node !== "object") return raw;
+  if (!MEDIA_KEYS.includes(type)) return { ...raw, message: { [type]: null } as WAMessageContent };
+  const safe: Record<string, unknown> = { ...(node as Record<string, unknown>) };
+  if ("url" in node) safe.url = cdnUrl((node as { url?: unknown }).url) ?? null;
+  if ("directPath" in node) safe.directPath = cdnPath((node as { directPath?: unknown }).directPath) ?? null;
+  if ("thumbnailDirectPath" in node) safe.thumbnailDirectPath = cdnPath((node as { thumbnailDirectPath?: unknown }).thumbnailDirectPath) ?? null;
+  return { ...raw, message: { [type]: safe } as WAMessageContent };
+}
+
+/**
+ * The message as Baileys' re-upload request (updateMediaMessage) reads it,
+ * which knows only documents, images, videos, audio and stickers: a round
+ * video (ptv) shown as the video it is, a Lottie sticker as for a download.
+ * The media node is the same object, so the fresh url and directPath Baileys
+ * writes into it land on `raw` too.
+ */
+export function reuploadableMessage(raw: WAMessage): WAMessage {
+  const ptv = analyze(raw).inner?.ptvMessage;
+  return ptv ? { ...raw, message: { videoMessage: ptv } } : downloadableMessage(raw);
 }
 
 /**
@@ -1361,7 +1456,7 @@ export function buildMessageView(raw: WAMessage, ctx: MessageViewContext): Messa
   if (ctx.reactions.length > 0) {
     view.reactions = ctx.reactions.map((r) => ({ ...r, name: ctx.nameFor(ctx.canonical(r.sender)) }));
   }
-  const mentions = mentionsView(context, ctx);
+  const mentions = mentionsView(context, ctx, text);
   if (mentions.length > 0) view.mentions = mentions;
   if (event) view.system = event.system;
   const poll = pollOf(raw);
@@ -1411,13 +1506,48 @@ function deliveryView(receipt: Receipt, ctx: MessageViewContext): Delivery | und
   return delivery;
 }
 
-/** Each person the message @-mentions, once and in the order named: a lid and its number are the same person. */
-function mentionsView(context: proto.IContextInfo | undefined, ctx: MessageViewContext): Voter[] {
-  const ids = new Set<string>();
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** "@<digits>" as a text names a mention: a longer number that starts with these digits is someone else. */
+function mentionToken(user: string): RegExp {
+  return new RegExp(`@${escapeRegExp(user)}(?!\\d)`);
+}
+
+/**
+ * Each person the message @-mentions, once and in the order named: a lid and
+ * its number are the same person. The text names a mention by the user part of
+ * the jid WhatsApp put on the message, which for a lid is not a number anyone
+ * knows, so the digits it uses are kept as `token`.
+ */
+function mentionsView(context: proto.IContextInfo | undefined, ctx: MessageViewContext, text: string): Mention[] {
+  const found = new Map<string, Mention>();
   for (const jid of context?.mentionedJid ?? []) {
-    if (typeof jid === "string" && jid.length > 0) ids.add(ctx.canonical(jid));
+    if (typeof jid !== "string" || jid.length === 0) continue;
+    const id = ctx.canonical(jid);
+    const mention = found.get(id) ?? { id, name: ctx.nameFor(id) };
+    found.set(id, mention);
+    if (mention.token !== undefined) continue;
+    const token = [jid, id].map((named) => named.split("@")[0] ?? "").find((user) => user !== "" && mentionToken(user).test(text));
+    if (token !== undefined) mention.token = token;
   }
-  return [...ids].map((id) => ({ id, name: ctx.nameFor(id) }));
+  return [...found.values()];
+}
+
+/**
+ * `text` as the phone shows it: "@Ana" where it carries a mention's digits.
+ * Someone wazap cannot name keeps their digits. Some texts carry the profile
+ * name after the digits ("@<digits>~<name>"): the name is then said once.
+ */
+export function namedMentions(text: string, mentions: readonly Mention[] | undefined): string {
+  const names = new Map<string, string>();
+  for (const { token, name } of mentions ?? []) {
+    if (token !== undefined && name !== "" && name !== "unknown" && !name.startsWith("unknown (")) names.set(token, name);
+  }
+  if (names.size === 0) return text;
+  const tokens = [...names.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
+  let result = text.replace(new RegExp(`@(${tokens.join("|")})(?!\\d)`, "g"), (_whole, token: string) => `@${names.get(token)!}`);
+  for (const name of new Set(names.values())) result = result.replaceAll(`@${name}~${name}`, `@${name}`);
+  return result;
 }
 
 function voterOf(jid: string, ctx: MessageViewContext): Voter {

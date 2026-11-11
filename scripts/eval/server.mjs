@@ -274,7 +274,9 @@ export async function startEvalServer(options = {}) {
         };
         try {
           const result = await callback(args, extra);
-          const structured = result?.structuredContent ?? null;
+          // A text-format session (an assistant's) sends no structured content; the answer keeps it under
+          // this symbol (src/tool-runtime.ts STRUCTURED_COPY), never on the wire, for this trace.
+          const structured = result?.structuredContent ?? result?.[Symbol.for("wazap/structured-copy")] ?? null;
           // A tool with an outputSchema answers an error as text only: { error, message, fix }.
           const failure = result?.isError ? (structured ?? textError(result)) : null;
           Object.assign(entry, {

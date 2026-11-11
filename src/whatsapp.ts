@@ -16,10 +16,11 @@
 
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { downloadMediaMessage, type BinaryNode, type WAMessage, type WASocket } from "baileys";
+import type { Readable } from "node:stream";
+import { downloadMediaMessage, proto, type BinaryNode, type WAMessage, type WASocket } from "baileys";
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import { accountPolicy, type AccountRecord } from "./accounts.js";
-import { clearAuth, CredentialsReadError, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
+import { cachedAuthState, clearAuth, CredentialsReadError, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
 import {
   type CatchupQuote,
   type CatchupScan,
@@ -32,12 +33,15 @@ import { BAILEYS_VERSION, WAZAP_VERSION, writesHints, type AccountPaths, type Co
 import { AccountDb, chatKindOf, StorageError, type StoredMessage } from "./db/index.js";
 import { type DraftContext, type StyleCheck } from "./draft-style.js";
 import { asWazapError, RELINK_FIX, RESET_FIX, WazapError } from "./errors.js";
+import { orCancelled, throwIfCancelled } from "./cancel.js";
 import { type AccountFind, type FindContactQuery } from "./find-contact.js";
-import { isNoiseJid, normalizePhone } from "./ids.js";
+import { isGroupId, isNoiseJid, normalizePhone } from "./ids.js";
 import { log, logError } from "./logger.js";
 import { describe } from "./outgoing-media.js";
+import { PinnedStore } from "./pinned-media.js";
+import type { MediaNetwork } from "./safe-media.js";
 import { momentsOf } from "./store.js";
-import { isoWithOffset, mediaInfo, messageIdFor, protoNumber } from "./messages.js";
+import { cdnOnlyMessage, downloadableMessage, isoWithOffset, mediaInfo, messageIdFor, protoNumber, reuploadableMessage } from "./messages.js";
 import { PAIRING_TIMEOUT_MS, WA_BROWSER, prettyCode, socketFactory, startPairing } from "./pairing.js";
 import { transcribeFile, transcribeReady } from "./transcribe/index.js";
 import { DraftStore, type DraftPayload, type DraftSchedule, type DraftView } from "./drafts.js";
@@ -52,6 +56,7 @@ import { AccountIngest, type MessageRef } from "./service/ingest.js";
 import { AccountKeep } from "./service/keep.js";
 import { LINK_FILE, LinkMonitor, type ProbeResult } from "./service/link.js";
 import { AccountMedia } from "./service/media.js";
+import { cdnExpired, downloadToMemory } from "./service/media-download.js";
 import { AccountRecall } from "./service/recall.js";
 import { AccountReads } from "./service/reads.js";
 import { AccountSchedule } from "./service/schedule.js";
@@ -70,6 +75,7 @@ import type {
   ChatActionResult,
   ChatFilter,
   ChatRead,
+  ReadWindow,
   ChatSummary,
   ConnectionStatus,
   ContactDetails,
@@ -82,7 +88,9 @@ import type {
   GroupInfo,
   JoinGroupResult,
   ListContactsQuery,
+  MediaOpenOptions,
   MediaResult,
+  OpenedMedia,
   MediaSource,
   MessageType,
   MessageView,
@@ -131,6 +139,10 @@ const HISTORY_FETCH_WAIT_MS = 5_000;
 const STALE_INBOUND_MS = 24 * 3_600_000;
 /** A download is buffered in memory, so the biggest file it may pull is bounded. */
 const MEDIA_DOWNLOAD_MAX_BYTES = 100_000_000;
+/** How long the phone is given to upload expired media again: Baileys itself would wait forever. */
+const REUPLOAD_TIMEOUT_MS = 20_000;
+/** Re-upload requests per account a minute: each one wakes the phone. */
+const REUPLOADS_PER_MINUTE = 10;
 /** How long a stop waits for a transcription under way to store what it got. */
 const STOP_TRANSCRIBE_WAIT_MS = 30_000;
 /** How long list_chats waits for a lid chat still folding into its number before it lists what it has. */
@@ -234,6 +246,10 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly waits: MessageWaits;
   /** Drafts, their one confirm, and every send (src/service/send.ts). */
   private readonly sends: AccountSends;
+  /** Media drafts fetched or were given, until each is sent (src/pinned-media.ts). */
+  private readonly pinnedMedia: PinnedStore;
+  /** The network a draft's URL is fetched over: a test seam only, which nothing an MCP call reaches sets. */
+  mediaNetwork: Partial<MediaNetwork> = {};
   /** What WhatsApp hands the account, filed in its database (src/service/ingest.ts). */
   private readonly ingest: AccountIngest;
   /** The address book, search, notes and details, the full resync (src/service/contacts.ts). */
@@ -261,6 +277,10 @@ export class WhatsAppService implements WhatsAppApi {
   private readonly writes: RateLimiter;
   /** `mark_read`'s own bucket, READ_MARK_MULTIPLIER times the writes', off when the writes' is. */
   private readonly readMarks: RateLimiter;
+  /** Requests to the phone to upload expired media again (mediaBuffer's reupload). */
+  private reuploads = new RateLimiter(REUPLOADS_PER_MINUTE, Date.now, "Media re-request");
+  /** Test seam: how long the phone is given to answer a re-upload request. */
+  private reuploadTimeoutMs = REUPLOAD_TIMEOUT_MS;
   /** What WhatsApp says about the account itself: restrictions, bans, a session taken over (src/service/health.ts). */
   // A restriction that comes or goes while the link stays up is told to the webhook as a connection event.
   // Only while linked: a change seen while the link is down is carried by the status change that brings it back.
@@ -346,6 +366,7 @@ export class WhatsAppService implements WhatsAppApi {
     this.writes = new RateLimiter(this.effectiveRateLimit);
     this.readMarks = new RateLimiter(this.effectiveRateLimit * READ_MARK_MULTIPLIER, Date.now, "Read mark");
     this.paths = paths;
+    this.pinnedMedia = new PinnedStore(paths.outgoingDir);
     this.sends = new AccountSends(
       {
         db: () => this.storage.db,
@@ -367,6 +388,8 @@ export class WhatsAppService implements WhatsAppApi {
           if (this.heardFrom(jid) || (await hasPrivacyToken(sock, jid))) return;
           throw this.health.refusal("new_chat");
         },
+        pinned: () => this.pinnedMedia,
+        mediaNetwork: () => this.mediaNetwork,
       },
       this.identity,
       this.views,
@@ -380,7 +403,7 @@ export class WhatsAppService implements WhatsAppApi {
         status: () => this.status,
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
-        mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        mediaBuffer: (sock, messageId, raw, opts) => this.mediaBuffer(sock, messageId, raw, undefined, opts),
         keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
         transcriber: (...args) => this.transcriber(...args),
         transcribeReadiness: (...args) => this.transcribeReadiness(...args),
@@ -493,7 +516,7 @@ export class WhatsAppService implements WhatsAppApi {
         guarded: (work) => this.guarded(work),
         ensureConnected: () => this.ensureConnected(),
         hasMessage: (id) => this.hasMessage(id),
-        mediaBuffer: (sock, messageId, raw) => this.mediaBuffer(sock, messageId, raw),
+        mediaBuffer: (sock, messageId, raw, opts) => this.mediaBuffer(sock, messageId, raw, undefined, opts),
         keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
         offerKept: (messageId, raw, buffer) => this.keep.offer(messageId, raw, buffer),
       },
@@ -562,6 +585,7 @@ export class WhatsAppService implements WhatsAppApi {
         displayName: (jid) => this.identity.displayName(jid),
         webhook: () => this.webhook,
         outbox: () => this.outbox,
+        settled: () => void this.sends.collectPinned(),
       },
       account
     );
@@ -636,8 +660,11 @@ export class WhatsAppService implements WhatsAppApi {
       this.setStatus("connecting");
       const generation = ++this.generation;
       this.socketOpenedAt = Date.now();
+      // A group may have changed while no socket was there to hear it: each one's next send reads it again.
+      this.groups.rereadBeforeSend();
       const sock = socketFactory.open({
-        auth: state,
+        // Sessions, sender keys, identity keys, pre-keys and lid mappings from memory, written through to the files.
+        auth: cachedAuthState(state, silentLogger),
         logger: silentLogger,
         browser: WA_BROWSER,
         syncFullHistory: this.config.syncFullHistory,
@@ -645,6 +672,8 @@ export class WhatsAppService implements WhatsAppApi {
         generateHighQualityLinkPreview: false,
         // Retries and poll decryption ask for a message the account already has.
         getMessage: async (key) => this.views.storedProto(key),
+        // A send to a group addresses its members from the group cache while it is fresh, not a metadata query per send.
+        cachedGroupMetadata: (jid) => this.groups.forSend(jid),
       });
       this.sockClient = sock;
       this.wireEvents(sock, generation);
@@ -998,8 +1027,8 @@ export class WhatsAppService implements WhatsAppApi {
     return this.reads.listChats(filter, limit, opts);
   }
 
-  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[]): Promise<ChatRead> {
-    return this.reads.readMessages(chatId, limit, before, types);
+  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[], window?: ReadWindow): Promise<ChatRead> {
+    return this.reads.readMessages(chatId, limit, before, types, window);
   }
 
   getRecentMessages(
@@ -1086,6 +1115,10 @@ export class WhatsAppService implements WhatsAppApi {
     return this.reads.refreshSearch(...args);
   }
 
+  chatNames(chatIds: readonly string[]): Record<string, string> {
+    return Object.fromEntries(chatIds.map((id) => [id, this.identity.displayName(id)]));
+  }
+
   /** The recent exchange and the user's style in a chat, for a contact find_contact resolved. */
   syncContacts(): Promise<ContactSyncResult> {
     return this.contacts.syncContacts();
@@ -1136,12 +1169,32 @@ export class WhatsAppService implements WhatsAppApi {
     return this.waits.waitForMessages(opts);
   }
 
-  previews(messageIds: string[], max: number): Promise<Preview[]> {
-    return this.media.previews(messageIds, max);
+  previews(messageIds: string[], max: number, signal?: AbortSignal): Promise<Preview[]> {
+    return this.media.previews(messageIds, max, signal);
   }
 
-  downloadMedia(messageId: string, saveTo?: string): Promise<MediaResult> {
-    return this.media.downloadMedia(messageId, saveTo);
+  downloadMedia(messageId: string, saveTo?: string, opts: { signal?: AbortSignal } = {}): Promise<MediaResult> {
+    return this.media.downloadMedia(messageId, saveTo, opts.signal);
+  }
+
+  openMedia(messageId: string, opts: MediaOpenOptions): Promise<OpenedMedia> {
+    return this.media.openMedia(messageId, opts);
+  }
+
+  mediaOriginal(messageId: string, opts: { signal?: AbortSignal } = {}): Promise<{ buffer: Buffer; mime: string; filename: string | null }> {
+    return this.media.mediaOriginal(messageId, opts.signal);
+  }
+
+  mediaOriginalInfo(messageId: string): { mime: string; filename: string | null } | null {
+    return this.media.originalInfo(messageId);
+  }
+
+  mediaLinkRef(messageId: string): { row: number; tag: string } | null {
+    return this.media.linkRef(messageId);
+  }
+
+  mediaLinkTarget(row: number, tag: string): string | null {
+    return this.media.linkTarget(row, tag);
   }
 
   transcribeAudio(messageId: string, language?: string, opts: TranscribeOptions = {}): Promise<TranscribeResult> {
@@ -1591,6 +1644,13 @@ export class WhatsAppService implements WhatsAppApi {
     });
 
     sock.ev.on("chats.update", (updates) => {
+      // A group's disappearing-messages setting changes as a chat update, not a group one; sends must stamp the new one.
+      for (const update of updates) {
+        if (update.id && ("ephemeralExpiration" in update || "ephemeralSettingTimestamp" in update)) {
+          const jid = this.identity.canonical(update.id);
+          if (isGroupId(jid)) this.groups.rereadBeforeSend(jid);
+        }
+      }
       this.handling(
         "chats",
         () =>
@@ -1671,10 +1731,7 @@ export class WhatsAppService implements WhatsAppApi {
       }
       const readSelf = updates.flatMap(({ key, update }) => (this.ingest.isReadSelfUpdate(key, update) ? [key] : []));
       this.ingest.noteReadSelf(readSelf.length);
-      this.ingest.markLater("messages update", () => {
-        for (const { key, update } of updates) this.ingest.applyUpdate(key, update);
-        if (readSelf.length > 0) this.ingest.applyReadSelf(readSelf);
-      });
+      this.ingest.markLater("messages update", () => this.ingest.applyUpdates(updates, readSelf));
     });
 
     // In a group, each member's receipt arrives on its own; the status is theirs combined.
@@ -1994,37 +2051,48 @@ export class WhatsAppService implements WhatsAppApi {
    * The bytes behind a message's media — saving them and transcribing them
    * share this. Media arrives whole in memory, so the size is checked twice:
    * the declared length before the download starts, and the stream itself
-   * while it lands — a sender can understate the first, not the second.
+   * while it lands — a sender can understate the first, not the second. Every
+   * download runs inside the process's budget, with an idle and an overall
+   * clock (src/service/media-download.ts).
+   *
+   * With `reupload` (a person asked for this media: get_media, a transcript
+   * on demand, a download link), media whose CDN copy has expired (404/410)
+   * is asked of the phone again, once, and the refreshed url is stored so the
+   * next call goes straight to it. Background work (keeping media on arrival,
+   * previews) never wakes the phone. `waitMs` shortens the wait for a slot in
+   * the download budget, for a caller with less time than that left.
    */
-  private async mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage, maxBytes = MEDIA_DOWNLOAD_MAX_BYTES): Promise<Buffer> {
+  private async mediaBuffer(
+    sock: WASocket,
+    messageId: string,
+    raw: WAMessage,
+    maxBytes = MEDIA_DOWNLOAD_MAX_BYTES,
+    opts: { reupload?: boolean; signal?: AbortSignal; waitMs?: number } = {}
+  ): Promise<Buffer> {
     const cap = Math.min(maxBytes, MEDIA_DOWNLOAD_MAX_BYTES);
     const declared = mediaInfo(raw)?.size;
-    if (declared !== undefined && declared > cap) {
-      throw new WazapError(
-        "FILE_TOO_LARGE",
-        `The media of ${messageId} is ${Math.ceil(declared / 1_000_000)} MB; downloads are capped at ${cap / 1_000_000} MB.`
+    const { signal, waitMs } = opts;
+    const attempt = (message: WAMessage): Promise<Buffer> =>
+      downloadToMemory(
+        messageId,
+        {
+          open: () => this.openMediaStream(message),
+          stillThere: () => {
+            this.views.messageOrThrow(messageId);
+          },
+        },
+        // A caller that cancels stops the download at its next chunk, or its wait for a slot, instead of holding either.
+        // A read's previews wait for one only as long as their time budget has left (`waitMs`).
+        { cap, ...(declared === undefined ? {} : { declared }), ...(signal === undefined ? {} : { signal }), ...(waitMs === undefined ? {} : { waitMs }) }
       );
-    }
     try {
-      const stream = await downloadMediaMessage(raw, "stream", {}, {
-        logger: silentLogger,
-        reuploadRequest: sock.updateMediaMessage,
-      });
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      for await (const chunk of stream) {
-        this.views.messageOrThrow(messageId);
-        bytes += (chunk as Buffer).length;
-        if (bytes > cap) {
-          stream.destroy();
-          throw new WazapError(
-            "FILE_TOO_LARGE",
-            `The media of ${messageId} exceeds the ${cap / 1_000_000} MB download cap.`
-          );
-        }
-        chunks.push(chunk as Buffer);
+      try {
+        return await attempt(raw);
+      } catch (err) {
+        if (opts.reupload !== true || !cdnExpired(err)) throw err;
+        throwIfCancelled(signal);
+        return await attempt(await this.reuploadMedia(sock, messageId, raw, signal));
       }
-      return Buffer.concat(chunks);
     } catch (err) {
       if (err instanceof WazapError) throw err;
       const failure = new WazapError(
@@ -2036,6 +2104,63 @@ export class WhatsAppService implements WhatsAppApi {
       Object.defineProperty(failure, "cause", { value: err, configurable: true, writable: true });
       throw failure;
     }
+  }
+
+  /**
+   * The decrypted media as a stream, from WhatsApp's CDN and nowhere else
+   * (cdnOnlyMessage: the sender writes the url). A test replaces it.
+   * No reupload context goes to Baileys: its own branch reads `error.status`
+   * where the CDN's error carries `output.statusCode`, so it never fires, and
+   * would wait for the phone without a timeout if it did (mediaBuffer asks).
+   */
+  private openMediaStream(message: WAMessage): Promise<Readable> {
+    return downloadMediaMessage(cdnOnlyMessage(downloadableMessage(message)), "stream", {}) as Promise<Readable>;
+  }
+
+  /**
+   * Ask the phone to upload expired media again, within REUPLOAD_TIMEOUT_MS,
+   * and store the url and directPath it got so later calls use them. The
+   * message comes back refreshed. A phone that is offline, or no longer has
+   * the file, is MEDIA_UNAVAILABLE with what to do about it. A caller that
+   * cancels stops waiting for the phone at once; its answer, if it comes, is
+   * not stored.
+   */
+  private async reuploadMedia(sock: WASocket, messageId: string, raw: WAMessage, signal?: AbortSignal): Promise<WAMessage> {
+    throwIfCancelled(signal);
+    this.reuploads.take();
+    // Baileys refreshes the media node in place; for a Lottie sticker or a round video that node sits inside `raw` too.
+    const target = reuploadableMessage(raw);
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), this.reuploadTimeoutMs);
+    });
+    try {
+      const answered = await orCancelled(Promise.race([sock.updateMediaMessage(target), late]), signal);
+      if (answered === "late") {
+        throw new WazapError(
+          "MEDIA_UNAVAILABLE",
+          `WhatsApp's copy of the media of ${messageId} has expired, and the phone did not answer the request to upload it again within ${this.reuploadTimeoutMs / 1000} s.`,
+          "The phone must be online with WhatsApp; retry once it is"
+        );
+      }
+    } catch (err) {
+      if (err instanceof WazapError) throw err;
+      throw new WazapError(
+        "MEDIA_UNAVAILABLE",
+        `WhatsApp's copy of the media of ${messageId} has expired, and the phone could not upload it again (${describe(err)}).`,
+        "Ask the sender to resend it"
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    this.views.messageOrThrow(messageId);
+    try {
+      this.storage.readyDb()?.messages.refreshRaw(messageId, proto.WebMessageInfo.encode(raw).finish());
+    } catch (err) {
+      // The download goes on with the fresh url; only the next call pays the request again.
+      logError("refreshed media", err);
+    }
+    return raw;
   }
 
   private async fetchOlder(sock: WASocket, anchor: StoredMessage, limit: number): Promise<void> {

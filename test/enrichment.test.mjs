@@ -158,7 +158,8 @@ test("get_group_info marks participants whose names are only digits or an unreso
 
   const result = await server.tools.get("get_group_info").handler({ group_id: "120363000000000099@g.us" });
   const text = result.content[0].text;
-  assert.match(text, /- Ionut \(\+40 700 000 061\) \(admin\)\n {2}contact_id: 40700000061@s\.whatsapp\.net/);
-  assert.match(text, /- \+40 700 000 099 \[unnamed\]\n {2}contact_id: 40700000099@s\.whatsapp\.net/);
-  assert.match(text, /- unknown \(lid …3123\) \[unnamed\]\n {2}contact_id: 123123123123123@lid/);
+  // A member with a number is named by it, which is also how a later call reaches them; one with only a LID by the LID.
+  assert.match(text, /- Ionut \(\+40 700 000 061\) \(admin\)\n/);
+  assert.match(text, /- \+40 700 000 099 \[unnamed\]\n/);
+  assert.match(text, /- unknown \(lid …3123\) \(123123123123123@lid\) \[unnamed\]/);
 });

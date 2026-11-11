@@ -923,6 +923,38 @@ CREATE INDEX reminders_state ON reminders(state, updated_at);
 `;
 // ---- end v6 ----------------------------------------------------------------
 
+// ---- v7: list_chats pages off an index ------------------------------------
+/**
+ * - chats.described_ts: the conversationTimestamp WhatsApp's description of
+ *   the chat (proto) states, in seconds; null when it states none or there is
+ *   no description. Written with proto, from the protobuf the service decodes
+ *   (AccountDbOptions.chatActivity); a file that held descriptions before v7
+ *   has them read once at the next open that can decode them (meta
+ *   chat_activity_backfill says one is owed).
+ * - chats.activity: what list_chats orders by — that timestamp, else the
+ *   newest visible message's second, else 0 — computed, never written.
+ * - chats_activity: the list's order, newest first read backwards, so a page
+ *   is one index walk instead of every chat decoded and sorted.
+ */
+const V7 = `
+ALTER TABLE chats ADD COLUMN described_ts INTEGER;
+ALTER TABLE chats ADD COLUMN activity INTEGER GENERATED ALWAYS AS (coalesce(described_ts, last_ts / 1000, 0)) VIRTUAL;
+CREATE INDEX chats_activity ON chats(activity, coalesce(last_message_id, 0), id) WHERE merged_into IS NULL;
+INSERT INTO meta(key, value) SELECT 'chat_activity_backfill', 'pending' WHERE EXISTS (SELECT 1 FROM chats WHERE proto IS NOT NULL);
+`;
+// ---- end v7 ----------------------------------------------------------------
+
+// ---- v8: counting embeddings off an index ---------------------------------
+/**
+ * - embeddings_model: the model of every stored vector, so the count recall
+ *   status shows (and the whole-account count) reads a small index instead of
+ *   walking every vector's row: 768 bytes each, 75 MB at 100k messages.
+ */
+const V8 = `
+CREATE INDEX embeddings_model ON embeddings(model);
+`;
+// ---- end v8 ----------------------------------------------------------------
+
 /** Every migration, in order. The schema version a build knows is the last one's. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1 },
@@ -931,6 +963,8 @@ export const MIGRATIONS: readonly Migration[] = [
   { version: 4, sql: V4 },
   { version: 5, sql: V5 },
   { version: 6, sql: V6 },
+  { version: 7, sql: V7 },
+  { version: 8, sql: V8 },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

@@ -9,11 +9,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
+import { gzipSync } from "node:zlib";
 import { join } from "node:path";
 import { extractWWWAuthenticateParams } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { startHttpEndpoint } from "../dist/server.js";
+import { OAUTH_BODY_MAX_BYTES, startHttpEndpoint } from "../dist/server.js";
 import { WazapOAuthProvider, oauthProblem } from "../dist/oauth.js";
 import { draftStub, offlineConfig, stubAccountSource, waitFor } from "./helpers.mjs";
 
@@ -57,13 +58,14 @@ async function boot(
     now,
     trustedProxies,
     wa = stubWa,
+    httpPostBudget,
   } = {}
 ) {
   const dataDir = mkdtempSync(join(tmpdir(), "wazap-oauth-"));
   const port = await freePort();
   const publicUrl = new URL(`http://127.0.0.1:${port}`);
   const oauth = new WazapOAuthProvider({ publicUrl, password, stateFile: join(dataDir, "oauth.json"), now });
-  const config = offlineConfig("wazap-oauth-cfg-", { readOnly, transport: "http", dataDir, trustedProxies });
+  const config = offlineConfig("wazap-oauth-cfg-", { readOnly, transport: "http", dataDir, trustedProxies, ...(httpPostBudget === undefined ? {} : { httpPostBudget }) });
   const stop = new AbortController();
   await startHttpEndpoint(stubAccountSource(wa), config, {
     host: "127.0.0.1",
@@ -202,7 +204,7 @@ async function listTools(ctx, token) {
   return { status: res.status, names };
 }
 
-test("OAuth sessions reject other grants and require reinitialization after token rotation", async (t) => {
+test("OAuth sessions reject other grants and keep serving their own grant across token rotation", async (t) => {
   const ctx = await boot(t);
   const owner = await signIn(ctx, { access: "write", clientName: "Owner" });
   const other = await signIn(ctx, { access: "write", clientName: "Other" });
@@ -251,7 +253,12 @@ test("OAuth sessions reject other grants and require reinitialization after toke
     }),
   });
   assert.equal(res.status, 200);
-  assert.equal((await call(rotated.access_token, session.sid)).status, 404);
+  assert.notEqual(rotated.access_token, owner.tokens.access_token);
+  // The session belongs to the grant, not to the access token of the day.
+  assert.equal((await call(rotated.access_token, session.sid)).status, 200);
+  for (const token of [other.tokens.access_token, reader.tokens.access_token, "static-read"]) {
+    assert.equal((await call(token, session.sid)).status, 404, "rotation opened the session to nobody else");
+  }
   const fresh = await call(rotated.access_token, undefined, "initialize");
   assert.equal(fresh.status, 200);
   assert.equal((await call(rotated.access_token, fresh.sid)).status, 200);
@@ -261,6 +268,58 @@ test("OAuth sessions reject other grants and require reinitialization after toke
     body: form({ token: owner.tokens.refresh_token, client_id: owner.client.client_id }),
   });
   assert.equal((await call(rotated.access_token, fresh.sid)).status, 401);
+  assert.equal((await call(rotated.access_token, session.sid)).status, 401, "revocation still shuts the grant's every session");
+});
+
+test("a refresh that narrows the scopes is a different owner: the write session stays out of its reach", async (t) => {
+  const ctx = await boot(t);
+  const owner = await signIn(ctx, { access: "write", clientName: "Narrowing" });
+  const post = (token, sid, body) =>
+    fetch(`${ctx.base}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${token}`,
+        ...(sid ? { "mcp-session-id": sid } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    }).then(async (res) => ({ status: res.status, sid: res.headers.get("mcp-session-id"), text: await res.text() }));
+  const session = await post(owner.tokens.access_token, undefined, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "narrow", version: "1" } },
+  });
+  assert.equal(session.status, 200);
+  const { body: narrowed } = await ctx.fetchJson("/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form({ grant_type: "refresh_token", refresh_token: owner.tokens.refresh_token, client_id: owner.client.client_id, scope: "read" }),
+  });
+  assert.equal(narrowed.scope, "read");
+  assert.equal((await post(narrowed.access_token, session.sid, { jsonrpc: "2.0", id: 2, method: "tools/list" })).status, 404);
+});
+
+test("the POST budget follows the grant, so a rotated access token does not reset it", async (t) => {
+  const ctx = await boot(t, { httpPostBudget: 4 });
+  const owner = await signIn(ctx, { access: "read", clientName: "Budgeted" });
+  const post = (token) =>
+    fetch(`${ctx.base}/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
+      body: "{}",
+      signal: AbortSignal.timeout(5000),
+    }).then(async (res) => (await res.text(), res.status));
+  for (let i = 0; i < 4; i++) assert.equal(await post(owner.tokens.access_token), 400);
+  const { body: rotated } = await ctx.fetchJson("/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: form({ grant_type: "refresh_token", refresh_token: owner.tokens.refresh_token, client_id: owner.client.client_id }),
+  });
+  assert.ok(rotated.access_token);
+  assert.equal(await post(rotated.access_token), 429);
 });
 
 test("an unauthenticated call is told where to sign in", async (t) => {
@@ -387,7 +446,10 @@ test("OAuth write grants never authorize host file access, and consent labels ca
       name: "send_message",
       arguments: { chat_id: "40722123456@s.whatsapp.net", text: "", file_path: "/synthetic/private.png" },
     });
+    // A program signed in over OAuth keeps the structured contract (answer-format): only an assistant's name gets text.
     assert.equal(result.structuredContent.error, "MEDIA_ACCESS_DENIED");
+    assert.ok((await client.listTools()).tools.some((tool) => tool.outputSchema !== undefined), "its tool list keeps the output schemas");
+    assert.ok(lines.some((line) => /MCP initialize: client="oauth-files 1" .*credential=oauth .*answers=full$/.test(line)), lines.join("\n"));
     assert.ok(lines.some((line) => line.includes("oauth: registered client")));
     assert.ok(
       lines.every((line) => !["\n", "\r", "\u001b"].some((control) => line.includes(control))),
@@ -1062,7 +1124,8 @@ test("a draft answers to its OAuth client across sessions and token rotations, n
   const owner = await signIn(ctx, { access: "write", clientName: "Owner" });
   const other = await signIn(ctx, { access: "write", clientName: "Other" });
   const mcp = async (token) => {
-    const client = new Client({ name: "oauth-draft", version: "1" });
+    // A hosted assistant names itself (claude.ai's connector): its session answers in text alone.
+    const client = new Client({ name: "claude-ai", version: "1" });
     t.after(() => client.close());
     await client.connect(
       new StreamableHTTPClientTransport(new URL(`${ctx.base}/mcp`), {
@@ -1071,10 +1134,13 @@ test("a draft answers to its OAuth client across sessions and token rotations, n
     );
     return client;
   };
+  // The assistant's answers are text alone (answer-format): the ids are read off the text, as its model would.
+  const draftId = (result) => /^Draft (d_[0-9a-f]+)/.exec(result.content[0].text)?.[1];
   const first = await mcp(owner.tokens.access_token);
   const draft = await first.callTool({ name: "send_message", arguments: { chat_id: CHAT, text: "hello" } });
-  assert.equal(draft.structuredContent.status, "draft");
-  const args = { draft_id: draft.structuredContent.draft_id };
+  assert.equal(draft.structuredContent, undefined);
+  const args = { draft_id: draftId(draft) };
+  assert.ok(args.draft_id, draft.content[0].text);
 
   // The same grant's rotated access token is the same identity.
   const { res, body: rotated } = await ctx.fetchJson("/token", {
@@ -1090,15 +1156,39 @@ test("a draft answers to its OAuth client across sessions and token rotations, n
   assert.notEqual(rotated.access_token, owner.tokens.access_token);
   await first.close();
   const fresh = await mcp(rotated.access_token);
-  assert.equal((await fresh.callTool({ name: "confirm_send", arguments: args })).structuredContent.message_id, "sent");
-  assert.equal((await fresh.callTool({ name: "confirm_send", arguments: args })).structuredContent.already_sent, true);
+  assert.match((await fresh.callTool({ name: "confirm_send", arguments: args })).content[0].text, /^Sent to .*\(message_id: sent\)/);
+  assert.match((await fresh.callTool({ name: "confirm_send", arguments: args })).content[0].text, /^Already sent to .*nothing was sent again/);
 
   // Another client's grant is a different identity.
   const next = await fresh.callTool({ name: "send_message", arguments: { chat_id: CHAT, text: "again" } });
   const otherSession = await mcp(other.tokens.access_token);
-  assert.equal(
-    (await otherSession.callTool({ name: "confirm_send", arguments: { draft_id: next.structuredContent.draft_id } }))
-      .structuredContent.error,
-    "DRAFT_NOT_FOUND"
-  );
+  const refused = await otherSession.callTool({ name: "confirm_send", arguments: { draft_id: draftId(next) } });
+  assert.equal(JSON.parse(refused.content[0].text).error, "DRAFT_NOT_FOUND");
+});
+
+test("the OAuth routes refuse compressed and oversized bodies before parsing them, and before any sign-in", async (t) => {
+  const ctx = await boot(t);
+  const { request: started } = await begin(ctx);
+  const packed = gzipSync(form({ grant_type: "authorization_code", code: "x" }));
+  for (const [path, type, body] of [
+    ["/token", "application/x-www-form-urlencoded", packed],
+    ["/revoke", "application/x-www-form-urlencoded", packed],
+    ["/register", "application/json", gzipSync(JSON.stringify({ redirect_uris: ["https://agent.example/cb"] }))],
+    ["/oauth/approve", "application/x-www-form-urlencoded", gzipSync(form({ request: started, password: PASSWORD, access: "read" }))],
+    ["/authorize", "application/x-www-form-urlencoded", packed],
+  ]) {
+    const res = await fetch(`${ctx.base}${path}`, { method: "POST", headers: { "content-type": type, "content-encoding": "gzip" }, body, redirect: "manual" });
+    assert.equal(res.status, 415, path);
+    await res.text();
+  }
+  const huge = await fetch(`${ctx.base}/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ redirect_uris: ["https://agent.example/cb"], client_name: "x".repeat(OAUTH_BODY_MAX_BYTES) }),
+  });
+  assert.equal(huge.status, 413);
+  await huge.text();
+  // An honest flow is untouched: the same consent request still signs in.
+  const { res } = await approve(ctx, started, { password: PASSWORD, access: "read" });
+  assert.equal(res.status, 302);
 });

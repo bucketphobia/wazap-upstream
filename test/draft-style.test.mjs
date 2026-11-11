@@ -243,8 +243,8 @@ test("the preview says what does not match and leaves the choice to the user's w
     kind: "text",
     style_check,
   };
-  assert.match(renderDraft(view), /Style check[\s\S]*address_mismatch[\s\S]*call confirm_send/);
-  assert.doesNotMatch(renderDraft({ ...view, style_check: { ...style_check, warnings: [] } }), /Style check/);
+  assert.match(renderDraft(view, [], "Then confirm_send."), /Style check[\s\S]*address_mismatch[\s\S]*Then confirm_send\./);
+  assert.doesNotMatch(renderDraft({ ...view, style_check: { ...style_check, warnings: [] } }, [], "Then confirm_send."), /Style check/);
   assert.deepEqual(styleCheckLines(undefined), []);
 });
 

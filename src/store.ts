@@ -517,3 +517,12 @@ export function decodeChat(b64: string): BaileysChat | null {
     return null;
   }
 }
+
+/** decodeChat over the stored bytes themselves, without the base64 round trip. */
+export function decodeChatBytes(bytes: Uint8Array): BaileysChat | null {
+  try {
+    return proto.Conversation.decode(bytes) as unknown as BaileysChat;
+  } catch {
+    return null;
+  }
+}

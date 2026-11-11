@@ -1,6 +1,6 @@
 {
   "name": "wazap-mcp",
-  "version": "1.6.0",
+  "version": "1.7.2",
   "mcpName": "io.github.razvangirgiz/wazap",
   "description": "WhatsApp for your AI agent. MCP server over Baileys: pairing-code login, several accounts, stdio or HTTP.",
   "license": "MIT",
@@ -66,7 +66,14 @@
     "jpeg-js": "^0.4.4",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
-    "zod": "^3.24.1"
+    "sharp": "^0.35.5",
+    "unpdf": "^1.9.1",
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "jimp": {
+      "zod": "$zod"
+    }
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

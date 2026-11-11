@@ -5,6 +5,7 @@
  * guards through GroupsHost.
  */
 
+import { performance } from "node:perf_hooks";
 import {
   normalizeMessageContent,
   type GroupMetadata,
@@ -15,6 +16,7 @@ import {
 } from "baileys";
 import { WazapError } from "../errors.js";
 import { isGroupId } from "../ids.js";
+import { logError } from "../logger.js";
 import { isoWithOffset, protoNumber } from "../messages.js";
 import { describe, loadProfilePicture } from "../outgoing-media.js";
 import type {
@@ -41,16 +43,43 @@ export interface GroupsHost {
   learnGroup(meta: GroupMetadata): void;
 }
 
+/**
+ * How long a send addresses a group's members as they were last read whole
+ * from WhatsApp, as Baileys' own example caches them: a change no event
+ * reported (one made while the socket was down, a disappearing-messages
+ * setting, an addressing mode) reaches the sends within this.
+ */
+export const SEND_METADATA_MS = 5 * 60_000;
+
+/** When a group read was asked for, and its place among reads and re-read requests. */
+interface Asked {
+  at: number;
+  order: number;
+}
+
 export class AccountGroups {
   /** Group metadata by jid, as last read or updated. */
   readonly groupCache = new Map<string, GroupMetadata>();
   /** Groups whose metadata WhatsApp refused, so we stop asking on every read. */
   readonly unreadableGroups = new Set<string>();
+  /**
+   * When each cached group's last whole read from WhatsApp was asked for: the
+   * clock below, which a send trusts it for SEND_METADATA_MS by, and its place
+   * in the order of reads and re-read requests.
+   */
+  private readonly readWhole = new Map<string, Asked>();
+  /** A send trusts only a read asked for after these in that order: per group, and for every group (a reconnect). */
+  private readonly rereadAfter = new Map<string, number>();
+  private rereadAllAfter = 0;
+  private order = 0;
+  /** A send's read of a group in flight, shared by the sends to it that wait. */
+  private readonly sendReads = new Map<string, Promise<GroupMetadata | undefined>>();
 
   constructor(
     private readonly host: GroupsHost,
     private readonly identity: AccountIdentity,
-    private readonly views: MessageViews
+    private readonly views: MessageViews,
+    private readonly now: () => number = () => performance.now()
   ) {}
 
   getGroupInfo(groupId: string): Promise<GroupInfo> {
@@ -294,6 +323,7 @@ export class AccountGroups {
     const cached = this.groupCache.get(jid);
     if (cached && !fresh) return cached;
     const sock = this.host.ensureConnected();
+    const asked = this.ask();
     let meta: GroupMetadata;
     try {
       meta = await sock.groupMetadata(jid);
@@ -303,12 +333,90 @@ export class AccountGroups {
       if (code === 404) throw new WazapError("GROUP_NOT_FOUND", `WhatsApp does not know the group ${jid}.`);
       throw new WazapError("GROUP_NOT_FOUND", `Could not read ${jid}: ${describe(err)}`);
     }
-    this.cacheGroup(jid, meta);
+    this.cacheGroup(jid, meta, asked);
     return meta;
   }
 
-  cacheGroup(jid: string, meta: GroupMetadata): void {
+  /**
+   * What Baileys addresses a group message with (its cachedGroupMetadata): the
+   * metadata this cache holds when it was read whole from WhatsApp less than
+   * SEND_METADATA_MS ago on this socket, so most sends to a group cost no
+   * metadata round trip. Anything else is read again first: a group not
+   * cached, one whose members changed (group-participants.update drops it),
+   * one whose disappearing-messages setting changed, and every group after a
+   * reconnect. A read WhatsApp fails rejects with WhatsApp's own error, which
+   * relayMessage does not catch: the send fails after that one query, as it
+   * did when Baileys asked itself, and send.ts tells a timeout or a dropped
+   * link from a refusal as before. Undefined when there is no socket to ask
+   * on, or the group is one reads already gave up on: Baileys then asks
+   * WhatsApp itself, as it did before, and reports what it says.
+   */
+  forSend(jid: string): Promise<GroupMetadata | undefined> {
+    const key = this.identity.canonical(jid);
+    if (!isGroupId(key)) return Promise.resolve(undefined);
+    const cached = this.groupCache.get(key);
+    const read = this.readWhole.get(key);
+    const after = Math.max(this.rereadAllAfter, this.rereadAfter.get(key) ?? 0);
+    if (cached !== undefined && read !== undefined && read.order > after && this.now() - read.at < SEND_METADATA_MS) {
+      return Promise.resolve(cached);
+    }
+    if (this.unreadableGroups.has(key)) return Promise.resolve(undefined);
+    const pending = this.sendReads.get(key);
+    if (pending !== undefined) return pending;
+    let sock: WASocket;
+    try {
+      sock = this.host.ensureConnected();
+    } catch {
+      return Promise.resolve(undefined);
+    }
+    const reading: Promise<GroupMetadata | undefined> = this.readForSend(sock, key).finally(() => {
+      if (this.sendReads.get(key) === reading) this.sendReads.delete(key);
+    });
+    this.sendReads.set(key, reading);
+    return reading;
+  }
+
+  private async readForSend(sock: WASocket, jid: string): Promise<GroupMetadata> {
+    const asked = this.ask();
+    const meta = await sock.groupMetadata(jid);
+    try {
+      this.cacheGroup(jid, meta, asked);
+    } catch (err) {
+      // The members are cached before their names are learned; a store that
+      // refuses the names does not fail the send they were read for.
+      logError("learn a group's members before a send", err);
+    }
+    return meta;
+  }
+
+  /**
+   * The next send to `jid` (to every group, without one) reads its metadata
+   * again first: a setting changed that no group event carries, or the socket
+   * is new and may have missed changes while it was down. A read already in
+   * flight was asked for before the change, so it does not count. Reads keep
+   * the cache.
+   */
+  rereadBeforeSend(jid?: string): void {
+    if (jid === undefined) {
+      this.rereadAllAfter = ++this.order;
+      this.sendReads.clear();
+      return;
+    }
+    this.rereadAfter.set(jid, ++this.order);
+    this.sendReads.delete(jid);
+  }
+
+  private ask(): Asked {
+    return { at: this.now(), order: ++this.order };
+  }
+
+  /**
+   * Metadata read whole from WhatsApp: a group query (asked for as `asked`),
+   * a group just created, or one the account was just added to.
+   */
+  cacheGroup(jid: string, meta: GroupMetadata, asked = this.ask()): void {
     this.groupCache.set(jid, meta);
+    this.readWhole.set(jid, asked);
     this.host.learnGroup(meta);
   }
 

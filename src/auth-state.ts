@@ -4,11 +4,16 @@ import { join } from "node:path";
 import {
   BufferJSON,
   initAuthCreds,
+  makeCacheableSignalKeyStore,
   proto,
   type AuthenticationCreds,
   type AuthenticationState,
+  type CacheStore,
+  type SignalDataSet,
   type SignalDataTypeMap,
+  type SignalKeyStore,
 } from "baileys";
+import type { ILogger } from "baileys/lib/Utils/logger.js";
 import { AccountDb, StorageError } from "./db/index.js";
 import { RESET_FIX, WazapError } from "./errors.js";
 import { logError } from "./logger.js";
@@ -122,6 +127,132 @@ export async function useAtomicAuthState(
       },
     },
     saveCreds: () => writeData(creds, CREDS_FILE),
+  };
+}
+
+/** Signal keys the socket's cache holds at most: sessions, sender keys, lid mappings, the newest used kept. */
+export const SIGNAL_KEY_CACHE_MAX = 2_000;
+/** How long a cached Signal key is served before the file is read again (Baileys' own default). */
+export const SIGNAL_KEY_CACHE_TTL_MS = 5 * 60_000;
+
+/**
+ * A bounded cache for Baileys' Signal key store: at most `max` keys, each for
+ * `ttlMs`, the least recently used dropped first. Dropping is always safe — the
+ * files stay the store — where node-cache's own bound throws on a full cache,
+ * which would fail the write it was caching.
+ */
+export class BoundedKeyCache implements CacheStore {
+  private readonly entries = new Map<string, { value: unknown; until: number }>();
+
+  constructor(
+    private readonly max = SIGNAL_KEY_CACHE_MAX,
+    private readonly ttlMs = SIGNAL_KEY_CACHE_TTL_MS,
+    private readonly now: () => number = () => performance.now()
+  ) {}
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  get<T>(key: string): T | undefined {
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    this.entries.delete(key);
+    if (entry.until <= this.now()) return undefined;
+    this.entries.set(key, entry);
+    return entry.value as T;
+  }
+
+  set<T>(key: string, value: T): void {
+    this.entries.delete(key);
+    this.entries.set(key, { value, until: this.now() + this.ttlMs });
+    for (const oldest of this.entries.keys()) {
+      if (this.entries.size <= this.max) break;
+      this.entries.delete(oldest);
+    }
+  }
+
+  del(key: string): void {
+    this.entries.delete(key);
+  }
+
+  flushAll(): void {
+    this.entries.clear();
+  }
+}
+
+/**
+ * The key types the cache serves: the ones a send or a receive reads once per
+ * device, and that Baileys (7.0.0-rc14) never edits in place once read. A
+ * session or a sender key is deserialized into new objects; an identity key, a
+ * pre-key and a lid mapping are compared or copied as read.
+ *
+ * Every other type is read from its file each time, as it was before the
+ * cache, because the cache would hand every reader the one object it holds.
+ * relayMessage marks devices as given the sender key in the sender-key-memory
+ * map it read, before its transaction commits; a send that then fails would
+ * leave the marks in a cached map, and the next send would skip those devices.
+ * A user's device list is pushed onto likewise. A type a later Baileys adds is
+ * not cached either, until someone checks how it is used.
+ */
+export const CACHED_KEY_TYPES: ReadonlySet<keyof SignalDataTypeMap> = new Set<keyof SignalDataTypeMap>([
+  "session",
+  "sender-key",
+  "identity-key",
+  "pre-key",
+  "lid-mapping",
+]);
+
+/**
+ * The auth state the service's socket runs on: the same credentials, and the
+ * key store behind Baileys' cache for CACHED_KEY_TYPES, so a send to a group of
+ * 250 devices reads its sessions from memory instead of 250 JSON files (59 ms
+ * of parsing on the main thread, measured). Every write still goes to the
+ * files, in the same call, under the cache's own lock (Baileys'
+ * makeCacheableSignalKeyStore); one process owns the folder (server.lock), so
+ * nothing else changes them meanwhile.
+ */
+export function cachedAuthState(state: AuthenticationState, logger?: ILogger, cache: CacheStore = new BoundedKeyCache()): AuthenticationState {
+  const files: SignalKeyStore = {
+    get: (type, ids) => state.keys.get(type, ids),
+    // Baileys puts a write in the cache before the files take it. One the files
+    // refused empties the cache before the error goes back (the cache's lock is
+    // still held), so the next read is the files' again, never a key no file holds.
+    set: async (data) => {
+      try {
+        await state.keys.set(data);
+      } catch (err) {
+        await cache.flushAll();
+        throw err;
+      }
+    },
+  };
+  const cached = makeCacheableSignalKeyStore(files, logger, cache);
+  return {
+    creds: state.creds,
+    keys: {
+      get: (type, ids) => (CACHED_KEY_TYPES.has(type) ? cached.get(type, ids) : state.keys.get(type, ids)),
+      // A transaction commits every type it wrote in one call. Each part goes
+      // its own way, and the call returns once both have settled, so no write
+      // is still landing when Baileys retries a commit or reports it failed.
+      set: async (data) => {
+        const inCache: SignalDataSet = {};
+        const direct: SignalDataSet = {};
+        for (const type of Object.keys(data) as (keyof SignalDataTypeMap)[]) {
+          const target: Record<string, unknown> = CACHED_KEY_TYPES.has(type) ? inCache : direct;
+          target[type] = data[type];
+        }
+        const writes: Promise<void>[] = [];
+        for (const [part, store] of [
+          [inCache, cached],
+          [direct, state.keys],
+        ] as const) {
+          if (Object.keys(part).length > 0) writes.push((async () => store.set(part))());
+        }
+        const refused = (await Promise.allSettled(writes)).find((result) => result.status === "rejected");
+        if (refused !== undefined) throw refused.reason;
+      },
+    },
   };
 }
 

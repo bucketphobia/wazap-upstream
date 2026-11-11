@@ -1,0 +1,62 @@
+{
+  "id": "P33",
+  "title": "Reads yesterday's messages from one person as a window",
+  "severity": "minor",
+  "tags": [
+    "remote"
+  ],
+  "turns": [
+    {
+      "user": "Ce mi-a scris Dan Radu ieri?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "read_the_window",
+      "must_call": {
+        "tool": "read_messages",
+        "args": {
+          "since": {
+            "exists": true
+          }
+        },
+        "result": {
+          "chat_id": {
+            "jid": "$contacts.dan_radu.jid"
+          }
+        },
+        "ok": true
+      }
+    },
+    {
+      "name": "at_most_two_reads",
+      "max_calls": {
+        "capability": "whatsapp_read",
+        "max": 2
+      }
+    },
+    {
+      "name": "reports_yesterday",
+      "answer_regex": {
+        "pattern": "prezentare|vineri",
+        "fold": true
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "only_yesterday",
+      "rubric": "It reports what Dan Radu wrote yesterday (the client wants the final presentation by Friday) and does not present the day-before-yesterday or today's messages as yesterday's."
+    }
+  ]
+}

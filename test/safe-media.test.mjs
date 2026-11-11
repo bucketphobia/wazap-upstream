@@ -4,6 +4,7 @@ import { Readable } from "node:stream";
 
 import { loadMedia, mediaFilename } from "../dist/outgoing-media.js";
 import { publicAddress, publicMedia } from "../dist/safe-media.js";
+import { toolError } from "../dist/tool-runtime.js";
 
 const PRIVATE_V4 = [
   "0.0.0.0",
@@ -228,6 +229,63 @@ test("media errors never echo signed URL paths/queries or resolver details", asy
       return true;
     }
   );
+});
+
+test("a URL refused or not fetched says what to do in any session: never file_path, never that host files are off", async () => {
+  const fixes = [];
+  const collect = (promise, code) =>
+    assert.rejects(promise, (err) => {
+      assert.equal(err.code, code);
+      fixes.push([`${code}: ${err.message}`, toolError(err).structuredContent.fix]);
+      return true;
+    });
+  // The guard: a local dev server, credentials in the URL, a non-public answer, an HTTPS downgrade.
+  await collect(publicMedia("http://127.0.0.1:9/chart.png"), "MEDIA_ACCESS_DENIED");
+  await collect(publicMedia("https://user:secret@example.com/a.jpg"), "MEDIA_ACCESS_DENIED");
+  await collect(publicMedia("https://example.com/a.jpg", { ...fakeHttp({ remote: "10.0.0.5" }), resolve: publicDns }), "MEDIA_ACCESS_DENIED");
+  await collect(
+    publicMedia("https://example.com/a.jpg", {
+      ...fakeHttp({ status: 302, headers: { location: "http://example.com/a.jpg" } }),
+      resolve: publicDns,
+      allowHttpsDowngrade: false,
+    }),
+    "MEDIA_ACCESS_DENIED"
+  );
+  // The fetch: a 404, a name that does not resolve, a redirect loop.
+  await collect(publicMedia("https://example.com/missing.jpg", { ...fakeHttp({ status: 404 }), resolve: publicDns }), "URL_FETCH_FAILED");
+  await collect(
+    publicMedia("https://nonexistent-host.invalid/poza.jpg", {
+      resolve: async () => {
+        throw Object.assign(Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+      },
+    }),
+    "URL_FETCH_FAILED"
+  );
+  await collect(
+    publicMedia("https://example.com/loop", {
+      ...fakeHttp({ status: 302, headers: { location: "/loop" } }),
+      resolve: publicDns,
+      maxRedirects: 1,
+    }),
+    "URL_FETCH_FAILED"
+  );
+  assert.equal(fixes.length, 7);
+  for (const [what, fix] of fixes) {
+    // A remote session is never shown file_path, and a local one may use host files.
+    assert.doesNotMatch(fix, /file_path|host files|route around/, what);
+    assert.match(fix, /another way the tool lists \(send_message's data_base64, up to 5 MB\)/, what);
+  }
+});
+
+test("a media source given no way or two ways says to give it one of those the tool lists", async () => {
+  for (const source of [{}, { url: "https://example.com/a.jpg", file_path: "/tmp/a.jpg" }]) {
+    await assert.rejects(loadMedia(source), (err) => {
+      assert.equal(err.code, "FILE_NOT_FOUND");
+      // Not FILE_NOT_FOUND's "check the path": there may be no path, and a remote session has none to give.
+      assert.equal(toolError(err).structuredContent.fix, "Give the file exactly one way, of those the tool lists");
+      return true;
+    });
+  }
 });
 
 test("a content-length over the cap fails before the body is read", async () => {

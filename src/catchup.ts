@@ -6,7 +6,10 @@
  * renders one line per entry, as text and as structured content built from
  * the same entries.
  *
- * The budget, in the order it is spent (tokens are rendered characters / 4):
+ * The budget, in the order it is spent, on what the session receives: the
+ * text in a text session, the structured JSON (the longer copy, which a client
+ * like Claude Code hands its model in place of the text) in a full one; a
+ * token is CHARS_PER_TOKEN of its characters:
  * 1. the skeleton — every entry's line without a quote, in section order —
  *    until the page is full; what does not fit goes to `more`, with a cursor;
  * 2. quotes, by priority: the ask of someone waiting (240 characters), a
@@ -49,9 +52,17 @@ import {
 import { asWazapError, WazapError } from "./errors.js";
 import { isoWithOffset } from "./messages.js";
 import { signalsOf, type Signal } from "./signals.js";
+import type { AnswerFormat } from "./client-name.js";
 import type { ToolResult } from "./tool-runtime.js";
 import type { PrivateRule, WhatsAppApi } from "./wa-types.js";
 
+/**
+ * Characters of an answer per Claude token, as measured on the fixture world:
+ * 1.8-2.1 for Romanian text full of ids and times, 2.4 for prose. 2.2 lets
+ * budget_tokens mean about that many real tokens, where the 4 it replaces
+ * delivered about twice as many.
+ */
+export const CHARS_PER_TOKEN = 2.2;
 export const DEFAULT_BUDGET_TOKENS = 2_500;
 export const MIN_BUDGET_TOKENS = 500;
 export const MAX_BUDGET_TOKENS = 8_000;
@@ -69,6 +80,11 @@ export const SNAPSHOT_TTL_MS = 15 * 60_000;
 export const MAX_SNAPSHOTS = 16;
 
 const HOUR = 3_600_000;
+
+/** Said when every entry is an ask from before an explicit window. */
+const QUIET_NOTE = "Nothing arrived in this window: every waiting entry was asked before it and is still open.";
+/** Said on a page that is not the last; the text's line goes on with the cursor itself. */
+const MORE_NOTE = "More entries are left: call catch_up with more.cursor for them.";
 
 // ---------------------------------------------------------------- input and output
 
@@ -97,6 +113,7 @@ export const CATCHUP_INPUT = {
     .optional()
     .describe("Only these sections; the mark then stays"),
   cursor: z.string().min(1).optional().describe("more.cursor"),
+  ids: z.boolean().optional().describe("Message ids, to act on entries"),
 };
 
 const windowShape = z.object({
@@ -111,8 +128,10 @@ const acct = z.string().optional().describe("The account the entry is from, when
 const at = z.string().describe("When, as a clock time (with the day when not today)");
 const q = z.string().optional().describe("Quote: the message's own words, cut to fit the budget");
 const sig = z.string().optional().describe("Signals in the quote, comma-separated: amount, date, time, address, link, question");
-const media = z.record(z.number()).optional().describe("Media by kind: image, video, voice, audio, document, sticker, location, contact");
+const media = z.record(z.string(), z.number()).optional().describe("Media by kind: image, video, voice, audio, document, sticker, location, contact");
 const privateFlag = z.literal(true).optional().describe("Someone the user tagged #private: counted, never quoted");
+const messageIdOut = z.string().optional().describe("ids: the message_id of what the entry quotes or names");
+const mediaIdsOut = z.array(z.string()).optional().describe("ids: the newest photos, videos, documents, stickers and audio, by message_id, for get_media");
 
 const waitingEntry = z.object({
   acct,
@@ -139,6 +158,8 @@ const waitingEntry = z.object({
     .describe("An answered call after the ask: it may have been dealt with by phone"),
   q,
   then: z.string().optional().describe("What they sent after the ask, quoted with it"),
+  id: messageIdOut,
+  then_id: z.string().optional().describe("ids: the message_id of then"),
 });
 
 const addressedEntry = z.object({
@@ -153,6 +174,7 @@ const addressedEntry = z.object({
   private: privateFlag,
   q,
   sig,
+  id: messageIdOut,
 });
 
 const callsEntry = z.object({
@@ -184,6 +206,8 @@ const directEntry = z.object({
   q,
   sig,
   more_in_chat: z.number().optional().describe("New messages besides the one quoted"),
+  id: messageIdOut,
+  media_ids: mediaIdsOut,
 });
 
 const groupEntry = z.object({
@@ -199,6 +223,8 @@ const groupEntry = z.object({
   addressed: z.literal(true).optional().describe("Someone mentioned, replied to or asked the user here"),
   hot: z.string().optional().describe("Quote: the most reacted message, or the newest worth quoting"),
   sig,
+  id: messageIdOut,
+  media_ids: mediaIdsOut,
 });
 
 const mutedGroupsEntry = z.object({
@@ -254,7 +280,7 @@ export const CATCHUP_OUTPUT = {
     .nullable()
     .describe("On the last page: what the entries leave out"),
   more: z
-    .object({ cursor: z.string(), remaining: z.record(z.number()), approx_tokens: z.number() })
+    .object({ cursor: z.string(), remaining: z.record(z.string(), z.number()), approx_tokens: z.number() })
     .nullable()
     .describe("Set when entries are left: call catch_up again with more.cursor"),
   approx_tokens: z.number(),
@@ -269,6 +295,7 @@ export interface CatchupArgs {
   include?: CatchupSection[];
   cursor?: string;
   account_id?: string;
+  ids?: boolean;
 }
 
 /** What catch_up needs from the tool runtime. */
@@ -279,6 +306,8 @@ export interface CatchupContext {
   wa: WhatsAppApi;
   /** Who is catching up: an OAuth client id, a token's label, or `local`. */
   client: string;
+  /** What the session receives (tool-runtime.ts): the budget is spent on the text, or on the structured JSON. `full` when absent. */
+  format?: AnswerFormat;
   /** The clock a first page starts at and cursors expire by; Date.now when omitted (the bench fixes it). */
   now?: () => number;
 }
@@ -394,7 +423,7 @@ function windowPhrase(window: CatchupWindow, now: number): string {
 // ---------------------------------------------------------------- entries as items
 
 /** A quote as placed: the message's words cut to their level, and for someone waiting, what they sent after the ask. */
-type Quoted = { text: string; signals: Signal[]; then?: string } | null;
+type Quoted = { text: string; signals: Signal[]; then?: string; id?: string; thenId?: string } | null;
 
 interface Item {
   section: CatchupSection;
@@ -489,7 +518,17 @@ function flatScan(scan: CatchupScan): CatchupScan {
   };
 }
 
-function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
+/** With ids: the message an entry names, after its chat in the line. */
+function idSuffix(id: string | undefined, label = "id"): string {
+  return id === undefined ? "" : ` · ${label} ${id}`;
+}
+
+/** With ids: an entry's newest media, after everything else on its line. */
+function mediaSuffix(ids: readonly string[] | undefined): string {
+  return ids === undefined || ids.length === 0 ? "" : ` · media ${ids.join(" ")}`;
+}
+
+function itemsOf(view: AccountView, multi: boolean, now: number, ids = false): Item[] {
   const scan = flatScan(view.scan!);
   const account = view.id;
   const tag = multi ? { acct: account } : {};
@@ -527,7 +566,8 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
               ]
             : []),
         ];
-        return `${parts.join(" · ")}${quoteSuffix(quote, false)} · ${entry.chat}`;
+        const askId = ids && !entry.private ? entry.ask.sid : undefined;
+        return `${parts.join(" · ")}${quoteSuffix(quote, false)} · ${entry.chat}${idSuffix(askId)}${idSuffix(ids ? quote?.thenId : undefined, "then id")}`;
       },
       data: (quote) => ({
         ...tag,
@@ -558,6 +598,8 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
           : {}),
         ...(quote && quote.text !== "" ? { q: quote.text } : {}),
         ...(quote?.then === undefined ? {} : { then: quote.then }),
+        ...(ids && !entry.private ? { id: entry.ask.sid } : {}),
+        ...(ids && quote?.thenId !== undefined ? { then_id: quote.thenId } : {}),
       }),
     });
   });
@@ -574,7 +616,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
       line: (quote) =>
         `- ${entry.name} · ${entry.from} ${verb} · ${clock(entry.ts, now)}${entry.more > 0 ? ` (+${entry.more} more)` : ""}${
           entry.title ? `: ${JSON.stringify(cut(entry.title, TITLE_CHARS))}` : ""
-        }${entry.private ? " · private" : ""}${quoteSuffix(quote, true)} · ${entry.chat}`,
+        }${entry.private ? " · private" : ""}${quoteSuffix(quote, true)} · ${entry.chat}${idSuffix(ids && !entry.private ? entry.sid : undefined)}`,
       data: (quote) => ({
         ...tag,
         chat: entry.chat,
@@ -586,6 +628,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
         ...(entry.title ? { title: cut(entry.title, TITLE_CHARS) } : {}),
         ...(entry.private ? { private: true } : {}),
         ...(quote ? { q: quote.text, ...sigOf(quote) } : {}),
+        ...(ids && !entry.private ? { id: entry.sid } : {}),
       }),
     });
   });
@@ -626,7 +669,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
       line: (quote) => {
         const who = `${entry.name}${tagsLabel(entry.tags)}${entry.note ? ` (${entry.note})` : ""}${entry.business ? " [business]" : entry.unknown ? " [not saved]" : ""}${entry.muted ? " [muted]" : ""}`;
         const more = quote !== null && entry.count > 1 ? ` (+${entry.count - 1} more)` : "";
-        return `- ${who} · ${entry.count} new · ${clock(entry.newestTs, now)}${media ? ` · ${media}` : ""}${entry.private ? " · private" : ""}${quoteSuffix(quote, true)}${more} · ${entry.chat}`;
+        return `- ${who} · ${entry.count} new · ${clock(entry.newestTs, now)}${media ? ` · ${media}` : ""}${entry.private ? " · private" : ""}${quoteSuffix(quote, true)}${more} · ${entry.chat}${idSuffix(ids ? quote?.id : undefined)}${mediaSuffix(ids ? entry.mediaIds : undefined)}`;
       },
       data: (quote) => ({
         ...tag,
@@ -645,6 +688,8 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
         ...(quote
           ? { q: quote.text, ...sigOf(quote), ...(entry.count > 1 ? { more_in_chat: entry.count - 1 } : {}) }
           : {}),
+        ...(ids && quote?.id !== undefined ? { id: quote.id } : {}),
+        ...(ids && entry.mediaIds !== undefined && entry.mediaIds.length > 0 ? { media_ids: entry.mediaIds } : {}),
       }),
     });
   });
@@ -660,7 +705,7 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
       line: (quote) =>
         `- ${entry.name} · ${entry.count} new from ${entry.senders}${entry.top.length > 0 ? ` (${entry.top.join(", ")})` : ""}${media ? ` · ${media}` : ""}${
           entry.addressed ? " · addresses you" : ""
-        }${quoteSuffix(quote, true)} · ${entry.chat}`,
+        }${quoteSuffix(quote, true)} · ${entry.chat}${idSuffix(ids ? quote?.id : undefined)}${mediaSuffix(ids ? entry.mediaIds : undefined)}`,
       data: (quote) => ({
         ...tag,
         chat: entry.chat,
@@ -673,6 +718,8 @@ function itemsOf(view: AccountView, multi: boolean, now: number): Item[] {
         ...(entry.polls > 0 ? { polls: entry.polls } : {}),
         ...(entry.addressed ? { addressed: true } : {}),
         ...(quote ? { hot: quote.text, ...sigOf(quote) } : {}),
+        ...(ids && quote?.id !== undefined ? { id: quote.id } : {}),
+        ...(ids && entry.mediaIds !== undefined && entry.mediaIds.length > 0 ? { media_ids: entry.mediaIds } : {}),
       }),
     });
   });
@@ -717,6 +764,8 @@ type Mark = { moved: boolean; why?: string; next_since?: string };
 interface Snapshot {
   client: string;
   include: CatchupSection[];
+  /** Asked with ids: every page names messages by id, as the first did. */
+  ids: boolean;
   now: number;
   multi: boolean;
   views: AccountView[];
@@ -887,7 +936,7 @@ export async function runCatchUp(args: CatchupArgs, ctx: CatchupContext): Promis
         "Pass more.cursor without account_id"
       );
     }
-    return givePage(snapshot, start, budget * 4, ctx, asked);
+    return givePage(snapshot, start, budget * CHARS_PER_TOKEN, ctx, asked);
   }
   const include: CatchupSection[] =
     args.include === undefined ? [...CATCHUP_SECTIONS] : CATCHUP_SECTIONS.filter((section) => args.include!.includes(section));
@@ -895,6 +944,7 @@ export async function runCatchUp(args: CatchupArgs, ctx: CatchupContext): Promis
   const targets = targetsOf(args, ctx);
   const multi = targets.length > 1;
   const now = asked;
+  const ids = args.ids === true;
 
   // A person tagged on any live account is tagged on every one read, with account_id or without.
   const everyone = ctx.hub.bindings();
@@ -906,7 +956,7 @@ export async function runCatchUp(args: CatchupArgs, ctx: CatchupContext): Promis
       const view: AccountView = { id: target.id, name, source: target.wa, scan: null, error: null };
       try {
         if (typeof target.wa.catchUpScan !== "function") throw missingSupport(target.id);
-        view.scan = await target.wa.catchUpScan({ client: ctx.client, include, at: now, window: spec, ...(tags === undefined ? {} : { tags }) });
+        view.scan = await target.wa.catchUpScan({ client: ctx.client, include, at: now, window: spec, ...(tags === undefined ? {} : { tags }), ...(ids ? { mediaIds: true } : {}) });
       } catch (err) {
         view.error = asWazapError(err);
       }
@@ -917,10 +967,10 @@ export async function runCatchUp(args: CatchupArgs, ctx: CatchupContext): Promis
   if (answered.length === 0) throw views[0]!.error ?? missingSupport(targets[0]!.id);
 
   // Every entry in section order; within a section, account by account.
-  const byAccount = answered.map((view) => itemsOf(view, multi, now));
+  const byAccount = answered.map((view) => itemsOf(view, multi, now, ids));
   const items: Item[] = CATCHUP_SECTIONS.flatMap((section) => byAccount.flatMap((each) => each.filter((item) => item.section === section)));
-  const snapshot: Snapshot = { client: ctx.client, include, now, multi, views, answered, items, cursors: new Set(), marks: null, usedAt: asked };
-  return givePage(snapshot, 0, budget * 4, ctx, asked);
+  const snapshot: Snapshot = { client: ctx.client, include, ids, now, multi, views, answered, items, cursors: new Set(), marks: null, usedAt: asked };
+  return givePage(snapshot, 0, budget * CHARS_PER_TOKEN, ctx, asked);
 }
 
 /** One page of a digest from entry `start`: the whole rest when it fits, otherwise as much as fits and a cursor to the next. */
@@ -931,16 +981,41 @@ async function givePage(snapshot: Snapshot, start: number, budgetChars: number, 
 
   // Every section read, and all there is are asks from before the window: nothing arrived in it.
   const quiet = complete && all.length > 0 && all.every((item) => item.beforeWindow === true);
-  const header = [...headerLines(views, multi, now, start > 0), ...(quiet ? ["Nothing arrived in this window; still waiting from before it:"] : [])];
+  // What the assistant must act on or tell the user, the same strings in the text (under the title) and in `notes`.
+  const statusNotes = answered.flatMap((view) => {
+    const connection = view.scan!.connection;
+    return [
+      connection.status === "connected"
+        ? null
+        : `${view.id} is ${connection.status}${connection.since === null ? "" : ` since ${clock(Date.parse(connection.since), now)}`}: what arrived after that is not here yet.`,
+      connection.sync === "done" ? null : `${view.id}: history sync is still running; some messages may not be here yet.`,
+    ].filter((note): note is string => note !== null);
+  });
+  const header = [...headerLines(views, multi, now, start > 0), ...statusNotes, ...(quiet ? [QUIET_NOTE] : [])];
   const footer = footerLines(answered, multi);
+  // What the budget is spent on: the structured JSON in a full session, the text in a text one.
+  const json = ctx.format !== "text";
+  const cost = (item: Item, quote: Quoted): number => (json ? JSON.stringify(item.data(quote)).length : item.line(quote).length) + 1;
   const linesChars = (lines: readonly string[]): number => lines.reduce((n, line) => n + line.length + 1, 0);
-  const headerChars = linesChars(header);
-  const footerChars = footer.length === 0 ? 0 : linesChars(footer) + 1;
-  const skeletonChars = new Map(all.map((item) => [item, item.line(null).length + 1]));
+  // The accounts as the answer gives them (window, status_since, sync, error and all), each with the longest mark there is.
+  const longestMark: Mark = { moved: false, why: "moved_by_another_call", next_since: isoWithOffset(now) };
+  const headerChars = json
+    ? JSON.stringify({
+        window: unionWindow(answered),
+        accounts: accountEntries(views, multi, () => longestMark),
+        waiting: [], addressed: [], missed_calls: [], direct: [], groups: [], stories: [],
+        footer: null, more: null, approx_tokens: 10_000, notes: [...statusNotes, ...(quiet ? [QUIET_NOTE] : [])], account_id: answered[0]!.id,
+      }).length
+    : linesChars(header);
+  const footerChars = json ? JSON.stringify(footerData(answered, multi)).length : footer.length === 0 ? 0 : linesChars(footer) + 1;
+  const skeletonChars = new Map(all.map((item) => [item, cost(item, null)]));
   const longestName = Math.max(...answered.map((view) => view.name.length));
-  const headingChars = (item: Item): number => `## ${SECTION_TITLES[item.section]}${multi ? ` · ${"x".repeat(longestName)}` : ""} (99)`.length + 1;
+  // The structured answer has no headings: its sections are keys, already in headerChars.
+  const headingChars = (item: Item): number => (json ? 0 : `## ${SECTION_TITLES[item.section]}${multi ? ` · ${"x".repeat(longestName)}` : ""} (99)`.length + 1);
   const headingKey = (item: Item): string => (multi ? `${item.section}|${item.account}` : item.section);
-  const moreChars = 140 + CURSOR_CHARS;
+  const moreChars = json
+    ? JSON.stringify({ cursor: "x".repeat(CURSOR_CHARS), remaining: { waiting: 99, addressed: 99, missed_calls: 99, direct: 99, groups: 99, stories: 99 }, approx_tokens: 10_000 }).length + MORE_NOTE.length + 4
+    : 140 + MORE_NOTE.length + CURSOR_CHARS;
 
   // 1. The skeleton: all of it with the footer, or as much as fits before a `more` line (at least one entry).
   const skeletonOf = (items: readonly Item[]): number => {
@@ -988,22 +1063,36 @@ async function givePage(snapshot: Snapshot, start: number, budgetChars: number, 
     }
   }
   const texts = await readQuotes(candidates, answered);
-  type Placed = { item: Item; full: string; then: string | null; signals: Signal[]; level: number };
+  type Placed = { item: Item; full: string; then: string | null; signals: Signal[]; level: number; id?: string; thenId?: string };
   const placed: Placed[] = [];
   for (const item of candidates) {
     const full = item.quoteId === null ? "" : (texts.get(`${item.account}|${item.quoteId}`)?.text ?? "");
     const then = item.thenId === null ? "" : (texts.get(`${item.account}|${item.thenId}`)?.text ?? "");
     if (full === "" && then === "") continue;
+    const id = item.quoteId === null || full === "" ? undefined : texts.get(`${item.account}|${item.quoteId}`)?.sid;
+    const thenId = item.thenId === null || then === "" ? undefined : texts.get(`${item.account}|${item.thenId}`)?.sid;
     placed.push({
       item,
       full,
       then: then === "" ? null : then,
       signals: item.section === "waiting" ? [] : [...signalsOf(full)],
       level: QUOTE_CAPS[item.section]!,
+      ...(id === undefined ? {} : { id }),
+      ...(thenId === undefined ? {} : { thenId }),
     });
   }
-  const quoteAt = (entry: Placed, level: number): Quoted => (level === 0 ? null : { ...composeQuote(entry.full, entry.then, level), signals: entry.signals });
-  const extra = (entry: Placed, level: number): number => entry.item.line(quoteAt(entry, level)).length - skeletonChars.get(entry.item)! + 1;
+  const quoteAt = (entry: Placed, level: number): Quoted => {
+    if (level === 0) return null;
+    const composed = composeQuote(entry.full, entry.then, level);
+    // An id rides with the words it names: the quote's message, and what followed only while it is quoted too.
+    return {
+      ...composed,
+      signals: entry.signals,
+      ...(entry.id === undefined || composed.text === "" ? {} : { id: entry.id }),
+      ...(entry.thenId === undefined || composed.then === undefined ? {} : { thenId: entry.thenId }),
+    };
+  };
+  const extra = (entry: Placed, level: number): number => cost(entry.item, quoteAt(entry, level)) - skeletonChars.get(entry.item)!;
   let spent = placed.reduce((n, entry) => n + extra(entry, entry.level), 0);
   // 3. Too long: the lowest-priority quotes shrink to 80 characters, then go.
   for (let i = placed.length - 1; i >= 0 && spent > spare; i--) {
@@ -1046,12 +1135,13 @@ async function givePage(snapshot: Snapshot, start: number, budgetChars: number, 
     const remaining: Record<string, number> = {};
     for (const item of remainingItems) remaining[STRUCTURED_KEYS[item.section]] = (remaining[STRUCTURED_KEYS[item.section]] ?? 0) + 1;
     const quotesLeft = remainingItems.filter((item) => item.quoteId !== null || item.thenId !== null).length;
-    const approx = Math.ceil((skeletonOf(remainingItems) + footerChars) / 4) + quotesLeft * 30;
+    // About 120 characters for each quote the rest would read back.
+    const approx = Math.ceil((skeletonOf(remainingItems) + footerChars + quotesLeft * 120) / CHARS_PER_TOKEN);
     more = { cursor: cursorFor(snapshot, start + page.length), remaining, approx_tokens: approx };
     const counts = Object.entries(remaining)
       .map(([section, n]) => `${section} ${n}`)
       .join(", ");
-    lines.push("", `More: ${plural(remainingItems.length, "entry", "entries")} left (${counts}; ~${approx} tokens). Call catch_up with cursor: "${more.cursor}"`);
+    lines.push("", `${MORE_NOTE} ${plural(remainingItems.length, "entry", "entries")} left (${counts}; ~${approx} tokens); more.cursor: "${more.cursor}"`);
   } else {
     if (footer.length > 0) lines.push("", ...footer);
     for (const view of answered) {
@@ -1065,19 +1155,7 @@ async function givePage(snapshot: Snapshot, start: number, budgetChars: number, 
 
   const structured: Record<string, unknown> = {
     window: unionWindow(answered),
-    accounts: views.map((view) =>
-      view.scan === null
-        ? { account_id: view.id, name: view.name, status: "error", error: { code: view.error!.code, message: view.error!.message } }
-        : {
-            account_id: view.id,
-            name: view.name,
-            status: view.scan.connection.status,
-            ...(view.scan.connection.status !== "connected" && view.scan.connection.since !== null ? { status_since: view.scan.connection.since } : {}),
-            ...(view.scan.connection.sync === "done" ? {} : { sync: view.scan.connection.sync }),
-            ...(multi ? { window: windowOf(view.scan.window) } : {}),
-            mark: marks.get(view.id),
-          }
-    ),
+    accounts: accountEntries(views, multi, (view) => marks.get(view.id)),
     waiting: [],
     addressed: [],
     missed_calls: [],
@@ -1086,26 +1164,33 @@ async function givePage(snapshot: Snapshot, start: number, budgetChars: number, 
     stories: [],
     footer: final ? footerData(answered, multi) : null,
     more,
-    approx_tokens: Math.ceil(text.length / 4),
+    approx_tokens: Math.ceil(text.length / CHARS_PER_TOKEN),
     account_id: multi ? null : answered[0]!.id,
   };
   for (const item of page) (structured[STRUCTURED_KEYS[item.section]] as unknown[]).push(item.data(quotes.get(item) ?? null));
-  // What the text says the assistant must act on, for a client that hands the model only the structured content.
-  const notes = [
-    ...answered.flatMap((view) => {
-      const connection = view.scan!.connection;
-      return [
-        connection.status === "connected"
-          ? null
-          : `${view.id} is ${connection.status}${connection.since === null ? "" : ` since ${clock(Date.parse(connection.since), now)}`}: what arrived after that is not here yet.`,
-        connection.sync === "done" ? null : `${view.id}: history sync is still running; some messages may not be here yet.`,
-      ];
-    }),
-    quiet ? "Nothing arrived in this window: every waiting entry was asked before it and is still open." : null,
-    more === null ? null : "More entries are left: call catch_up with more.cursor for them.",
-  ].filter((note): note is string => note !== null);
+  // What the text says the assistant must act on, word for word.
+  const notes = [...statusNotes, quiet ? QUIET_NOTE : null, more === null ? null : MORE_NOTE].filter((note): note is string => note !== null);
   if (notes.length > 0) structured.notes = notes;
+  // What this answer costs, counted on what the session receives.
+  if (ctx.format !== "text") structured.approx_tokens = Math.ceil(JSON.stringify(structured).length / CHARS_PER_TOKEN);
   return { content: [{ type: "text", text }], structuredContent: structured };
+}
+
+/** The structured answer's `accounts`: each account's state, its own window when there are several, and its mark. */
+function accountEntries(views: readonly AccountView[], multi: boolean, markOf: (view: AccountView) => Mark | undefined): Array<Record<string, unknown>> {
+  return views.map((view) =>
+    view.scan === null
+      ? { account_id: view.id, name: view.name, status: "error", error: { code: view.error!.code, message: view.error!.message } }
+      : {
+          account_id: view.id,
+          name: view.name,
+          status: view.scan.connection.status,
+          ...(view.scan.connection.status !== "connected" && view.scan.connection.since !== null ? { status_since: view.scan.connection.since } : {}),
+          ...(view.scan.connection.sync === "done" ? {} : { sync: view.scan.connection.sync }),
+          ...(multi ? { window: windowOf(view.scan.window) } : {}),
+          mark: markOf(view),
+        }
+  );
 }
 
 async function readQuotes(candidates: readonly Item[], views: readonly AccountView[]): Promise<Map<string, CatchupQuote>> {
@@ -1129,22 +1214,16 @@ function headingOf(item: Item, page: readonly Item[], views: readonly AccountVie
 
 function headerLines(views: readonly AccountView[], multi: boolean, now: number, continued: boolean): string[] {
   const title = continued ? "# WhatsApp catch-up, continued" : "# WhatsApp catch-up";
-  const stale = (view: AccountView): string => {
-    const connection = view.scan?.connection;
-    if (connection === undefined || connection.status === "connected") return "";
-    const since = connection.since === null ? "" : ` since ${clock(Date.parse(connection.since), now)}`;
-    return ` · ${connection.status}${since}: what arrived after that is not here yet`;
-  };
   if (!multi) {
     const view = views[0]!;
-    return [`${title} · ${windowPhrase(view.scan!.window, now)}${stale(view)}`];
+    return [`${title} · ${windowPhrase(view.scan!.window, now)}`];
   }
   return [
     `${title} · ${views.length} accounts`,
     ...views.map((view) =>
       view.scan === null
         ? `- ${view.name} (${view.id}): unavailable — ${view.error!.code}: ${flat(view.error!.message)}`
-        : `- ${view.name} (${view.id}): ${windowPhrase(view.scan.window, now)}${stale(view)}`
+        : `- ${view.name} (${view.id}): ${windowPhrase(view.scan.window, now)}`
     ),
   ];
 }
@@ -1180,7 +1259,6 @@ function footerLines(views: readonly AccountView[], multi: boolean): string[] {
     }
     const skipped = skippedParts(scan);
     if (skipped.length > 0) lines.push(`${label}Left out: ${skipped.join(" · ")}.`);
-    if (scan.connection.sync !== "done") lines.push(`${label}History sync is still running; some messages may not be here yet.`);
     if (scan.connection.mentionsIndexing) lines.push(`${label}Mentions in older messages are still being indexed.`);
   }
   return lines;

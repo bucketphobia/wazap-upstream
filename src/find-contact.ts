@@ -457,6 +457,8 @@ export function renderFindContact(structured: Record<string, unknown>): string {
       if (filed !== null) lines.push(filed);
       if (unsearched !== null) lines.push(unsearched);
       if (structured.context !== undefined) lines.push(...renderContext(structured.context as DraftContext, contact.name));
+      // The step after, word for word what the structured answer says: send_message now, or that this connection cannot.
+      if (typeof structured.next === "string") lines.push(structured.next);
       return lines.join("\n");
     }
     case "ambiguous": {
@@ -522,7 +524,7 @@ const listedSchema = z.object({
   business: z.boolean().optional(),
   note: z.string().optional(),
   tags: z.array(z.string()).optional(),
-  fields: z.record(z.string()).optional(),
+  fields: z.record(z.string(), z.string()).optional(),
 });
 
 export const FIND_CONTACT_OUTPUT = {
@@ -548,7 +550,7 @@ export const FIND_CONTACT_OUTPUT = {
       business: z.boolean().optional(),
       note: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      fields: z.record(z.string()).optional(),
+      fields: z.record(z.string(), z.string()).optional(),
     })
     .optional()
     .describe("Only when resolved"),

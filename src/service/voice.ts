@@ -12,6 +12,7 @@ import { join } from "node:path";
 import type { WAMessage, WASocket } from "baileys";
 import type { AccountRecord } from "../accounts.js";
 import type { Config } from "../config.js";
+import { SharedRun, throwIfCancelled } from "../cancel.js";
 import type { AccountDb, StoredMessage, UpsertResult } from "../db/index.js";
 import { asWazapError, WazapError } from "../errors.js";
 import { isStatusJid } from "../ids.js";
@@ -32,6 +33,7 @@ import {
   type TranscriptRecord,
 } from "../transcribe/index.js";
 import type { ConnectionStatus, TranscribeOptions, TranscribeResult, TranscriptionStatus } from "../wa-types.js";
+import { cdnExpired } from "./media-download.js";
 import { FILE_MODE } from "./util.js";
 import { missingMessage, type MessageViews } from "./views.js";
 
@@ -79,6 +81,11 @@ function transcribable(raw: WAMessage, own: boolean): boolean {
   return seconds !== undefined && seconds <= AUTO_TRANSCRIBE_MAX_SECONDS;
 }
 
+/** A run's download failed because WhatsApp's CDN no longer has the file (404, 410): the phone may upload it again. */
+function expiredCopy(err: unknown): boolean {
+  return err instanceof WazapError && err.code === "MEDIA_UNAVAILABLE" && cdnExpired((err as { cause?: unknown }).cause);
+}
+
 /** Field by field, because `at` is the cache's bookkeeping and not the caller's business. */
 function transcribeResult(record: TranscriptRecord, cached: boolean): TranscribeResult {
   return {
@@ -98,8 +105,11 @@ export interface VoiceHost {
   status(): ConnectionStatus;
   guarded<T>(work: () => Promise<T>): Promise<T>;
   ensureConnected(): WASocket;
-  /** The bytes behind a message's media, from WhatsApp. */
-  mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage): Promise<Buffer>;
+  /**
+   * The bytes behind a message's media, from WhatsApp; `reupload` asks the
+   * phone again for expired media, and `signal` stops the download.
+   */
+  mediaBuffer(sock: WASocket, messageId: string, raw: WAMessage, opts?: { reupload?: boolean; signal?: AbortSignal }): Promise<Buffer>;
   /** The kept copy of a message's media, or null (src/service/keep.ts): it needs no link. */
   keptMedia(messageId: string, raw: WAMessage): Promise<Buffer | null>;
   /** The provider run, and its readiness check: the service's, so a test can stub them. */
@@ -133,8 +143,11 @@ export class AccountVoice {
   readonly transcribeWorker = transcribeWorker;
   /** Cancels this account's uploads and whisper.cpp runs: it is being removed. */
   private readonly transcribeAbort = new AbortController();
-  /** Transcriptions under way, so one recording is never uploaded twice at once. */
-  private readonly transcribing = new Map<string, Promise<TranscribeResult>>();
+  /**
+   * Transcriptions under way, so one recording is never uploaded twice at
+   * once, with whether the run asks the phone for media whose copy expired.
+   */
+  private readonly transcribing = new Map<string, { run: SharedRun<TranscribeResult>; reupload: boolean }>();
 
   constructor(
     private readonly host: VoiceHost,
@@ -201,18 +214,40 @@ export class AccountVoice {
 
       // The transcript is only written once a provider has run and been paid, so the
       // auto queue and a tool call asking for the same message at the same
-      // moment would otherwise upload it twice. They share the first run.
-      const running = this.transcribing.get(message.sid);
-      if (running) return await running;
+      // moment would otherwise upload it twice. They share the first run, and
+      // each stops waiting on its own cancel. The download stops only when every
+      // caller has cancelled; a provider, once started, runs to its end and its
+      // transcript is kept for the next ask.
+      throwIfCancelled(opts.signal);
+      const sid = message.sid;
+      const reupload = opts.reupload === true;
+      let source = raw;
+      const running = this.transcribing.get(sid);
+      if (running !== undefined && !running.run.abandoned) {
+        if (running.reupload || !reupload) return await running.run.join(opts.signal);
+        // The queue's run never wakes the phone; a person's call does. It shares that run all the same (the copy is
+        // usually still there), and asks the phone itself, with a run of its own, only when the run found it expired.
+        try {
+          return await running.run.join(opts.signal);
+        } catch (err) {
+          if (!expiredCopy(err)) throw err;
+        }
+        throwIfCancelled(opts.signal);
+        const now = this.views.storedOrThrow(messageId);
+        if (now.transcript !== null) return transcribeResult(this.transcriptRecordOf(now), true);
+        const next = this.transcribing.get(sid);
+        if (next !== undefined && next.reupload && !next.run.abandoned) return await next.run.join(opts.signal);
+        source = this.views.messageOrThrow(messageId);
+      }
       // Only a run spends the caller's budget: what is on hand, or cannot run, cost nothing.
       opts.limit?.take();
-      const work = this.runTranscribe(message.sid, raw, info, settings, language);
-      this.transcribing.set(message.sid, work);
-      try {
-        return await work;
-      } finally {
-        this.transcribing.delete(message.sid);
-      }
+      const run = new SharedRun<TranscribeResult>((signal, commit) => this.runTranscribe(sid, source, info, settings, language, { reupload, signal, commit }));
+      this.transcribing.set(sid, { run, reupload });
+      const forget = (): void => {
+        if (this.transcribing.get(sid)?.run === run) this.transcribing.delete(sid);
+      };
+      void run.work.then(forget, forget);
+      return await run.join(opts.signal);
     });
   }
 
@@ -221,12 +256,16 @@ export class AccountVoice {
     raw: WAMessage,
     info: { mime: string; size?: number; filename?: string },
     settings: TranscribeSettings,
-    language?: string
+    language?: string,
+    { reupload = false, signal, commit = () => {} }: { reupload?: boolean; signal?: AbortSignal; commit?: () => void } = {}
   ): Promise<TranscribeResult> {
     // Readiness is never ok while no provider is configured.
     const provider = settings.provider!;
     this.views.messageOrThrow(messageId);
-    const buffer = (await this.host.keptMedia(messageId, raw)) ?? (await this.host.mediaBuffer(this.host.ensureConnected(), messageId, raw));
+    // The download stops once every caller has cancelled; nothing has been paid for yet.
+    const buffer =
+      (await this.host.keptMedia(messageId, raw)) ??
+      (await this.host.mediaBuffer(this.host.ensureConnected(), messageId, raw, { reupload, ...(signal === undefined ? {} : { signal }) }));
     this.views.messageOrThrow(messageId);
     // Its own temp dir, deleted straight after: nobody asked to keep this file,
     // and the media dir is where the files the user did ask for live.
@@ -236,6 +275,8 @@ export class AccountVoice {
       const file = join(dir, mediaFilename(info));
       await writeFile(file, buffer, { mode: FILE_MODE });
       this.views.messageOrThrow(messageId);
+      // From here the provider runs, is paid for, and finishes whoever still waits.
+      commit();
       transcript = await this.host.transcriber(settings, file, {
         ...(language === undefined ? {} : { language }),
         signal: this.transcribeAbort.signal,

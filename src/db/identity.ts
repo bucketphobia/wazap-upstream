@@ -104,8 +104,93 @@ function notesFromRow(row: NotesRow): ContactNotes {
   };
 }
 
+/**
+ * The conversationTimestamp a stored chat protobuf states, in seconds; null
+ * when it states none or does not decode. The service decodes it; the
+ * database only keeps what it says (chats.described_ts, v7).
+ */
+export type ChatActivity = (proto: Uint8Array) => number | null;
+
+/** Where a page of list_chats starts: after this (activity, last message id, chat id), newest first. */
+export type ActivityKey = readonly [activity: number, lastMessageId: number, chatId: number];
+
+export interface ActivityPageInput {
+  /** The list's own key past which the page starts; null for the first page. */
+  after: ActivityKey | null;
+  /** Only archived chats (true), only chats that are not (false), or either. */
+  archived?: boolean;
+  /** Only chats with an unread count above zero. */
+  unread?: boolean;
+  limit: number;
+}
+
+export interface ActivityRow {
+  chat: ChatRecord;
+  key: ActivityKey;
+}
+
+const META_ACTIVITY_BACKFILL = "chat_activity_backfill";
+/** Larger than any activity, message id or chat id: the top a first page starts under. */
+const KEY_TOP = Number.MAX_SAFE_INTEGER;
+
 export class Identity {
-  constructor(private readonly c: Connection) {}
+  constructor(
+    private readonly c: Connection,
+    private readonly chatActivity: ChatActivity | null = null
+  ) {}
+
+  /** What a chat protobuf says its time is, as chats.described_ts keeps it. */
+  private describedTs(proto: Uint8Array | null): number | null {
+    if (proto === null || this.chatActivity === null) return null;
+    const seconds = this.chatActivity(proto);
+    return seconds === null || !Number.isFinite(seconds) ? null : seconds;
+  }
+
+  /**
+   * Reads the time out of every stored chat protobuf, once, for a file that
+   * held them before v7 (meta chat_activity_backfill). Only with a decoder;
+   * an open without one leaves it owed. Returns the chats it read.
+   */
+  backfillChatActivity(): number {
+    if (this.c.readOnly || this.chatActivity === null) return 0;
+    if (this.c.get("SELECT 1 FROM meta WHERE key = ?", META_ACTIVITY_BACKFILL) === undefined) return 0;
+    return this.c.write(() => {
+      const rows = this.c.all<{ id: number; proto: Uint8Array }>("SELECT id, proto FROM chats WHERE proto IS NOT NULL");
+      for (const row of rows) this.c.run("UPDATE chats SET described_ts = ? WHERE id = ?", this.describedTs(row.proto), row.id);
+      this.c.run("DELETE FROM meta WHERE key = ?", META_ACTIVITY_BACKFILL);
+      return rows.length;
+    });
+  }
+
+  /**
+   * One page of the chat list, newest first, off chats_activity: chats not
+   * folding into another, the status feed left out, that hold a visible
+   * message or a description. The caller filters further and asks again
+   * from the last key when it kept too few.
+   */
+  chatsByActivity(input: ActivityPageInput): ActivityRow[] {
+    const after = input.after ?? [KEY_TOP, KEY_TOP, KEY_TOP];
+    const where = [
+      "merged_into IS NULL",
+      "kind <> 'status'",
+      "(last_message_id IS NOT NULL OR proto IS NOT NULL)",
+      ...(input.archived === undefined ? [] : [`archived = ${input.archived ? 1 : 0}`]),
+      ...(input.unread === true ? ["unread > 0"] : []),
+      "(activity, coalesce(last_message_id, 0), id) < (?, ?, ?)",
+    ];
+    return this.c
+      .all<ChatRow>(
+        `SELECT * FROM chats INDEXED BY chats_activity WHERE ${where.join(" AND ")}
+         ORDER BY activity DESC, coalesce(last_message_id, 0) DESC, id DESC LIMIT ${Math.max(1, Math.floor(input.limit))}`,
+        ...after
+      )
+      .map((row) => ({ chat: chatFromRow(row), key: [row.activity, row.last_message_id ?? 0, row.id] as const }));
+  }
+
+  /** Lid chats not folding into another: the ones a list may still learn the number of. */
+  lidChats(): ChatRecord[] {
+    return this.c.all<ChatRow>("SELECT * FROM chats WHERE merged_into IS NULL AND kind = 'direct' AND jid GLOB '*@lid'").map(chatFromRow);
+  }
 
   /** The number a lid was last learned with, or null. */
   phoneOfLid(lid: string): string | null {
@@ -194,6 +279,7 @@ export class Identity {
     if (found !== null) return found;
     const canonical = this.canonicalJid(jid);
     const column = isLidJid(canonical) ? "lid" : "phone_jid";
+    this.c.namesChanged();
     return this.c.write(
       () =>
         this.c.get<{ id: number }>(`INSERT INTO contacts(${column}, updated_at) VALUES (?, ?) RETURNING id`, canonical, this.c.now())!
@@ -230,6 +316,7 @@ export class Identity {
       }
       if (sets.length > 0) {
         this.c.run(`UPDATE contacts SET ${sets.join(", ")}, updated_at = ? WHERE id = ?`, ...values, this.c.now(), id);
+        this.c.namesChanged();
       }
       return this.contactById(id)!;
     });
@@ -271,6 +358,7 @@ export class Identity {
       const chatKind = kind ?? chatKindOf(normalized);
       const canonical = chatKind === "direct" ? this.canonicalJid(normalized) : normalized;
       const contactId = chatKind === "direct" ? this.ensureContact(canonical) : null;
+      this.c.namesChanged();
       const row = this.c.get<ChatRow>(
         "INSERT INTO chats(jid, kind, contact_id) VALUES (?, ?, ?) RETURNING *",
         canonical,
@@ -297,7 +385,9 @@ export class Identity {
       assign("muted_until", input.mutedUntil);
       assign("unread", input.unread);
       assign("proto", input.proto);
+      if (input.proto !== undefined) assign("described_ts", this.describedTs(input.proto));
       if (sets.length > 0) this.c.run(`UPDATE chats SET ${sets.join(", ")} WHERE id = ?`, ...values, chat.id);
+      if (input.name !== undefined) this.c.namesChanged();
       return this.chatById(chat.id)!;
     });
   }
@@ -379,6 +469,7 @@ export class Identity {
 
   /** Stores notes on a contact row; the merge path writes through here too. Call inside write(). */
   writeNotes(contactId: number, note: string | null, tags: string[], fields: Record<string, string>): ContactNotes | null {
+    this.c.namesChanged();
     if (note === null && tags.length === 0 && Object.keys(fields).length === 0) {
       this.c.run("DELETE FROM contact_notes WHERE contact_id = ?", contactId);
       return null;

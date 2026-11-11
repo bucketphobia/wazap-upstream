@@ -6,7 +6,7 @@
  */
 
 import type { Contact as BaileysContact, GroupMetadata, WASocket } from "baileys";
-import { chatKindOf, type AccountDb } from "../db/index.js";
+import { chatKindOf, type AccountDb, type ContactNotes } from "../db/index.js";
 import { WazapError } from "../errors.js";
 import { LidRegistry, lidKey } from "../identity.js";
 import { isGroupId, isNoiseJid } from "../ids.js";
@@ -45,8 +45,30 @@ export interface IdentityHost {
   namesChanged(): void;
 }
 
+/**
+ * How long a name, a note or a tag read from the database is served from
+ * memory at most. Every write that changes one moves the database's
+ * namesVersion and empties the cache at once; this only bounds what a write
+ * that forgot to say so could leave behind.
+ */
+export const NAME_CACHE_TTL_MS = 60_000;
+/** Jids the name cache holds before it starts over. */
+export const NAME_CACHE_MAX = 20_000;
+
+/** What one database said about jids, while its namesVersion stayed put. */
+interface NameCache {
+  db: AccountDb;
+  version: number;
+  since: number;
+  /** The name the database gives a jid, "" for none (a hint or the number come after it). */
+  names: Map<string, string>;
+  notes: Map<string, ContactNotes | null>;
+}
+
 export class AccountIdentity {
   constructor(private readonly host: IdentityHost) {}
+
+  private cache: NameCache | null = null;
 
   /** Every lid ↔ number pairing, mirrored from the account database: the ids every read hands out. */
   lids = new LidRegistry();
@@ -178,17 +200,10 @@ export class AccountIdentity {
     if (this.isMe(jid)) return this.host.account()?.name || "You";
     const db = this.host.readyDb();
     if (isGroupId(jid)) {
-      return db?.identity.chat(jid)?.name || this.host.cachedGroup(jid)?.subject || jid;
+      return (db === null ? "" : this.storedName(db, jid)) || this.host.cachedGroup(jid)?.subject || jid;
     }
 
-    const contact = db?.identity.contact(jid) ?? null;
-    const chat = db !== null && chatKindOf(jid) === "direct" ? db.identity.chat(jid) : null;
-    const name =
-      realName(contact?.name) ||
-      realName(contact?.verifiedName) ||
-      realName(contact?.notify) ||
-      realName(contact?.pushName) ||
-      realName(chat?.name);
+    const name = db === null ? "" : this.storedName(db, jid);
     if (name) return name;
     const hinted = realName(hint);
     if (hinted) return hinted;
@@ -202,12 +217,71 @@ export class AccountIdentity {
 
   /** The user's note on a person or a chat, from the database. */
   noteFor(jid: string): string | undefined {
-    return this.host.readyDb()?.identity.notes(jid)?.note ?? undefined;
+    return this.storedNotes(jid)?.note ?? undefined;
   }
 
   /** The tags the user filed a person under, sorted; undefined when there are none. */
   tagsFor(jid: string): string[] | undefined {
-    const tags = this.host.readyDb()?.identity.notes(jid)?.tags ?? [];
+    const tags = this.storedNotes(jid)?.tags ?? [];
     return tags.length === 0 ? undefined : [...tags].sort();
+  }
+
+  /**
+   * What `db` says about names now: the cache, while the database's
+   * namesVersion has not moved, it is the same database, and the cache is not
+   * older than NAME_CACHE_TTL_MS; otherwise a new, empty one. Every read tool
+   * names the same people over and over, at five statements a name.
+   */
+  private namesOf(db: AccountDb): NameCache {
+    const now = performance.now();
+    const cache = this.cache;
+    if (
+      cache !== null &&
+      cache.db === db &&
+      cache.version === db.namesVersion &&
+      now - cache.since < NAME_CACHE_TTL_MS &&
+      cache.names.size + cache.notes.size < NAME_CACHE_MAX
+    ) {
+      return cache;
+    }
+    this.cache = { db, version: db.namesVersion, since: now, names: new Map(), notes: new Map() };
+    return this.cache;
+  }
+
+  /**
+   * The name the database gives `jid`: a group's own name; a person's contact
+   * name, verified business name, notify name or push name, then their chat's
+   * name, whichever is a real name first. "" for none.
+   */
+  private storedName(db: AccountDb, jid: string): string {
+    const cache = this.namesOf(db);
+    let name = cache.names.get(jid);
+    if (name !== undefined) return name;
+    if (isGroupId(jid)) {
+      name = db.identity.chat(jid)?.name ?? "";
+    } else {
+      const contact = db.identity.contact(jid);
+      const chat = chatKindOf(jid) === "direct" ? db.identity.chat(jid) : null;
+      name =
+        realName(contact?.name) ||
+        realName(contact?.verifiedName) ||
+        realName(contact?.notify) ||
+        realName(contact?.pushName) ||
+        realName(chat?.name);
+    }
+    cache.names.set(jid, name);
+    return name;
+  }
+
+  private storedNotes(jid: string): ContactNotes | null {
+    const db = this.host.readyDb();
+    if (db === null) return null;
+    const cache = this.namesOf(db);
+    let notes = cache.notes.get(jid);
+    if (notes === undefined) {
+      notes = db.identity.notes(jid);
+      cache.notes.set(jid, notes);
+    }
+    return notes;
   }
 }

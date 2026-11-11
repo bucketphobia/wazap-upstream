@@ -226,6 +226,7 @@ async function mainPhase() {
   results.facts.recent_24h_rows = time("recent 24h (500)", 50, () => db.messages.recent({ since: NOW - DAY, limit: 500 })).items.length;
   time("recent 7d (50)", 50, () => db.messages.recent({ since: NOW - 7 * DAY, limit: 50 }));
   time("list chats (50)", 50, () => db.messages.listChats({ limit: 50 }));
+  time("chat list page by activity (21)", 50, () => db.identity.chatsByActivity({ after: null, archived: false, limit: 21 }));
   time("waiting 14d", 50, () => db.messages.waiting({ since: NOW - 14 * DAY, until: NOW, limit: 100 }));
   time("coverage (account)", 50, () => db.messages.coverage());
   time("counts", 10, () => db.counts(), 1);
@@ -475,7 +476,7 @@ async function vectorPhase(size) {
   const chat = db.messages.listChats({ limit: 12 }).items[10].chat.jid;
   const prefix = `@${size}`;
   const reps = size >= 1_000_000 ? 5 : 15;
-  const embeddings = db.vectors.count(MODEL);
+  const embeddings = time(`embeddings count ${prefix}`, reps, () => db.vectors.count(MODEL), 1);
   time(`vector search ${prefix}`, reps, () => db.vectors.vectorSearch({ model: MODEL, vector: query, limit: 20 }), 1);
   time(`vector search, one chat ${prefix}`, reps, () => db.vectors.vectorSearch({ model: MODEL, vector: query, limit: 20, chat }), 1);
   time(`vector search, last 30d ${prefix}`, reps, () => db.vectors.vectorSearch({ model: MODEL, vector: query, limit: 20, since: NOW - 30 * DAY }), 1);

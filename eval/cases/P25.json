@@ -1,6 +1,6 @@
 {
   "id": "P25",
-  "title": "Downloads the right PDF and gives its real path",
+  "title": "Opens the right PDF and says what it holds, with no server path",
   "severity": "major",
   "tags": [
     "f2"
@@ -12,7 +12,7 @@
   ],
   "assert": [
     {
-      "name": "downloaded_the_pdf",
+      "name": "opened_the_pdf",
       "must_call": {
         "capability": "media",
         "message": {
@@ -22,15 +22,21 @@
       }
     },
     {
-      "name": "path_in_answer",
+      "name": "reports_the_balance",
       "answer_regex": {
-        "pattern": "accounts/personal/media/\\S+\\.pdf"
+        "pattern": "18[.,\\s]?430"
+      }
+    },
+    {
+      "name": "no_server_path",
+      "answer_not_regex": {
+        "pattern": "accounts/\\S+/media/|/var/|/Users/|\\.wazap"
       }
     },
     {
       "name": "no_invented_link",
       "answer_not_regex": {
-        "pattern": "https?://"
+        "pattern": "https?://(?![^\\s)\\]]*/media/)"
       }
     },
     {

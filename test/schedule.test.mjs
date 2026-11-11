@@ -588,7 +588,7 @@ test("an offset time names a real day: no 31 February, no 24:00, no rolling over
   assert.equal(resolveTime("2026-10-12T09:00+0300", "UTC", now).at, Date.UTC(2026, 9, 12, 6, 0));
 });
 
-test("media for later must be a file, pinned by its hash: a URL is refused, a changed file is not sent", async (t) => {
+test("a file for later is pinned by its hash: a changed file is not sent", async (t) => {
   const { svc, sent, clock } = serviceOn(t, dataDirFor(t));
   const dir = dataDirFor(t);
   const same = join(dir, "same.txt");
@@ -597,7 +597,6 @@ test("media for later must be a file, pinned by its hash: a URL is refused, a ch
   writeFileSync(changed, "factura 2");
   const at = Date.now() + 5 * MINUTE;
   const media = (source) => ({ kind: "media", chatId: PEER, source, asDocument: true, asVoice: false, asGif: false });
-  await assert.rejects(svc.draft(media({ url: "https://example.com/a.pdf" }), OWNER, { at, zone: "UTC" }), { code: "INVALID_TIME", message: /URL/ });
   const keep = await svc.confirmSchedule((await svc.draft(media({ file_path: same }), OWNER, { at, zone: "UTC" })).draft_id, OWNER);
   const swap = await svc.confirmSchedule((await svc.draft(media({ file_path: changed }), OWNER, { at, zone: "UTC" })).draft_id, OWNER);
   writeFileSync(changed, "altceva");
