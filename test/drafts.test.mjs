@@ -167,20 +167,25 @@ test("looksUnnamed trips on digits and unresolved lids, not on real names", () =
   assert.equal(looksUnnamed({ chat_id: "x@g.us", name: "Bloc 12" }), false);
 });
 
-test("renderDraft says it is not sent, shows the preview, and names the next step", () => {
+test("renderDraft says it is not sent, when it expires, shows the preview, and ends with the notes and the next step it is given", () => {
   const store = draftStub();
   const draft = store.put(ANA, textPayload);
-  const text = renderDraft(store.view(draft));
-  assert.match(text, new RegExp(`^Draft ${draft.id}\\. Not sent\\.`));
+  const text = renderDraft(store.view(draft), ["A note."], "The next step.");
+  assert.match(text, new RegExp(`^Draft ${draft.id}\\. Not sent\\. Expires at \\d{2}:\\d{2}\\.`));
   assert.match(text, /To: Ana \(\+40 722 123 456\)\n"Joi la 10 e perfect\."/);
-  assert.match(text, /call confirm_send with this draft_id/);
+  assert.match(text, /\n\nA note\.\nThe next step\.$/);
 });
 
-test("renderDraft calls out an unnamed recipient", () => {
-  const store = draftStub();
+test("a draft's text carries its notes and its next step word for word, an unnamed recipient's note included", async () => {
+  const server = fakeServer();
   const nobody = { chat_id: "40700999888@s.whatsapp.net", name: "40700999888", number: "40700999888" };
-  const text = renderDraft(store.view(store.put(nobody, { kind: "text", chatId: nobody.chat_id, text: "hi" })));
-  assert.match(text, /not a saved contact/);
+  registerTools(server, asToolSource(previewApi(nobody)), { allowWrite: true });
+  const drafted = await server.tools.get("send_message").handler({ chat_id: nobody.chat_id, text: "hi" });
+  const { notes, next } = drafted.structuredContent;
+  assert.match(notes.join(" "), /not a saved contact/);
+  for (const line of [...notes, next]) assert.ok(drafted.content[0].text.includes(line), line);
+  // One approval rule, whichever rendering a client reads.
+  assert.match(next, /a send asked in the same request that gave the text is that approval/);
 });
 
 /** Stand-in for McpServer: records what got registered and lets us call it. */

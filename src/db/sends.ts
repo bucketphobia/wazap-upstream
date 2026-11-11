@@ -261,6 +261,20 @@ export class Sends {
     });
   }
 
+  /**
+   * The pinned media (src/pinned-media.ts) a draft still waiting for its yes
+   * or a send under way names, by SHA-256: what must stay on disk.
+   */
+  pinnedMedia(now: number): string[] {
+    return this.c
+      .all<{ sha: string | null }>(
+        `SELECT json_extract(payload, '$.payload.pinned.sha256') AS sha FROM sends
+         WHERE kind = 'media' AND (state = 'sending' OR (state = 'draft' AND expires_at > ?))`,
+        now
+      )
+      .flatMap((row) => (typeof row.sha === "string" ? [row.sha] : []));
+  }
+
   /** Whether wazap let go of a send under this key in the last 90 days, its row swept or not. */
   wasSent(keyId: string): boolean {
     return this.c.get("SELECT 1 FROM sent_keys WHERE key_id = ?", keyId) !== undefined;

@@ -465,6 +465,8 @@ export interface WaitOptions {
   cursor?: string;
   /** Without a chat, a #private person's messages come without their words; a chat named reads whole. */
   private?: PrivateRule;
+  /** Ends the wait early, answering with what has arrived so far: the call was cancelled, or the server is shutting down. */
+  signal?: AbortSignal;
 }
 
 export interface WaitResult {
@@ -723,10 +725,89 @@ export interface MediaResult {
   mime: string;
   size: number;
   filename: string;
-  /** Base64 of images small enough to inline in the tool result. */
+  /** Base64 of the JPEG view of an image (src/images.ts), to attach to the tool result. */
   inline_base64: string | null;
   /** "kept": the copy wazap kept when the media arrived; "whatsapp": downloaded from WhatsApp now. */
   source: "kept" | "whatsapp";
+}
+
+/** How much of an image get_media's view keeps: standard (1,024 px) or high (2,048 px, for small print). */
+export type MediaDetail = "standard" | "high";
+
+/** Pages of a document, 1-based and inclusive; `to` null runs until the text budget is spent. */
+export interface PageRange {
+  from: number;
+  to: number | null;
+}
+
+export interface MediaOpenOptions {
+  /** Write the original into this absolute directory; <data-dir>/accounts/<id>/media when omitted. */
+  saveTo?: string;
+  /** Write no file at all: a remote session can never open one. */
+  noFile?: boolean;
+  detail?: MediaDetail;
+  pages?: PageRange;
+  /**
+   * The call was cancelled, or its session closed: the wait for a download
+   * slot, the download, a request to the phone and the work that draws or
+   * reads the file stop, and the call fails with the cancellation.
+   */
+  signal?: AbortSignal;
+}
+
+/** A JPEG made for the agent to look at. */
+export interface MediaPicture {
+  jpeg: Buffer;
+  width: number;
+  height: number;
+}
+
+/** What get_media shows of a message's media, beside the file itself. */
+export type MediaRendition =
+  /** An image (photo, sticker, image sent as a document), as a JPEG view. */
+  | (MediaPicture & {
+      kind: "image";
+      detail: MediaDetail;
+      original_width: number;
+      original_height: number;
+      frames?: number;
+      /** A long image shown cut into strips, side by side (columns) or one under another (rows). */
+      strips?: { count: number; layout: "columns" | "rows" };
+    })
+  /** A video, GIF or round video: frames across its length, tiled left to right, top to bottom. */
+  | (MediaPicture & { kind: "sheet"; frames_at: number[]; duration_seconds?: number })
+  /** One frame or the thumbnail WhatsApp shipped, when nothing better could be made. */
+  | (MediaPicture & { kind: "frame"; duration_seconds?: number })
+  /** A document's text, and a picture of its first asked page when there is one. */
+  | {
+      kind: "document";
+      format: string;
+      text: string | null;
+      /** Pages (a PDF), slides (a presentation) or parts (any other document longer than one answer) it has. */
+      pages_total?: number;
+      /** The pages, slides or parts whose text is returned. */
+      pages?: { from: number; to: number };
+      /** What `pages` counts here. */
+      unit?: "page" | "slide" | "part";
+      truncated: boolean;
+      /** The read failed (`note` says why), as opposed to a document with no text in it. */
+      unreadable?: boolean;
+      page_image?: MediaPicture & { page: number };
+      note?: string;
+    }
+  /** Nothing to show: `note` says why. */
+  | { kind: "none"; note: string };
+
+/** A message's media opened for get_media: the original's facts, where it was written (local calls), and what to show. */
+export interface OpenedMedia {
+  mime: string;
+  /** The original's bytes; when it was not downloaded (`source` absent), what its message states, if anything. */
+  size?: number;
+  /** Where the bytes came from; absent when nothing needed downloading (a Lottie sticker's thumbnail in a remote session). */
+  source?: "kept" | "whatsapp";
+  path?: string;
+  filename?: string;
+  rendition: MediaRendition;
 }
 
 /** How a caller spends a transcription. */
@@ -735,6 +816,14 @@ export interface TranscribeOptions {
   limit?: { take(): void };
   /** Only a transcript on hand; none on hand is TRANSCRIBE_UNAVAILABLE, and no provider runs. */
   cachedOnly?: boolean;
+  /**
+   * The caller stops waiting when it aborts. A run several callers share goes
+   * on for the rest; its download stops once every one has aborted, and a
+   * provider already running finishes, its transcript kept.
+   */
+  signal?: AbortSignal;
+  /** A person asked: a recording WhatsApp's CDN let go is asked of the phone again. */
+  reupload?: boolean;
 }
 
 export interface TranscribeResult {
@@ -828,6 +917,15 @@ export interface GroupActionResult {
 export interface MediaSource {
   file_path?: string;
   url?: string;
+  /** A file the call carried itself (send_message's data_base64), decoded. */
+  inline?: InlineMedia;
+}
+
+/** A file a remote agent sent in the call: its bytes, the name it gave, and the type when it said one. */
+export interface InlineMedia {
+  bytes: Buffer;
+  filename: string;
+  mime?: string;
 }
 
 /** Read results carry the sync state, so an agent knows the data may be partial. */
@@ -847,6 +945,12 @@ export interface UnconfirmedSend {
 }
 
 /** One page of a chat, and what the read cannot vouch for. */
+/** A read's time window: messages sent at or after sinceMs and at or before untilMs (epoch ms). */
+export interface ReadWindow {
+  sinceMs?: number;
+  untilMs?: number;
+}
+
 export interface ChatRead extends Synced<MessageView[]> {
   /** On the newest page of the chat: sends whose outcome is unknown, oldest first. */
   unconfirmedSends?: UnconfirmedSend[];
@@ -855,6 +959,21 @@ export interface ChatRead extends Synced<MessageView[]> {
    * messages: how many came back for it. None is not the start of the chat.
    */
   older?: { askedPhone: true; received: number };
+  /**
+   * A window read (ReadWindow): whether the window holds messages older than
+   * the page (`more`), and when the window reaches back past the chat's stored
+   * history (`startsInside`), the time and id of its oldest stored message of
+   * any type (`storedFrom`, epoch ms, and `storedFromId`; null and absent when
+   * nothing of the chat is stored).
+   */
+  window?: { more: boolean; storedFrom: number | null; storedFromId?: string; startsInside?: true };
+  /**
+   * Set when `types` left the page short and the walk past what they leave
+   * out stopped at its bound with older messages still stored: the id of the
+   * oldest message it looked at, which `before` goes on from. Older messages
+   * may still match; the page is not all there is.
+   */
+  scanStoppedAt?: string;
 }
 
 /** A keyword search's messages, and where the storage scan limit stopped it when it did. */
@@ -928,7 +1047,7 @@ export interface WhatsAppApi {
   link(phone: string): Promise<PairingInfo>;
   /** With `private`, a last message from someone tagged #private, or in their chat, comes without its words. */
   listChats(filter: ChatFilter, limit: number, opts?: { private?: PrivateRule; cursor?: string; tag?: string }): Promise<Synced<ChatSummary[]> & { nextCursor?: string | null }>;
-  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[]): Promise<ChatRead>;
+  readMessages(chatId: string, limit: number, before?: string, types?: MessageType[], window?: ReadWindow): Promise<ChatRead>;
   getRecentMessages(
     hours: number,
     filter: Exclude<ChatFilter, "archived">,
@@ -979,14 +1098,26 @@ export interface WhatsAppApi {
   /** updateContactDetails on several people at once, all or none. */
   updateManyContactDetails?(contactIds: readonly string[], edit: ContactDetailsEdit): Promise<ContactSummary[]>;
   getGroupInfo(groupId: string): Promise<GroupInfo>;
-  downloadMedia(messageId: string, saveTo?: string): Promise<MediaResult>;
+  /** With `signal`, a cancelled call stops the download instead of waiting for it. */
+  downloadMedia(messageId: string, saveTo?: string, opts?: { signal?: AbortSignal }): Promise<MediaResult>;
+  /** The original once, written where `opts` says, and what an agent can see of it; `opts.signal` stops the work when the call is cancelled. */
+  openMedia(messageId: string, opts: MediaOpenOptions): Promise<OpenedMedia>;
+  /** The original's bytes for a download link: no file written, nothing derived; `signal` stops the download when the link's fetch goes away. */
+  mediaOriginal(messageId: string, opts?: { signal?: AbortSignal }): Promise<{ buffer: Buffer; mime: string; filename: string | null }>;
+  /** The original's mime and filename from the message alone, nothing downloaded (a HEAD on a link); null when it carries no media. */
+  mediaOriginalInfo?(messageId: string): { mime: string; filename: string | null } | null;
+  /** What a download link names a message by (src/media-links.ts): its row and a tag of its id; null when it is not stored. */
+  mediaLinkRef?(messageId: string): { row: number; tag: string } | null;
+  /** The live message a link names, by row and tag; null when it is gone or is not that message. */
+  mediaLinkTarget?(row: number, tag: string): string | null;
   transcribeAudio(messageId: string, language?: string, opts?: TranscribeOptions): Promise<TranscribeResult>;
   waitForMessages(opts: WaitOptions): Promise<WaitResult>;
   /** With `private`, a story of someone tagged #private comes without its words. */
   getStories(hours: number, opts?: { private?: PrivateRule }): Promise<Synced<MessageView[]>>;
   setContactNote(contactId: string, note: string): Promise<ContactSummary>;
   markHandled(chatId: string): Promise<HandledResult>;
-  previews(messageIds: string[], max: number): Promise<Preview[]>;
+  /** `signal` is the read's: a cancelled read stops waiting for a download, a frame or a shrink, and answers with the cancellation. */
+  previews(messageIds: string[], max: number, signal?: AbortSignal): Promise<Preview[]>;
   getUnanswered(minAgeHours: number, maxAgeHours: number, limit: number, opts?: { private?: PrivateRule }): Promise<Synced<UnansweredChat[]>>;
   /**
    * `owner` is the MCP session drafting; only the same owner may confirm.

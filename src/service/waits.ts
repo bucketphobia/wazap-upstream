@@ -63,16 +63,19 @@ export class MessageWaits {
 
       let found = matching();
       let timedOut = false;
+      // A cancelled call, or a server draining before it stops, ends the wait
+      // now with what has arrived, as if the deadline had come.
+      const signal = opts.signal;
       if (found.length === 0) {
-        while (!this.host.stopped() && Date.now() < deadline) {
-          await this.nextArrival(deadline - Date.now());
+        while (!this.host.stopped() && !signal?.aborted && Date.now() < deadline) {
+          await this.nextArrival(deadline - Date.now(), false, signal);
           found = matching();
           if (found.length > 0) break;
         }
         if (found.length === 0) timedOut = true;
       }
-      if (found.length > 0) {
-        await this.nextArrival(Math.min(ARRIVAL_SETTLE_MS, Math.max(0, deadline - Date.now())), true);
+      if (found.length > 0 && !signal?.aborted) {
+        await this.nextArrival(Math.min(ARRIVAL_SETTLE_MS, Math.max(0, deadline - Date.now())), true, signal);
         found = matching();
       }
       const last = found.length > 0 ? found[found.length - 1]!.seq : Math.max(since, this.arrivalSeq);
@@ -125,20 +128,23 @@ export class MessageWaits {
     return { seq, reset: false };
   }
 
-  /** Resolves on the next arrival or after `ms`; a settle rides out the burst and ends only on the deadline or a stop. */
-  private nextArrival(ms: number, settle = false): Promise<void> {
+  /** Resolves on the next arrival or after `ms`; a settle rides out the burst and ends only on the deadline, a stop or `signal`. */
+  private nextArrival(ms: number, settle = false, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
       const waiter = (): void => {
         if (!settle || this.host.stopped()) done();
       };
       const done = (): void => {
         clearTimeout(timer);
+        signal?.removeEventListener("abort", done);
         const at = this.arrivalWaiters.indexOf(waiter);
         if (at !== -1) this.arrivalWaiters.splice(at, 1);
         resolve();
       };
       const timer = setTimeout(done, Math.max(0, ms));
       this.arrivalWaiters.push(waiter);
+      if (signal?.aborted) done();
+      else signal?.addEventListener("abort", done, { once: true });
     });
   }
 

@@ -457,6 +457,8 @@ export function renderFindContact(structured: Record<string, unknown>): string {
       if (filed !== null) lines.push(filed);
       if (unsearched !== null) lines.push(unsearched);
       if (structured.context !== undefined) lines.push(...renderContext(structured.context as DraftContext, contact.name));
+      // The step after, word for word what the structured answer says: send_message now, or that this connection cannot.
+      if (typeof structured.next === "string") lines.push(structured.next);
       return lines.join("\n");
     }
     case "ambiguous": {

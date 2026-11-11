@@ -9,8 +9,8 @@ Deliverable: decisions, dates, and what is asked of the user, in that order, wit
 
 ## Load the whole window
 
-1. Resolve the group with `list_chats` `filter: "groups"` (match on name; ask if two match). `get_group_info` once for the participant names and who the admins are; use names, not numbers, in the summary.
-2. `read_messages` with `limit: 200`. If the oldest message is still inside the window the user asked for, call again with `before` set to that oldest `message_id`, until the window is covered. Done loading when the oldest message you hold is older than the window, or WhatsApp returns no more.
+1. Pass the group's name as `chat_id` to `read_messages`: it reads the one group that name means, and the answer's `resolved` says which. A `CHAT_NOT_FOUND` with `candidates` means two chats share the name: ask which, never pick. (`list_chats` `filter: "groups"` lists them too.) `get_group_info` once for the participant names and who the admins are; use names, not numbers, in the summary.
+2. `read_messages` with `limit: 200` and the window the user asked for as `since` (and `until`), ISO dates or times like `search` takes: "this week" is `since: "<Monday's date>"`. When the answer says `more_in_window`, call again with `before` set to the oldest `message_id` and the same window, until it no longer does. A note that the chat's stored history starts inside the window means `before` with the same `since` asks the phone for the rest. Without a window, page with `before` until the oldest message you hold is older than the window, or WhatsApp returns no more.
 3. Note which messages quote or mention the user: `quoted.sender` equal to the user, the user's name in `text`, or `sender` addressing them directly. These are the **asks**.
 
 ## Extract

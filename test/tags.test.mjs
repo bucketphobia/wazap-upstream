@@ -70,7 +70,7 @@ test("a person's tags ride along in list_chats, read_messages, search and catch_
 
   const chats = await call("list_chats", { filter: "individual" });
   assert.deepEqual(chats.structuredContent.chats[0].tags, ["autoturism", "client"]);
-  assert.match(chats.content[0].text, /## Ana \(\+40 700 000 002\) · #autoturism #client · dosar deschis/);
+  assert.match(chats.content[0].text, /\n- Ana \(\+40 700 000 002\) · #autoturism #client · dosar deschis · /);
 
   const read = await call("read_messages", { chat_id: ANA });
   assert.deepEqual(read.structuredContent.messages[0].sender.tags, ["autoturism", "client"]);

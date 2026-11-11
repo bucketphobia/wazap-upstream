@@ -11,6 +11,7 @@ import { WhatsAppService } from "../dist/whatsapp.js";
 import { clockLabel } from "../dist/messages.js";
 import { registerTools } from "../dist/tools.js";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { Readable } from "node:stream";
 
 import { asToolSource, connectedService } from "./helpers.mjs";
 
@@ -172,6 +173,164 @@ test("two callers wanting the same recording share one upload", async () => {
   );
   assert.equal(first.text, "salut");
   assert.equal(second.text, "salut");
+  await svc.stop();
+});
+
+/** A download that takes `ms` and stops when its signal aborts, the way WhatsApp's stops at its next chunk. */
+function slowDownload(svc, ms) {
+  const seen = { signals: [], stopped: 0 };
+  svc.mediaBuffer = (_sock, _id, _raw, _maxBytes, opts = {}) => {
+    const { signal } = opts;
+    seen.signals.push(signal);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Buffer.from("not really an ogg file")), ms);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          seen.stopped++;
+          reject(signal.reason);
+        },
+        { once: true }
+      );
+    });
+  };
+  return seen;
+}
+
+const cancelled = (err) => err.code === "TIMEOUT" && /cancelled/.test(err.message);
+
+test("a caller that cancels a run others share leaves it going: the download goes on and they all get the transcript", async () => {
+  const { svc, sock } = serviceWith(MANUAL);
+  const provider = mockProvider({ delayMs: 5 });
+  svc.transcriber = provider.transcribe;
+  const download = slowDownload(svc, 150);
+  deliver(sock, [voiceNote("VC1", { seconds: 6 })]);
+
+  const cancel = new AbortController();
+  const starter = svc.transcribeAudio(sidOf("VC1"), undefined, { signal: cancel.signal });
+  await sleep(20);
+  // Another session's get_media, still waiting, and the auto queue, which never cancels.
+  const other = new AbortController();
+  const tool = svc.transcribeAudio(sidOf("VC1"), undefined, { signal: other.signal });
+  const queue = svc.transcribeAudio(sidOf("VC1"));
+  await sleep(20);
+  const at = Date.now();
+  cancel.abort();
+  await assert.rejects(starter, cancelled);
+  assert.ok(Date.now() - at < 100, "the caller that cancelled stops waiting at once");
+  assert.equal((await tool).text, "salut");
+  assert.equal((await queue).text, "salut");
+  assert.equal(download.stopped, 0, "the shared download was not stopped");
+  assert.equal(provider.state.calls, 1);
+  await svc.stop();
+});
+
+test("once every caller of a run has cancelled, its download stops, nothing is paid for, and the next ask starts afresh", async () => {
+  const { svc, sock } = serviceWith(MANUAL);
+  const provider = mockProvider({ delayMs: 5 });
+  svc.transcriber = provider.transcribe;
+  const download = slowDownload(svc, 300);
+  deliver(sock, [voiceNote("VC2", { seconds: 6 })]);
+
+  const first = new AbortController();
+  const second = new AbortController();
+  const a = svc.transcribeAudio(sidOf("VC2"), undefined, { signal: first.signal });
+  await sleep(20);
+  const b = svc.transcribeAudio(sidOf("VC2"), undefined, { signal: second.signal });
+  await sleep(20);
+  first.abort();
+  await assert.rejects(a, cancelled);
+  assert.equal(download.stopped, 0, "one caller is still waiting");
+  second.abort();
+  await assert.rejects(b, cancelled);
+  await sleep(10);
+  assert.equal(download.stopped, 1, "the last caller gone stops the download");
+  assert.equal(provider.state.calls, 0);
+
+  const again = await svc.transcribeAudio(sidOf("VC2"));
+  assert.equal(again.text, "salut");
+  assert.equal(download.signals.length, 2, "a fresh run, not the abandoned one");
+  assert.equal(provider.state.calls, 1);
+  await svc.stop();
+});
+
+test("a caller that cancels while the provider runs stops waiting at once, and the transcript is kept", async () => {
+  const { svc, sock } = serviceWith(MANUAL);
+  const provider = mockProvider({ delayMs: 400 });
+  svc.transcriber = provider.transcribe;
+  slowDownload(svc, 1);
+  deliver(sock, [voiceNote("VC3", { seconds: 6 })]);
+
+  const cancel = new AbortController();
+  const started = Date.now();
+  const call = svc.transcribeAudio(sidOf("VC3"), undefined, { signal: cancel.signal });
+  while (provider.state.running === 0 && Date.now() - started < 2_000) await sleep(5);
+  assert.equal(provider.state.running, 1);
+  cancel.abort();
+  await assert.rejects(call, cancelled);
+  assert.ok(Date.now() - started < 300, `settled ${Date.now() - started} ms in, before the provider's 400 ms`);
+  // Asked again while the provider still runs: it joins that run, never a second upload.
+  const later = await svc.transcribeAudio(sidOf("VC3"));
+  assert.equal(later.text, "salut");
+  assert.equal(provider.state.calls, 1);
+  assert.equal((await svc.transcribeAudio(sidOf("VC3"))).cached, true);
+  await svc.stop();
+});
+
+/** The error Baileys' getHttpStream throws for a CDN status: a Boom, with the code in output.statusCode. */
+const cdnError = (statusCode) =>
+  Object.assign(new Error("Failed to fetch stream from https://mmg.whatsapp.net/x"), { isBoom: true, output: { statusCode } });
+
+test("get_media joining the queue's run asks the phone itself when that run finds WhatsApp's copy expired", async () => {
+  const { svc, sock } = serviceWith(MANUAL);
+  const provider = mockProvider({ delayMs: 5 });
+  svc.transcriber = provider.transcribe;
+  const audio = { mimetype: "audio/ogg; codecs=opus", ptt: true, seconds: 6, url: "https://mmg.whatsapp.net/old", directPath: "/old", mediaKey: Buffer.alloc(32, 7) };
+  deliver(sock, [{ ...voiceNote("VX1", { seconds: 6, at: Date.now() - 60 * 86_400_000 }), message: { audioMessage: audio } }]);
+  // The CDN let the old path go; the phone's fresh upload serves the file.
+  const opened = [];
+  svc.openMediaStream = async (message) => {
+    const path = message.message.audioMessage.directPath;
+    opened.push(path);
+    await sleep(60);
+    if (path === "/old") throw cdnError(404);
+    return Readable.from([Buffer.from("not really an ogg file")]);
+  };
+  const asked = [];
+  sock.updateMediaMessage = async (message) => {
+    asked.push(message.key.id);
+    message.message.audioMessage.directPath = "/fresh";
+    message.message.audioMessage.url = "https://mmg.whatsapp.net/fresh";
+    return message;
+  };
+
+  // The queue's run (no re-request, as background work never wakes the phone), then a person's get_media.
+  const queue = svc.transcribeAudio(sidOf("VX1"));
+  await sleep(20);
+  const tool = svc.transcribeAudio(sidOf("VX1"), undefined, { reupload: true, signal: new AbortController().signal });
+  await assert.rejects(queue, (err) => err.code === "MEDIA_UNAVAILABLE");
+  const answer = await tool;
+  assert.equal(answer.text, "salut", "the expired copy did not end the person's call");
+  assert.deepEqual(asked, ["VX1"], "the phone was asked once, for the person's call");
+  assert.deepEqual(opened, ["/old", "/old", "/fresh"], "the shared run, then the call's own, which asked the phone and retried");
+  assert.equal(provider.state.calls, 1);
+
+  // A run that fails some other way is not retried: the caller gets that failure.
+  deliver(sock, [{ ...voiceNote("VX2", { seconds: 6 }), message: { audioMessage: { ...audio, directPath: "/broken" } } }]);
+  svc.openMediaStream = async () => {
+    opened.push("/broken");
+    await sleep(60);
+    throw cdnError(500);
+  };
+  opened.length = 0;
+  const second = svc.transcribeAudio(sidOf("VX2"));
+  await sleep(20);
+  const person = svc.transcribeAudio(sidOf("VX2"), undefined, { reupload: true, signal: new AbortController().signal });
+  await assert.rejects(second, (err) => err.code === "MEDIA_UNAVAILABLE");
+  await assert.rejects(person, (err) => err.code === "MEDIA_UNAVAILABLE");
+  assert.deepEqual(opened, ["/broken"], "one download, shared");
+  assert.deepEqual(asked, ["VX1"]);
   await svc.stop();
 });
 
@@ -374,7 +533,7 @@ test("get_media spends a bucket of its own only on a provider run, ten a minute,
   const getMedia = (id, tools = server) => tools.tools.get("get_media").handler({ message_id: sidOf(id) });
 
   const first = await getMedia("V1");
-  assert.equal(first.content[0].text, 'Transcribed 0:06 (ro, openai): "salut"');
+  assert.equal(first.content[0].text, `voice ${sidOf("V1")} · from +40 700 000 002\nTranscribed 0:06 (ro, openai): "salut"`);
   // A transcript on hand is no run: asked again and again, it costs nothing.
   for (let call = 0; call < 15; call++) assert.equal((await getMedia("V1")).structuredContent.transcript.cached, true);
   for (let n = 2; n <= 10; n++) assert.equal((await getMedia(`V${n}`)).structuredContent.transcript.cached, false, `V${n}`);

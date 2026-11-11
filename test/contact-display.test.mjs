@@ -59,13 +59,14 @@ test("actual chat and group reads preserve structured ids while their person lab
   svc.db.messages.upsert({ chatJid: PN, keyId: "DISPLAY", fromMe: false, ts: Date.now(), type: "text", text: "salut" });
   const { call } = schemaCheckedTools(svc, { allowWrite: false });
   const chats = await call("list_chats", {});
-  assert.match(chats.content[0].text, /## Ana \(\+40 722 123 456\)/);
+  assert.match(chats.content[0].text, /\n- Ana \(\+40 722 123 456\) · 40722123456@s\.whatsapp\.net · /);
   assert.equal(chats.structuredContent.chats[0].chat_id, PN);
   const person = { contact_id: PN, name: "Ana", is_admin: false };
   svc.getGroupInfo = async () => ({ chat_id: GROUP, name: "Bloc", participant_count: 2, participants: [person, { contact_id: LID, name: "Dan", is_admin: true }], description: null, owner: null, created_at: null, announcement_only: false, i_am_admin: false, info_locked: false, member_add_mode: "all", join_approval: false, disappearing_seconds: 0 });
   const group = await call("get_group_info", { group_id: GROUP });
   assert.ok(!group.isError, JSON.stringify(group));
-  assert.match(group.content[0].text, /- Ana \(\+40 722 123 456\)\n {2}contact_id: 40722123456@s.whatsapp.net\n- Dan \(admin\)/);
+  // A number is how a person is named and reached; a LID, with no number to show, by its id.
+  assert.match(group.content[0].text, /- Ana \(\+40 722 123 456\)\n- Dan \(\d+@lid\) \(admin\)/);
   assert.deepEqual(group.structuredContent.participants[0], person);
 });
 

@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { z } from "zod";
 import type { AccountSource } from "./account-hub.js";
 import { attachAccountId, resolveToolAccount, stringArg } from "./account-resolve.js";
-import { CLIENT_META_KEY, isAssistantClient, LOCAL_CLIENT, localClient } from "./client-name.js";
+import { CLIENT_META_KEY, isAssistantClient, LOCAL_CLIENT, localClient, type AnswerFormat } from "./client-name.js";
 import { draftStale, SessionDrafts } from "./drafts.js";
-import { asWazapError, WazapError } from "./errors.js";
+import { asWazapError, ERROR_GUIDE, WazapError } from "./errors.js";
 import { RateLimiter } from "./ratelimit.js";
 import { requireDraftOwner } from "./send-guard.js";
 import { requireChatAction, staleChatAction } from "./chat-action-drafts.js";
-import { publishToolCatalogue } from "./tool-catalogue.js";
+import { buildToolCatalogue, publishToolCatalogue } from "./tool-catalogue.js";
+import type { MediaLinks } from "./media-links.js";
 import type { WhatsAppApi } from "./wa-types.js";
 
 export type ContentBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
@@ -26,6 +28,20 @@ export type ToolArgs = Record<string, unknown>;
 export interface ToolCtx {
   /** Give remote connectors workflows that work with their cached read names. */
   legacyReads?: boolean;
+  /**
+   * What the session's client receives of each answer (client-name.ts): the
+   * text alone, or the text and the structured content. What a budget
+   * (catch_up's) is spent on. `full` when absent.
+   */
+  format?: AnswerFormat;
+  /**
+   * Whether the session may touch this machine's files (RegisterOpts.allowLocalFiles):
+   * stdio and the daemon's own bridge. A remote session is shown media, never
+   * handed a path it cannot open, and nothing is written for it.
+   */
+  localFiles?: boolean;
+  /** Signed links to originals: a remote session on a server with a public URL (src/media-links.ts). */
+  mediaLinks?: MediaLinks;
   /** Internal only: the cached multi-account adapter finalizes all sources together after its awaits. */
   deferSearchFinalization?: boolean;
   wa: WhatsAppApi;
@@ -53,6 +69,18 @@ export interface ToolCtx {
    * catch_up keeps its mark under.
    */
   client: string;
+  /**
+   * Aborts when the client cancels this call or its session closes. A wait
+   * honours it by stopping early (wait_for_messages, a download, a
+   * transcription another call started); nothing that writes does.
+   */
+  signal?: AbortSignal;
+  /**
+   * Aborts when the server serving this session is shutting down: a wait
+   * answers now with what it has, so the shutdown need not wait out its
+   * timeout. Unlike `signal`, the answer is still delivered.
+   */
+  stopping?: AbortSignal;
 }
 
 /** MCP tool annotations, stated per tool for its most far-reaching action. */
@@ -83,6 +111,12 @@ export interface ToolDef {
 export interface RegisterOpts {
   /** Remote connectors may retain the pre-1.0 read catalogue until refreshed. */
   legacyReads?: boolean;
+  /**
+   * The session's answer format, decided at its initialize (client-name.ts).
+   * `text`: no tool is registered or listed with an outputSchema and no answer
+   * carries structured content, only its text and image blocks. `full` when absent.
+   */
+  format?: AnswerFormat;
   allowWrite: boolean;
   /**
    * The credential's right to change local state (see ToolCtx.allowLocalEdits).
@@ -92,6 +126,8 @@ export interface RegisterOpts {
   allowLocalEdits?: boolean;
   /** Trusted local stdio defaults to true; every HTTP session explicitly sets its capability. */
   allowLocalFiles?: boolean;
+  /** Where get_media mints links to originals; only a remote session on a server with a public URL has it. */
+  mediaLinks?: MediaLinks;
   /** Tool calls this session may have running at once. */
   maxInFlight?: number;
   /** Tool calls every session together may have running at once. */
@@ -105,15 +141,48 @@ export interface RegisterOpts {
    * drafts owned by this registration alone.
    */
   draftIdentity?: string;
+  /** See ToolCtx.stopping: the HTTP endpoint's shutdown. */
+  stopping?: AbortSignal;
+  /** Told when each call starts running and when it settles: what the HTTP endpoint's shutdown waits on. */
+  calls?: CallTracker;
+}
+
+/** Tool calls under way somewhere, counted as they start and settle. */
+export interface CallTracker {
+  begin(): void;
+  end(): void;
+}
+
+/**
+ * Where a text-format answer keeps the structured content it does not send:
+ * a symbol, so it never reaches the wire (JSON drops it) but an in-process
+ * observer of the registered handler — the evaluation's trace — still reads
+ * what the call answered.
+ */
+export const STRUCTURED_COPY: unique symbol = Symbol.for("wazap/structured-copy");
+
+/**
+ * An answer as a text-format session receives it: its text and image blocks,
+ * no structured content. Every renderer puts what an agent needs to act in
+ * its text (tools.ts), so nothing a follow-up call takes is lost.
+ */
+export function textOnly(result: ToolResult): ToolResult {
+  const { structuredContent, ...rest } = result;
+  return structuredContent === undefined ? rest : { ...rest, [STRUCTURED_COPY]: structuredContent };
 }
 
 /** Agents fan out: Claude Code routinely sends several tool calls at once, and wait_for_messages holds one for up to 55 s. */
 const MAX_IN_FLIGHT = 8;
 const MAX_IN_FLIGHT_TOTAL = 32;
 
+/**
+ * A refusal as `{ error, message, fix }`: the error's own fix, or else what
+ * the guide says to do about its code (ERROR_GUIDE), so every refusal says
+ * what to do, an unexpected exception (WHATSAPP_ERROR) included.
+ */
 export function toolError(err: WazapError): ToolResult {
-  const payload: Record<string, unknown> = { error: err.code, message: err.message };
-  if (err.fix) payload.fix = err.fix;
+  const payload: Record<string, unknown> = { error: err.code, message: err.message, fix: err.fix || ERROR_GUIDE[err.code] };
+  if (err.details !== undefined) Object.assign(payload, err.details);
   return { content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload, isError: true };
 }
 
@@ -144,7 +213,32 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
       def.rate === undefined ? [] : [[def.name, new RateLimiter(def.rate, undefined, rateLabel(def.name))] as const]
     )
   );
-  return function registerTools(server: McpServer, hub: AccountSource, opts: RegisterOpts): void {
+  // tools/list for each permission key, built on the first session that has
+  // it: converting every zod schema to JSON Schema is most of what an
+  // initialize costs, and the answer is the same for every such session.
+  const catalogues = new Map<string, readonly Tool[]>();
+  const catalogueFor = (registered: readonly ToolDef[], opts: Pick<RegisterOpts, "allowWrite" | "legacyReads" | "allowLocalFiles" | "format">): readonly Tool[] => {
+    // Which definitions register depends on allowWrite and legacyReads alone; allowLocalFiles hides the
+    // host-file arguments, and a text-format session is listed no outputSchema.
+    const format = opts.format ?? "full";
+    const key = `${opts.allowWrite}:${opts.legacyReads === true}:${opts.allowLocalFiles !== false}:${format}`;
+    let tools = catalogues.get(key);
+    if (tools === undefined) {
+      tools = buildToolCatalogue(registered, opts.allowLocalFiles !== false, format);
+      catalogues.set(key, tools);
+    }
+    return tools;
+  };
+  /** The definitions a session with these permissions registers. */
+  const selected = (opts: Pick<RegisterOpts, "allowWrite" | "legacyReads">): ToolDef[] =>
+    defs.filter((def) => (opts.allowWrite || !def.write) && (opts.legacyReads === true || !def.legacyRead));
+  /**
+   * What tools/list hands a session with these permissions: the very array
+   * registerTools publishes, so a fingerprint of it (server.ts's session
+   * shape) changes whenever any tool's description or schema does.
+   */
+  const catalogue = (opts: Pick<RegisterOpts, "allowWrite" | "legacyReads" | "allowLocalFiles" | "format">): readonly Tool[] => catalogueFor(selected(opts), opts);
+  function registerTools(server: McpServer, hub: AccountSource, opts: RegisterOpts): void {
     // A session's drafts answer to its draft identity: a remote credential's
     // stable one where the server names it, so an async confirm over a fresh
     // HTTP connection still owns the draft, and otherwise an opaque id minted
@@ -162,26 +256,21 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
       const session = (server as { server?: { getClientVersion?(): { name?: string } | undefined } }).server;
       return localClient(extra?._meta?.[CLIENT_META_KEY] ?? session?.getClientVersion?.()?.name);
     };
-    const registered: ToolDef[] = [];
-    for (const def of defs) {
-      if (def.write && !opts.allowWrite) continue;
-      if (def.legacyRead && !opts.legacyReads) continue;
-      registered.push(def);
+    const registered = selected(opts);
+    const text = opts.format === "text";
+    for (const def of registered) {
       const own = buckets.get(def.name);
       server.registerTool(
         def.name,
         {
           title: def.title,
-          description:
-            def.description +
-            (opts.allowLocalFiles === false && (def.schema.file_path || def.schema.save_to)
-              ? "\nThis remote session cannot use file_path or save_to. Use public HTTP(S) URLs, forward existing messages, or get_media without save_to."
-              : ""),
+          description: def.description,
           inputSchema: def.schema,
-          ...(def.outputSchema === undefined ? {} : { outputSchema: def.outputSchema }),
+          // The SDK refuses an answer without structured content from a tool that declares a shape.
+          ...(def.outputSchema === undefined || text ? {} : { outputSchema: def.outputSchema }),
           annotations: def.hints,
         },
-        async (args: unknown, extra?: { _meta?: Record<string, unknown> }): Promise<ToolResult> => {
+        async (args: unknown, extra?: { _meta?: Record<string, unknown>; signal?: AbortSignal }): Promise<ToolResult> => {
           const call = sessionDrafts.startCall();
           const parsed = (args ?? {}) as ToolArgs;
           let resolved: { id: string; wa: WhatsAppApi } | undefined;
@@ -193,13 +282,14 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
             }
             inFlight++;
             sessionInFlight++;
+            opts.calls?.begin();
             admitted = true;
             // Reject before any lookup/stat/read/write, including directory overrides on read tools.
             if (opts.allowLocalFiles === false && (parsed.file_path !== undefined || parsed.save_to !== undefined)) {
               throw new WazapError(
                 "MEDIA_ACCESS_DENIED",
                 "This MCP session cannot access arbitrary host files or choose download directories.",
-                "Use a public HTTP(S) media URL, forward an existing WhatsApp message, or get_media without save_to"
+                "Use a public HTTP(S) media URL or send_message's data_base64 (up to 5 MB), forward an existing WhatsApp message, or get_media without save_to"
               );
             }
             own?.take();
@@ -247,6 +337,9 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
             }
             const result = await def.handler(parsed, {
               legacyReads: opts.legacyReads === true,
+              format: opts.format ?? "full",
+              localFiles: opts.allowLocalFiles !== false,
+              ...(opts.allowLocalFiles === false && opts.mediaLinks !== undefined ? { mediaLinks: opts.mediaLinks } : {}),
               wa: resolved.wa,
               hub,
               allowWrite: opts.allowWrite,
@@ -254,23 +347,28 @@ export function createToolRegistrar(defs: readonly ToolDef[]) {
               accountId: resolved.id,
               draftOwner,
               client: clientOf(extra),
+              ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+              ...(opts.stopping === undefined ? {} : { stopping: opts.stopping }),
             });
             const draftId = result.structuredContent?.status === "draft" ? result.structuredContent.draft_id : undefined;
             if (typeof draftId === "string") sessionDrafts.note(draftId, call);
             const confirmationId = result.structuredContent?.status === "preview" ? result.structuredContent.confirmation_id : undefined;
             if (def.name === "manage_chat" && typeof confirmationId === "string") sessionDrafts.note(confirmationId, call);
-            return attachAccountId(result, resolved.id);
+            const answer = attachAccountId(result, resolved.id);
+            return text ? textOnly(answer) : answer;
           } catch (err) {
             const id = resolved?.id ?? stringArg(parsed, "account_id");
-            if (def.outputSchema !== undefined) return schemaSafeError(asWazapError(err), id);
+            if (def.outputSchema !== undefined || text) return schemaSafeError(asWazapError(err), id);
             const result = toolError(asWazapError(err));
             return id === undefined ? result : attachAccountId(result, id);
           } finally {
-            if (admitted) { inFlight--; sessionInFlight--; }
+            if (admitted) { inFlight--; sessionInFlight--; opts.calls?.end(); }
           }
         }
       );
     }
-    publishToolCatalogue(server, registered, opts.allowLocalFiles !== false);
-  };
+    // Small test doubles only collect handlers and have no catalogue to publish.
+    if ((server as { server?: unknown }).server !== undefined) publishToolCatalogue(server, catalogueFor(registered, opts));
+  }
+  return Object.assign(registerTools, { catalogue });
 }

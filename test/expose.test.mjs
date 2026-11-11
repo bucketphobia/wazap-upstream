@@ -21,7 +21,7 @@ function dataDir() {
 let nextPort = 42_000;
 
 function config(dir, overrides = {}) {
-  return { dataDir: dir, httpPort: nextPort++, dryRun: false, args: [], oauthPassword: null, ...overrides };
+  return { dataDir: dir, httpPort: nextPort++, dryRun: false, args: [], oauthPassword: null, sources: { port: "flag" }, ...overrides };
 }
 
 function fakeSupervisor(dir) {
@@ -310,7 +310,8 @@ test("the real providers are a registry of two, each naming its own binary", () 
     ["tailscale", "cloudflare"]
   );
   assert.equal(PROVIDERS[0].command(8766), null, "tailscaled holds the funnel itself");
-  assert.deepEqual(PROVIDERS[1].command(8766).slice(1), ["tunnel", "run", "--url", "http://127.0.0.1:8766", "wazap"]);
+  // A self-update would restart the tunnel under every call it carries; the supervisor and the package manager own that.
+  assert.deepEqual(PROVIDERS[1].command(8766).slice(1), ["tunnel", "--no-autoupdate", "run", "--url", "http://127.0.0.1:8766", "wazap"]);
 });
 
 test("cloudflare is not ready until `cloudflared tunnel login` has been run", () => {

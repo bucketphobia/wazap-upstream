@@ -37,7 +37,9 @@ import { asWazapError, WazapError } from "../errors.js";
 import { isGroupId } from "../ids.js";
 import { logError } from "../logger.js";
 import { isoWithOffset, messageIdFor, messageText, messageTimestampMs } from "../messages.js";
-import { asGifMedia, assertMediaSource, describe, loadMedia, mediaContent } from "../outgoing-media.js";
+import { asGifMedia, assertMediaSource, captionTravels, describe, loadMedia, mediaContent, type LoadedMedia } from "../outgoing-media.js";
+import type { PinnedMedia, PinnedStore } from "../pinned-media.js";
+import type { MediaNetwork } from "../safe-media.js";
 import { videoFrame } from "../previews.js";
 import { SCHEDULE_MIN_AHEAD_MS } from "../schedule-time.js";
 import type { EmbedFeed } from "../recall/index.js";
@@ -100,6 +102,10 @@ export interface SendsHost {
   keepsHistory(): boolean;
   /** Throws ACCOUNT_RESTRICTED when WhatsApp forbids this account a first message to `jid` right now. */
   refuseNewChat(jid: string, sock: WASocket): Promise<void>;
+  /** Where media a draft fetched or was given waits for its send (src/pinned-media.ts). */
+  pinned(): PinnedStore;
+  /** The URL fetch's network, a test seam only (src/safe-media.ts); nothing an MCP call reaches sets it. */
+  mediaNetwork?(): Partial<MediaNetwork>;
 }
 
 export class AccountSends {
@@ -121,29 +127,82 @@ export class AccountSends {
       if (schedule !== undefined) payload = await this.schedulable(payload);
       const sock = this.host.ensureConnected();
       const jid = await this.assertOutgoing(payload.chatId, sock);
-      let stored: DraftPayload = { ...payload, chatId: jid };
-      if (payload.kind === "forward") {
-        this.views.contentOrThrow(payload.messageId);
-        stored = { ...payload, chatId: jid, text: (await this.host.getMessage(payload.messageId)).text };
-      } else if (payload.kind === "text" && payload.mentionIds?.length) {
-        // Mentions resolve here, and the text gains each @<user> it lacks, so the
-        // preview is the text that leaves and each token matches its mentionedJid.
-        const mentionIds = payload.mentionIds.map((id) => this.identity.resolveId(id));
-        stored = { ...payload, chatId: jid, mentionIds, text: withMentionTokens(payload.text, mentionIds) };
+      // A URL is fetched now and the call's own file kept now: the preview names what they are, and the send sends exactly that.
+      let pinned: PinnedMedia | undefined;
+      if (payload.kind === "media" && (payload.source.url !== undefined || payload.source.inline !== undefined)) {
+        pinned = await this.pin(payload);
+        payload = { ...payload, source: payload.source.url === undefined ? {} : { url: payload.source.url }, pinned };
       }
-      // The key is fixed now, so a confirm whose outcome is lost can still be recognised by it.
-      const keyId = generateMessageIDV2(this.identity.ownJid());
-      return this.host
-        .drafts()
-        .view(this.host.drafts().put(this.host.db().sends, this.outgoingOf(jid), stored, keyId, owner ?? null, schedule));
+      try {
+        return await this.store(payload, jid, owner, schedule);
+      } finally {
+        if (pinned !== undefined) this.host.pinned().release(pinned.sha256);
+      }
+    });
+  }
+
+  /**
+   * Fetches a draft's URL (through the public-address guard, src/safe-media.ts)
+   * or takes the call's own file, tells what it is by its bytes, and keeps it
+   * under its SHA-256 until the draft is sent, lapses or is cancelled.
+   */
+  private async pin(payload: Extract<DraftPayload, { kind: "media" }>): Promise<PinnedMedia> {
+    const loaded: LoadedMedia = await loadMedia(payload.source, undefined, this.host.mediaNetwork?.() ?? {});
+    // A caption WhatsApp would not show is refused, not dropped, now that the file says what it is.
+    if (payload.caption !== undefined && !captionTravels(loaded.mimetype, payload)) {
+      throw new WazapError(
+        "INVALID_ID",
+        `text does not apply to this file: it is ${loaded.mimetype}, which WhatsApp shows with no caption.`,
+        "Send the words as their own send_message, or pass as: \"document\" to send the file as a document with its caption"
+      );
+    }
+    const pinned = await this.host.pinned().pin(loaded.buffer, loaded.mimetype, loaded.filename);
+    const from = loaded.url === undefined ? "" : URL.parse(loaded.url)?.host ?? "";
+    return from === "" ? pinned : { ...pinned, fetchedFrom: from };
+  }
+
+  private async store(payload: DraftPayload, jid: string, owner: string | undefined, schedule: DraftSchedule | undefined): Promise<DraftView> {
+    let stored: DraftPayload = { ...payload, chatId: jid };
+    if (payload.kind === "forward") {
+      this.views.contentOrThrow(payload.messageId);
+      stored = { ...payload, chatId: jid, text: (await this.host.getMessage(payload.messageId)).text };
+    } else if (payload.kind === "text" && payload.mentionIds?.length) {
+      // Mentions resolve here, and the text gains each @<user> it lacks, so the
+      // preview is the text that leaves and each token matches its mentionedJid.
+      const mentionIds = payload.mentionIds.map((id) => this.identity.resolveId(id));
+      stored = { ...payload, chatId: jid, mentionIds, text: withMentionTokens(payload.text, mentionIds) };
+    }
+    // The key is fixed now, so a confirm whose outcome is lost can still be recognised by it.
+    const keyId = generateMessageIDV2(this.identity.ownJid());
+    const draft = this.host.drafts().put(this.host.db().sends, this.outgoingOf(jid), stored, keyId, owner ?? null, schedule);
+    if (stored.kind === "media" && stored.pinned !== undefined) {
+      // A draft nobody confirms takes its file with it when it lapses; an older one the caps evicted, now.
+      setTimeout(() => void this.collectPinned(), Math.max(0, draft.expiresAt - Date.now()) + 1000).unref();
+      void this.collectPinned();
+    }
+    return this.host.drafts().view(draft);
+  }
+
+  /**
+   * Removes the pinned files no draft waiting for a yes, no send under way and
+   * no scheduled message waiting names any more: after a send, a lapse, a
+   * cancel, and at the start for what a crash left. Never throws.
+   */
+  collectPinned(): Promise<void> {
+    return this.host.pinned().sweep(() => {
+      const db = this.host.readyDb();
+      // Without the database nothing can be judged unreferenced: keep everything this time.
+      if (db === null) return null;
+      const now = Date.now();
+      return new Set([...db.sends.pinnedMedia(now), ...db.schedule.pinnedMedia()]);
     });
   }
 
   /**
    * What a draft for later must hold so the message that leaves is the one the
-   * user approved: a URL is refused (its bytes are whoever serves it then), a
-   * file is pinned by its SHA-256, and a reply or a forward needs an account
-   * that keeps the message it names until then.
+   * user approved: a URL or the call's own file is fetched and kept now (see
+   * pin), a file on this machine is pinned by its SHA-256, and a reply or a
+   * forward needs an account that keeps the message it names until then.
    */
   private async schedulable(payload: DraftPayload): Promise<DraftPayload> {
     if ((payload.kind === "forward" || (payload.kind === "text" && payload.replyTo !== undefined)) && !this.host.keepsHistory()) {
@@ -153,14 +212,7 @@ export class AccountSends {
         "Send it now without send_at, or schedule a plain message"
       );
     }
-    if (payload.kind !== "media") return payload;
-    if (payload.source.url !== undefined) {
-      throw new WazapError(
-        "INVALID_TIME",
-        "A scheduled message cannot take media from a URL: what the URL serves when it goes may not be what was approved.",
-        "Download it and pass file_path, or send it now without send_at"
-      );
-    }
+    if (payload.kind !== "media" || payload.source.file_path === undefined) return payload;
     const digest = createHash("sha256").update(await readFile(payload.source.file_path!)).digest("hex");
     return { ...payload, sha256: digest };
   }
@@ -249,6 +301,15 @@ export class AccountSends {
   }
 
   private async sendClaimed(draft: Draft, notAfter?: number): Promise<SentMessage> {
+    try {
+      return await this.sendClaimedOnce(draft, notAfter);
+    } finally {
+      // Sent, unknown or given back: whatever names the file now says whether it stays.
+      if (draft.payload.kind === "media" && draft.payload.pinned !== undefined) void this.collectPinned();
+    }
+  }
+
+  private async sendClaimedOnce(draft: Draft, notAfter?: number): Promise<SentMessage> {
     const attempt: SendAttempt = { keyId: draft.keyId, dispatched: false, ...(notAfter === undefined ? {} : { notAfter }) };
     let sent: SentMessage;
     try {
@@ -319,6 +380,8 @@ export class AccountSends {
     } catch (err) {
       logError("send record", err);
     }
+    // Files a crash or a stop left without a draft, or a database set aside took with it.
+    setImmediate(() => void this.collectPinned());
   }
 
   /** An unknown send whose message is stored is sent. */
@@ -362,12 +425,16 @@ export class AccountSends {
   sendMedia(
     chatId: string,
     source: MediaSource,
-    opts: { caption?: string; asDocument: boolean; asVoice: boolean; asGif: boolean; sha256?: string },
+    opts: { caption?: string; asDocument: boolean; asVoice: boolean; asGif: boolean; sha256?: string; pinned?: PinnedMedia },
     attempt?: SendAttempt
   ): Promise<SentMessage> {
     return this.host.guarded(async () => {
       const { sock, jid } = await this.prepareSend(chatId);
-      const loaded = await loadMedia(source);
+      // Pinned when drafted: exactly those bytes, checked against their hash; the URL is not fetched again.
+      const loaded: LoadedMedia =
+        opts.pinned === undefined
+          ? await loadMedia(source)
+          : { buffer: await this.host.pinned().read(opts.pinned), mimetype: opts.pinned.mime, filename: opts.pinned.filename };
       if (opts.sha256 !== undefined && createHash("sha256").update(loaded.buffer).digest("hex") !== opts.sha256) {
         throw new WazapError(
           "FILE_NOT_FOUND",
@@ -440,7 +507,11 @@ export class AccountSends {
       }
       const raw = this.views.messageOrThrow(messageId);
       if (!raw.key.fromMe) {
-        throw new WazapError("NOT_OWN_MESSAGE", `Message ${messageId} was not sent by the linked account.`);
+        throw new WazapError(
+          "NOT_OWN_MESSAGE",
+          `Message ${messageId} was not sent by the linked account.`,
+          "Only the account's own messages can be edited, admin or not: send a new message instead. Do not retry"
+        );
       }
       const age = Date.now() - messageTimestampMs(raw);
       if (age > EDIT_WINDOW_MS) {
@@ -497,6 +568,7 @@ export class AccountSends {
             asVoice: payload.asVoice,
             asGif: payload.asGif,
             ...(payload.sha256 === undefined ? {} : { sha256: payload.sha256 }),
+            ...(payload.pinned === undefined ? {} : { pinned: payload.pinned }),
           },
           attempt
         );

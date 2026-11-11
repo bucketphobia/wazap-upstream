@@ -88,8 +88,8 @@ Cursor installs from a link:
 It carries the same entry `connect` writes; `node scripts/badges.mjs` reprints it.
 
 Any other MCP client works the same way: the command is `npx -y wazap-mcp`, the
-transport is stdio. Tell the agent to call `learn` first — it returns the id
-formats, the workflows and every error code with what to do about it.
+transport is stdio. The agent calls `learn` when it is unsure: its topics are
+the id formats, the workflows and every error code with what to do about it.
 
 <details>
 <summary>The raw entries, for editing by hand</summary>

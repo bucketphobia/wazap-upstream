@@ -936,7 +936,8 @@ test("an explicit window keeps every open ask in waiting and marks the ones aske
   const older = quiet.structuredContent.waiting;
   assert.deepEqual(older.map((entry) => entry.chat).sort(), [ANA, DAN].sort(), "an open ask stays, whatever the window");
   assert.ok(older.every((entry) => entry.before_window === true && entry.new === undefined), JSON.stringify(older));
-  assert.match(text(quiet), /Nothing arrived in this window; still waiting from before it:/);
+  // The text says it in the very words of the note.
+  assert.match(text(quiet), /\nNothing arrived in this window: every waiting entry was asked before it and is still open\.\n## Waiting on you/);
   assert.match(text(quiet), /from before this window/);
   assert.match((quiet.structuredContent.notes ?? []).join(" "), /Nothing arrived in this window: every waiting entry was asked before it and is still open\./);
 
@@ -965,7 +966,7 @@ test("a disconnected account is reported as such, not as nothing new, and its ma
   assert.equal(first.mark.why, "not_connected");
   assert.match(first.status_since, /^\d{4}-/);
   assert.equal(second.mark.moved, true);
-  assert.match(text(result), /- Personal \(personal\): .* · disconnected since \S+: what arrived after that is not here yet/);
+  assert.match(text(result), /\npersonal is disconnected since \S+: what arrived after that is not here yet\.\n/);
   assert.match((result.structuredContent.notes ?? []).join(" "), /personal is disconnected since \S+: what arrived after that is not here yet/, "said in the structured content too");
   assert.equal(personal.svc.db.catchup.get("local"), null);
 });
@@ -994,6 +995,7 @@ function busyAccount({ people = 14, at = Date.now() - 5 * HOUR } = {}) {
 }
 
 test("the budget: the skeleton first, then quotes by priority, the lowest shrinking to 80 characters and then going", async () => {
+  const TIGHT = 2_400;
   const { svc } = busyAccount({ people: 14 });
   const { call } = toolsOf(svc);
   const roomy = await call("catch_up", { hours: 24, budget_tokens: 8000 });
@@ -1003,9 +1005,10 @@ test("the budget: the skeleton first, then quotes by priority, the lowest shrink
   assert.ok(roomy.structuredContent.direct.every((entry) => entry.q.length === 160));
   assert.ok(roomy.structuredContent.groups.every((entry) => entry.hot === undefined || entry.hot.length === 120));
 
-  const tight = await call("catch_up", { hours: 24, budget_tokens: 1000 });
+  // A full session spends the budget on its structured JSON, at 2.2 characters a token.
+  const tight = await call("catch_up", { hours: 24, budget_tokens: TIGHT });
   assert.equal(tight.structuredContent.more, null, "the skeleton fits");
-  assert.ok(tight.structuredContent.approx_tokens <= 1000, `${tight.structuredContent.approx_tokens} tokens`);
+  assert.ok(tight.structuredContent.approx_tokens <= TIGHT, `${tight.structuredContent.approx_tokens} tokens`);
   // Every entry that quotes with room to spare, in priority order, and the length its quote kept.
   const quoted = (result) =>
     [
@@ -1041,7 +1044,7 @@ test("a digest longer than the budget pages with a cursor that sees the same win
   let page = await call("catch_up", { budget_tokens: 500 });
   const pages = [page];
   assert.ok(page.structuredContent.more, "it does not fit in 500 tokens");
-  assert.match(text(page), /More: \d+ entries left \(.*\)\. Call catch_up with cursor: "/);
+  assert.match(text(page), /More entries are left: call catch_up with more\.cursor for them\. \d+ entries left \(.*\); more\.cursor: "/);
   assert.match((page.structuredContent.notes ?? []).join(" "), /call catch_up with more\.cursor/, "said in the structured content too");
   assert.equal(page.structuredContent.accounts[0].mark.why, "more_pages");
   assert.equal(page.structuredContent.footer, null);
@@ -1138,7 +1141,7 @@ test("with several accounts, an account failing after the first page skips none 
     throw new Error("database closed");
   };
   while (page.structuredContent.more) {
-    page = await call("catch_up", { cursor: page.structuredContent.more.cursor, budget_tokens: 600 });
+    page = await call("catch_up", { cursor: page.structuredContent.more.cursor, budget_tokens: 1200 });
     pages.push(page);
     assert.ok(pages.length < 20, "pages end");
   }
@@ -1263,6 +1266,8 @@ test("every shape catch_up answers passes a client's validation of its output sc
   arrive(NEIGHBOURS, { extendedTextMessage: { text: "mulțumim, am primit cei 300 lei", contextInfo: { stanzaId: paid.split("_").pop(), participant: ME, quotedMessage: { conversation: "am plătit întreținerea" } } } }, { participant: DAN, at: Date.now() - 2 * HOUR });
   arrive(NEIGHBOURS, mention("@Răzvan am lăsat cheia la administrator, treci după 18:00"), { participant: ELA, at: Date.now() - 2 * HOUR + 1000 });
   for (let i = 0; i < 3; i++) arrive(MUTED, `vecinii discută ${i}`, { participant: DAN, at: Date.now() - 2 * HOUR + i * 1000 });
+  // A group that only chats: its hot quote is its own, with the message's id when ids are asked for.
+  arrive("120363000000000006@g.us", "Mâine la 9 vine tehnicianul pentru centrala de la subsol", { participant: DAN, at: Date.now() - 2 * HOUR });
   arrive(LEFT, "cine mai vine?", { participant: DAN, at: Date.now() - HOUR });
   arrive(CHANNEL, "Știrile zilei", { at: Date.now() - HOUR });
   arrive("40712345678@broadcast", "ofertă", { at: Date.now() - HOUR });
@@ -1293,6 +1298,7 @@ test("every shape catch_up answers passes a client's validation of its output sc
   let page = check(await client.callTool({ name: "catch_up", arguments: { budget_tokens: 500 } }));
   while (page.structuredContent.more) page = check(await client.callTool({ name: "catch_up", arguments: { cursor: page.structuredContent.more.cursor, budget_tokens: 500 } }));
   check(await client.callTool({ name: "catch_up", arguments: { hours: 24, budget_tokens: 8000 } }));
+  check(await client.callTool({ name: "catch_up", arguments: { hours: 24, budget_tokens: 8000, ids: true } }));
   check(await client.callTool({ name: "catch_up", arguments: { hours: 1, budget_tokens: 8000 } }));
   work.svc.status = "disconnected";
   work.svc.statusSince = Date.now() - HOUR;
@@ -1319,6 +1325,54 @@ test("every shape catch_up answers passes a client's validation of its output sc
   }
 });
 
+test("budget_tokens is spent on what the session receives, at 2.2 characters a token: the text, or the structured JSON", async () => {
+  const { CHARS_PER_TOKEN } = await import("../dist/catchup.js");
+  assert.equal(CHARS_PER_TOKEN, 2.2);
+  const { svc } = busyAccount({ people: 30 });
+  for (const budget of [1500, 2500]) {
+    // A text session gets the text alone; a full one the text and the JSON, and the JSON is what is counted.
+    const asText = await toolsOf(svc, { format: "text" }).call("catch_up", { hours: 24, budget_tokens: budget });
+    assert.equal(asText.structuredContent, undefined);
+    const text = asText.content[0].text;
+    assert.ok(text.length <= budget * CHARS_PER_TOKEN, `text session, budget ${budget}: ${text.length} characters`);
+    assert.ok(text.length >= budget * CHARS_PER_TOKEN * 0.7, `text session, budget ${budget}: only ${text.length} characters, the budget is spent`);
+    const full = await toolsOf(svc).call("catch_up", { hours: 24, budget_tokens: budget });
+    const json = JSON.stringify(full.structuredContent).length;
+    assert.ok(json <= budget * CHARS_PER_TOKEN * 1.05, `full session, budget ${budget}: ${json} characters of JSON`);
+    assert.ok(full.structuredContent.approx_tokens <= budget * 1.05, `${full.structuredContent.approx_tokens} tokens`);
+    assert.ok(text.length > full.content[0].text.length, "the same budget holds more entries as text than as JSON");
+  }
+});
+
+test("with several accounts, a full session's pages stay within budget_tokens: each account's window, state and mark are counted", async () => {
+  const { CHARS_PER_TOKEN } = await import("../dist/catchup.js");
+  const { personal, work } = twoAccounts();
+  const shop = account({ id: "40700000098@s.whatsapp.net", name: "Magazin", account: { id: "shop", name: "Magazinul de pe colț", enabled: true, owner: null } });
+  const hub = hubOf({ id: "personal", name: "Personal", svc: personal.svc }, { id: "work", name: "Business", svc: work.svc }, { id: "shop", name: "Magazinul de pe colț", svc: shop.svc });
+  for (const [n, side] of [personal, work, shop].entries()) {
+    for (let i = 0; i < 10; i++) {
+      side.arrive(`4071${n}00${String(1000 + i)}@s.whatsapp.net`, `Mesajul ${i}: ${"poți să-mi trimiți oferta pentru luna viitoare, te rog. ".repeat(2)}`, { at: Date.now() - 3 * HOUR + i * 1000 });
+    }
+  }
+  // An account that is down adds its status_since to its entry.
+  work.svc.status = "disconnected";
+  work.svc.statusSince = Date.now() - 5 * HOUR;
+  const { call } = toolsOf(hub);
+  // Three accounts' frame alone is about 1,200 characters: from 700 tokens up, a page holds it and entries.
+  for (const budget of [700, 850, 1000, 1500, 2500]) {
+    const result = await call("catch_up", { hours: 24, budget_tokens: budget });
+    const structured = result.structuredContent;
+    assert.equal(structured.accounts.length, 3);
+    assert.ok(structured.accounts.every((entry) => entry.window !== undefined), "each account names its own window");
+    assert.ok(structured.accounts.some((entry) => entry.status_since !== undefined));
+    const json = JSON.stringify(structured).length;
+    assert.ok(json <= budget * CHARS_PER_TOKEN, `budget ${budget}: ${json} characters of JSON, over ${budget * CHARS_PER_TOKEN}`);
+    assert.ok(structured.approx_tokens <= budget, `budget ${budget}: approx_tokens ${structured.approx_tokens}`);
+    if (budget <= 1000) assert.ok(structured.more !== null, `budget ${budget} pages`);
+    assert.ok(["waiting", "direct"].some((key) => structured[key].length > 0), `budget ${budget}: entries beside the frame`);
+  }
+});
+
 test("the structured answer carries the same entries as the text, in at most 1.3 times its size", async () => {
   const { svc, arrive, mention, callLog, sock } = busyAccount({ people: 6 });
   const { call } = toolsOf(svc);
@@ -1326,7 +1380,8 @@ test("the structured answer carries the same entries as the text, in at most 1.3
   arrive(MUTED, mention("@Răzvan cheia?"), { participant: ELA, at: Date.now() - HOUR });
   callLog(DAN, CALL.MISSED, { at: Date.now() - 2 * HOUR });
   arrive(STATUS, { extendedTextMessage: { text: "la mare" } }, { participant: ANA, at: Date.now() - HOUR });
-  for (const budget of [800, 2500, 8000]) {
+  // A budget too small for more than the frame (window, accounts, marks) is no test of the entries' size.
+  for (const budget of [1500, 2500, 8000]) {
     const result = await call("catch_up", { hours: 24, budget_tokens: budget });
     const size = JSON.stringify(result.structuredContent).length;
     assert.ok(size <= 1.3 * text(result).length, `budget ${budget}: ${size} structured vs ${text(result).length} text`);
@@ -1410,4 +1465,74 @@ test("HTTP sessions catch up under the credential's name, never the token", asyn
   const broken = await client.callTool({ name: "catch_up", arguments: {} });
   assert.equal(broken.isError, true);
   assert.equal(JSON.parse(broken.content[0].text).error, "WHATSAPP_ERROR");
+});
+
+test("ids: every entry names the message it quotes and its newest media by message_id, ready for get_media; without ids none does", async () => {
+  const { svc, arrive, mention } = account();
+  const { call } = toolsOf(svc);
+  const ask = arrive(ANA, "Îmi trimiți factura până mâine?", { at: Date.now() - 3 * HOUR });
+  const after = arrive(ANA, "Am lăsat și dosarul la birou ieri seară.", { at: Date.now() - 2 * HOUR });
+  const photo = arrive(DAN, { imageMessage: { mimetype: "image/jpeg", caption: "contorul" } }, { at: Date.now() - 2 * HOUR });
+  const pdf = arrive(DAN, { documentMessage: { mimetype: "application/pdf", fileName: "extras.pdf" } }, { at: Date.now() - 90 * 60_000 });
+  const newest = arrive(DAN, "Ți-am trimis poza și extrasul de cont de luna trecută.", { at: Date.now() - HOUR });
+  const mentioned = arrive(GROUP, mention("@40700000001 vii la ședința de mâine?"), { participant: ELA, at: Date.now() - HOUR });
+  const groupPhoto = arrive(GROUP, { imageMessage: { mimetype: "image/jpeg" } }, { participant: DAN, at: Date.now() - 30 * 60_000 });
+  arrive(GROUP, { audioMessage: { mimetype: "audio/ogg; codecs=opus", ptt: true, seconds: 4 } }, { participant: DAN, at: Date.now() - 25 * 60_000 });
+  arrive(GROUP, "Acesta e un mesaj destul de lung ca să fie citat din grup", { participant: DAN, at: Date.now() - 20 * 60_000 });
+
+  const plain = await call("catch_up", { hours: 12 });
+  assert.doesNotMatch(JSON.stringify(plain.structuredContent), /"(id|then_id|media_ids)"/);
+  assert.doesNotMatch(text(plain), / · (id|media) (true|false)_/);
+
+  const result = await call("catch_up", { hours: 12, ids: true });
+  (await listedSchema()).assertValid(result.structuredContent);
+  const waiting = result.structuredContent.waiting.find((entry) => entry.chat === ANA);
+  assert.equal(waiting.id, ask);
+  assert.equal(waiting.then_id, after);
+  // A mention that asks the user is an open ask in the group: either way the entry names the message.
+  const asked = [...result.structuredContent.addressed, ...result.structuredContent.waiting].find((entry) => entry.chat === GROUP);
+  assert.equal(asked.id, mentioned);
+  const people = result.structuredContent.direct.find((entry) => entry.chat === DAN);
+  assert.equal(people.id, newest);
+  assert.deepEqual(people.media_ids, [pdf, photo], "newest first");
+  const group = result.structuredContent.groups.find((entry) => entry.chat === GROUP);
+  assert.deepEqual(group.media_ids, [groupPhoto], "a voice note is a transcript (the footer names those), not a media id");
+  assert.match(text(result), new RegExp(`${ANA.replace(/[.]/g, "\\.")} · id ${ask} · then id ${after}`));
+  assert.match(text(result), new RegExp(` · media ${groupPhoto}`));
+  // Each id opens the message it names.
+  const opened = await svc.getMessage(waiting.id);
+  assert.equal(opened.text, "Îmi trimiți factura până mâine?");
+});
+
+test("ids never name what someone #private sent: no id on their entries, no media of theirs in a group", async () => {
+  const { svc, arrive } = account();
+  const { call } = toolsOf(svc);
+  arrive(ANA, "Îmi trimiți factura?", { at: Date.now() - 2 * HOUR });
+  arrive(ANA, { imageMessage: { mimetype: "image/jpeg" } }, { at: Date.now() - HOUR });
+  arrive(GROUP, { imageMessage: { mimetype: "image/jpeg" } }, { participant: ANA, at: Date.now() - HOUR });
+  const open = arrive(GROUP, { imageMessage: { mimetype: "image/jpeg" } }, { participant: DAN, at: Date.now() - 50 * 60_000 });
+  arrive(GROUP, "Un mesaj de grup destul de lung ca să fie citat", { participant: DAN, at: Date.now() - 40 * 60_000 });
+  await call("remember", { chat_id: ANA, add_tags: ["private"] });
+  const result = await call("catch_up", { hours: 12, ids: true });
+  const theirs = [...result.structuredContent.waiting, ...result.structuredContent.direct].filter((entry) => entry.chat === ANA);
+  assert.ok(theirs.length > 0);
+  for (const entry of theirs) {
+    assert.equal(entry.private, true);
+    assert.equal(entry.id, undefined);
+    assert.equal(entry.media_ids, undefined);
+  }
+  assert.deepEqual(result.structuredContent.groups.find((entry) => entry.chat === GROUP).media_ids, [open]);
+  assert.doesNotMatch(text(result), new RegExp(`false_${ANA.replace(/[.]/g, "\\.")}_`));
+});
+
+test("ids stay on every page of a digest that pages", async () => {
+  const { svc, arrive } = account();
+  const { call } = toolsOf(svc);
+  for (let i = 0; i < 40; i++) arrive(`4070000${String(1000 + i)}@s.whatsapp.net`, `Mesajul numărul ${i}, fără întrebare`, { at: Date.now() - HOUR + i * 1000 });
+  const first = await call("catch_up", { hours: 12, ids: true, budget_tokens: 500 });
+  assert.ok(first.structuredContent.more, "the digest pages");
+  const next = await call("catch_up", { cursor: first.structuredContent.more.cursor, budget_tokens: 2000 });
+  const quoted = next.structuredContent.direct.filter((entry) => entry.q !== undefined);
+  assert.ok(quoted.length > 0);
+  assert.ok(quoted.every((entry) => /^false_\d+@s\.whatsapp\.net_M\d+$/.test(entry.id)), JSON.stringify(quoted));
 });

@@ -12,11 +12,27 @@ another write token, or an anonymous reader (when enabled) could use a write
 session if it obtained its id. GET and DELETE were affected too. The tests do
 not demonstrate a way to steal a session id.
 
-Sessions now bind to a SHA-256 fingerprint of the exact bearer credential and
-its effective read/write permission. Foreign credentials receive 404 and cannot
-touch the session's idle timeout or transport. Every request still authenticates:
-expired/revoked tokens receive 401. OAuth token rotation requires reinitializing.
-The session registry and lifecycle live in `src/http-sessions.ts`.
+Sessions now bind to the credential and its effective read/write permission:
+a static token by its SHA-256 fingerprint, an OAuth agent by its grant (client
+id and granted scopes), so an access-token rotation keeps the session while a
+narrower refresh does not. Foreign credentials receive 404 and cannot touch the
+session's idle timeout or transport. Every request still authenticates:
+expired/revoked tokens receive 401. The session registry and lifecycle live in
+`src/http-sessions.ts`.
+
+Session ids are `<uuid>.<mark>`, the mark an HMAC-SHA256 (128 bits) over the
+uuid, that owner and a digest of what the session handed its client (tools,
+workflows, instructions), keyed by `<data-dir>/session.key`
+(`src/session-id.ts`). A POST or GET carrying an id the process does not hold
+is revived only when the mark verifies for the presenting owner and for what
+wazap would hand it now, so a revival never serves a client tools or
+instructions it was not given: another credential, an anonymous
+reader, a random, altered or foreign-key id all still receive 404, and an id
+live under another owner stays a 404 as before. An id its owner ended with
+DELETE is remembered (the last 1,024, in memory) and never revived; another
+credential's DELETE ends nothing. Revivals count against the
+session caps and are logged without the id. Tests:
+`test/session-revival.test.mjs`.
 
 Regression tests: `test/session-isolation.test.mjs`, `test/oauth.test.mjs`, and
 existing lifecycle tests in `test/daemon.test.mjs`. Ten of the eleven initial
@@ -93,9 +109,10 @@ WhatsApp operations to demonstrate access without transmitting anything.
 
 HTTP sessions now reject `file_path` and `save_to` before account lookup or any
 filesystem call. This applies to static tokens and OAuth, even when the peer is
-loopback. Public URLs, forwarding, and default-directory downloads remain
-available. Remote tools advertise this restriction. No public setting or tool
-argument overrides it.
+loopback. Public URLs and forwarding remain available, and `get_media` writes
+nothing to disk for a remote session and names no server path (section 22).
+Remote tools advertise this restriction. No public setting or tool argument
+overrides it.
 
 Local stdio retains intentional file access. The generated private daemon token
 is explicitly marked with a local-files capability so stdio bridges keep working;
@@ -109,6 +126,19 @@ Existing redirect/private-peer tests also pass. Untrusted MIME subtypes are now
 restricted to a short alphanumeric download extension; previously backslashes
 could enter generated filenames (path separators on Windows). Tests reproduce
 that filename issue, not a live Windows exploit.
+
+`send_message` with `url` fetches the file when the message is drafted, not at
+`confirm_send`, so the preview names the real file and the send sends those
+bytes. That fetch comes before the user's yes: an agent a message talked into
+drafting one makes the server reach a public host the sender chose, which
+learns the server's address (the tunnel otherwise hides it), and keeps up to
+the media cap under `accounts/<id>/outgoing/` until the draft lapses (an
+account's kept files hold at most 1 GB, an identity at most 20 drafts). The
+address guard still refuses private and loopback addresses. The preview says
+so (`…, already fetched from example.com`), so the user sees where the file
+came from before saying yes; after a redirect it names the host the bytes came
+from and the one asked (`…, already fetched from cdn.example (via
+example.com)`). Tests: `test/pinned-media.test.mjs`.
 
 ## 5. Cross-account write preflight — hardened
 
@@ -602,13 +632,24 @@ Five initial budget regressions failed; separate raw HTTP tests also reproduced
 anonymous initialization with a foreign Origin or attacker-controlled Host.
 
 - MCP POST authentication precedes JSON parsing. Bodies are explicitly capped at
-  100 KiB and compressed bodies are refused. Each exact credential gets 240 POSTs
+  100 KiB and compressed bodies are refused; only a write credential's POST that
+  declares its length may carry up to 8 MiB (send_message's `data_base64`), with
+  at most 32 MiB of such bodies in flight across the process (503 past it);
+  `test/inline-media.test.mjs`. The OAuth routes, which parse
+  before any credential is checked with the SDK's default-inflate parsers, now
+  refuse a compressed body (415) and a declared length over 64 KiB (413) before
+  reading it (body-parser GHSA-27r3-jxmh-p828); `test/oauth.test.mjs`. Each owner (a static token's
+  fingerprint, or an OAuth grant: every token of one client id with the same
+  scopes counts as one) gets 240 POSTs
   per minute across session resets (fixed since the 1.0 settings cut; it was `WAZAP_HTTP_BUDGET`); 429 includes `Retry-After`. The endpoint's
   credential-window map is capped at 1,024 entries, pruning expired entries and
   refusing new ones with 503 rather than growing indefinitely.
-- Session state remains capped at 128 overall, now also at 32 per exact
-  credential. Excess sessions first evict that credential's oldest session, so
-  one unchanged token cannot consume the entire registry.
+- Session state is capped at 64 overall (this note once said 128, which the
+  code never allowed), and at 32 per owner. Excess sessions first evict that credential's least recently used
+  session, so one unchanged token cannot consume the entire registry; a session answering a request is
+  evicted only when every candidate is. A revival never evicts one (it is refused with 404 instead), and a
+  GET revives only into a free place, so a GET reconnect cannot set off an eviction loop
+  (`test/session-eviction.test.mjs`).
 - Actual tool handlers have eight in-flight slots per MCP session and 32
   process-wide (fixed since the 1.0 settings cut; they were `WAZAP_MAX_INFLIGHT` and `WAZAP_MAX_INFLIGHT_TOTAL`). Capacity is returned when work settles, even if the caller
   disconnects earlier. HTTP, stdio and private bridges share the tool budget.
@@ -621,8 +662,9 @@ anonymous initialization with a foreign Origin or attacker-controlled Host.
   not ambient browser authority and retains its existing host/proxy behavior.
 
 These are bounded resource controls, not DDoS protection, fair scheduling or
-multi-tenant isolation. Credential rotation creates a different credential;
-anonymous callers and clients sharing a token share budgets. Anonymous access
+multi-tenant isolation. Rotating a static token creates a different credential;
+an OAuth access-token rotation does not, since the budget follows the grant.
+Anonymous callers and clients sharing a token share budgets. Anonymous access
 is still not authentication: a proxy can rewrite headers, and non-browser callers
 can set them. Always configure credentials for proxies/tunnels. Tests:
 `test/request-budgets.test.mjs`, session isolation and existing daemon lifecycle
@@ -807,6 +849,146 @@ files no record names: the next start removes them, so a number linking back
 finds its history without them. SHA-256 checks run on the event loop, on files
 of at most `WAZAP_MEDIA_KEEP_MAX_MB`.
 Tests: `test/kept-media.test.mjs`.
+
+## 22. Remote media: views, documents and signed links
+
+`get_media` shows a remote agent what media holds instead of naming a file on
+the server, which makes every received photo, PDF and Office file input that
+wazap parses, and the parsed text input to the agent.
+
+- **Parsers, bounded.** Images go through sharp (libvips), two jobs at once
+  process-wide (each holds one of libuv's four threads, which fs, dns and
+  zlib share) with a 20-second timeout: an input claiming more than 100 MP is
+  refused before decoding, and WebP, GIF, HEIF and TIFF, which libvips decodes
+  whole, more than 25 MP; a PNG, GIF or WebP's size is read from its own
+  header before libvips sees it, since libvips decodes a WebP whole even to
+  report its size (a 36-byte WebP of 100 MP took 400 MB to be measured). Only
+  the first frame of an animation is read. An SVG is never drawn in the
+  server's process: librsvg draws a filter in one go that libvips' timeout
+  cannot interrupt (a 1.6 KB SVG of ten filtered rects held a thread for 34 s
+  and stalled file reads for 39 s), so `src/svg-raster.ts` draws it in a child
+  node process killed after 10 s or 512 MB, and previews never draw one.
+  PDFs are read by pdf.js (unpdf, no native code; it does parse embedded font
+  programs, but registers no font with the system) and Office and OpenDocument
+  files by wazap's own ZIP reader, both in a worker thread with a 384 MB heap
+  cap and a 20-second limit, at most two at a time; a file over 50 MB is not
+  read. The heap cap does not count the ArrayBuffers pdf.js unpacks a stream
+  into, and a 4 MB PDF whose font inflates to 4 GB once drove the process to
+  3 GB. Two things bound that. First, before pdf.js sees a PDF, the worker
+  unpacks its streams through their filters (Flate, LZW as pdf.js reads it,
+  Brotli, run-length, ASCII85, hex, chained) with a cap of 64 MB per stream
+  and 256 MB in all, keeping nothing, and refuses the file past either. Each
+  stream's dictionary is parsed forward from its `N G obj` with strict PDF
+  syntax (strings, comments, nesting, `#`-escaped names); a dictionary that
+  does not read cleanly fails closed, its data measured as every filter that
+  can expand it; streams whose bodies overlap past four times the file are
+  refused, so the check stays one pass. Images and embedded files whose
+  dictionary reads cleanly are skipped. This is a first line: a crafted file
+  can still label a font as an image, or hide a dictionary inside a string, and
+  get a stream past it. Second, and the real bound: while a worker runs, the
+  process's resident memory is read every 100 ms and the worker stopped past
+  512 MB of growth. The ZIP reader refuses more than 10,000 entries, an entry
+  that inflates past 20 MB (60 MB in all) or past 200:1, and one whose
+  inflated size differs from what it states (`maxOutputLength`, so a lie stops
+  at one byte over). pdftoppm, Quick Look, sips and ffmpeg run as child
+  processes on a private temporary copy with a timeout and a memory limit read
+  from the system while they run (512 MB for a page render, 1 GB for ffmpeg
+  and sips; `VmRSS` in kB on Linux, since statm counts pages of 16 or 64 KiB
+  on some arm64 kernels; `ps` on macOS; `tasklist` on Windows), one page
+  render and two of the others at a time, ffmpeg with the
+  input whitelists of section 8; a PDF page is drawn only after its text was
+  read, and never when the read refused the file or outgrew its memory, so one
+  PDF has one parser holding memory at a time. The worker's console is
+  silenced and its stdout drained, so nothing it prints reaches the MCP
+  channel. Tests: `test/pdf-guard.test.mjs` (bombs in each filter, dictionaries
+  written to hide one, pdf.js's LZW, overlapping streams, the memory watches),
+  `test/media-documents.test.mjs` (zip bombs, a lying size, a PDF bomb through
+  `get_media`, a read the watch stops is not drawn), `test/images.test.mjs` (a
+  20,000 x 20,000 PNG header, WebP and GIF headers, a slow SVG),
+  `test/native-run.test.mjs` (each platform's reading, a child killed past
+  its limit).
+- **The text is the sender's.** Document text, transcripts and text in images
+  can carry instructions aimed at an agent with other tools. They come back in
+  their own field (`document_text`), quoted between markers in the text, never
+  in `notes`; a note and the server's instructions, which every session gets,
+  say it is data, not instructions. The lines above the quote repeat the
+  sender's file name, caption, declared type and name; each is kept to its one
+  line (line breaks and control characters become spaces), the file name
+  quoted whole and the caption marked as the sender's, so none can add a line
+  that reads as a note of wazap's or as its link to the original. wazap's own
+  notes about a file (a type it makes nothing of, an image it cannot decode,
+  an archive entry it refused) are kept to one line too, in the text and in
+  `notes`, and name the declared type only when it reads `type/subtype`.
+  Tests: `test/media-documents.test.mjs`.
+- **No copies for remote sessions.** A remote `get_media` used to write a new,
+  unrecorded copy of the file into `accounts/<id>/media/` on every call;
+  nothing swept them, and they outlived deleted and expired messages. A remote
+  call now writes nothing and returns no path.
+- **Downloads from WhatsApp's CDN only.** The media node of a message (`url`,
+  `directPath`) is the sender's to write, inside the encrypted message, and
+  Baileys fetches `url` as it is when there is no `directPath`, and
+  `https://<url's host><directPath>` otherwise. A stranger's photo naming
+  `http://192.168.1.1/cgi?action=x` was fetched on arrival (kept media) and
+  again by `get_media`, previews and download links: a blind GET to any host,
+  port and path, and the server's real address told to the sender's host,
+  which the tunnel otherwise hides. Before Baileys sees the message, a `url`
+  is kept only over https on `*.whatsapp.net` at its own port without
+  credentials, and a `directPath` (or a sticker's `thumbnailDirectPath`) only
+  as a path: one leading `/`, no `//`, `@`, `\`, space or control character.
+  Anything else is set to null, so Baileys builds the URL on
+  `mmg.whatsapp.net` or fails before opening a socket (`MEDIA_UNAVAILABLE`).
+  Baileys opens at most five wrappers (ephemeral, view-once, edited...) and
+  opens them again when it downloads, so a node that is not a photo, video,
+  audio, document or sticker after five (media six wrappers deep) is handed
+  over as null: nothing in it is cleaned, so nothing in it is fetched.
+  Tests: `test/media-cdn.test.mjs` (a listener on loopback is never reached,
+  on arrival or by `get_media`; media six wrappers deep is never fetched).
+- **Downloads, bounded.** At most three downloads at once and 300 MB declared in
+  flight across the process; a download quiet for 30 s or running past 3
+  minutes is stopped; the 100 MB in-memory cap is checked before and during the
+  download. Expired media is asked of the phone again only when a person asked
+  for it, at most ten times a minute per account, with a 20-second limit.
+- **Signed links.** With `WAZAP_PUBLIC_URL` set, a remote `get_media` also
+  returns a link to the original, valid 30 minutes, served at
+  `GET /media/<token>` without a bearer token: the token is the capability. It
+  is HMAC-SHA256 under a 32-byte secret made once per install
+  (`media-links.key`, `0600`, never logged; written whole to a temporary file and
+  renamed into place, a short one replaced, and when it cannot be kept the
+  server runs without links rather than not starting), over the account, the message's row
+  and a 72-bit tag of its id (the id itself, which spells a phone number, is not
+  in the URL), and the expiry; it is compared in constant time, and the message
+  is looked up again at each fetch, so a forged, expired or tampered link, an
+  account not on this server and a message deleted, expired or cleared since
+  are all the same 404. The file goes out as `Content-Disposition: attachment`
+  with `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src
+  'none'; sandbox`, `Cache-Control: private, no-store` and
+  `Referrer-Policy: no-referrer`, so a sender's HTML is never rendered on the
+  origin of the OAuth consent page. The route has its own rate limit (120
+  requests per 15 minutes per address), and the request log names it
+  `/media/<redacted>`, never the token. Its answer is never gzipped: compression
+  is the `/mcp` adapter's alone. A `HEAD` on a link is checked the same way and
+  answered from the stored message (type, name, the same headers, no length):
+  it never downloads the file nor asks the phone for it, so a link checker
+  cannot spend a download slot or one of the account's re-requests. Tests:
+  `test/media-links.test.mjs`.
+
+Not covered: `read_messages` shows a message's text as it was written, line
+breaks included, so a message can still hold lines that look like wazap's; the
+server's instructions say messages are data. A link is a bearer capability until it expires; anyone it is
+pasted to can download the file for those 30 minutes. A link is not bound to
+the session that minted it, and there is no per-link fetch count. libvips,
+pdf.js, poppler and ffmpeg are large parsers of untrusted input; the limits
+above bound memory and time, not every codec bug. Memory is bounded by
+watching it, so a parser can overshoot its limit by what it allocates between
+two readings (100 ms for the worker, 200 ms for a child), and the process's
+memory, once grown, is returned to the system only gradually: on macOS freed
+pages stay in the resident size, so hostile PDFs read one after another raise
+it step by step while the real footprint stays low. The worker's watch reads
+the whole process, so a large image drawn at the same moment counts toward a
+document read's growth. sharp's timeout is checked between tiles, so one
+slow raster tile can run past it. Quick Look may
+draw a page in a system service rather than in `qlmanage` itself, outside the
+child's memory limit; it is only used when poppler is not installed.
 
 ## Pre-release review
 

@@ -33,6 +33,10 @@ export interface ChatRow {
   merged_into: number | null;
   last_own_id: number | null;
   read_through_id: number | null;
+  /** (v7) The conversationTimestamp the proto states, in seconds. */
+  described_ts: number | null;
+  /** (v7) Generated: what list_chats orders by. */
+  activity: number;
 }
 
 export interface MessageRow {

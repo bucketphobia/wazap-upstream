@@ -22,7 +22,7 @@
  * reader may see — not a tombstone, not expired, not under the clear barrier —
  * that is not one of WhatsApp's own notices.
  */
-import type { Connection } from "./connection.js";
+import { sqlLimit, type Connection } from "./connection.js";
 import { STORED_SEQ_TOP } from "./messages.js";
 import { chatFromRow, type ChatRow } from "./rows.js";
 import type { ChatRecord } from "./types.js";
@@ -56,9 +56,64 @@ function spanOf(span: DigestSpan): { sql: string; params: Array<number | string>
   };
 }
 
+/** One chat of a batched read: the chat (a family of one) and the id its reads start after. */
+export interface ChatFloor {
+  chatId: number;
+  afterId: number;
+}
+
+/**
+ * A batched read's chats as `j` (json_each of [chatId, afterId] pairs) joined
+ * to `m` over messages_chat, and the rest of the span as SQL: everything but
+ * the floor is the same for every chat of the batch.
+ */
+function batchOf(chats: readonly ChatFloor[], span: Omit<DigestSpan, "afterId">): { from: string; sql: string; params: Array<number | string> } {
+  const bounds = "m.id <= ? AND coalesce(m.stored_seq, 0) > ? AND coalesce(m.stored_seq, 0) <= ?";
+  const params: Array<number | string> = [JSON.stringify(chats.map((chat) => [chat.chatId, chat.afterId])), span.untilId, span.afterSeq, span.untilSeq];
+  const from = `json_each(?) j CROSS JOIN messages m ON m.chat_id = j.value ->> 0 AND m.id > j.value ->> 1 CROSS JOIN chats c ON c.id = m.chat_id`;
+  if (span.excludeSenders === undefined || span.excludeSenders.size === 0) return { from, sql: bounds, params };
+  return {
+    from,
+    sql: `${bounds} AND (m.sender_id IS NULL OR m.sender_id NOT IN (SELECT value FROM json_each(?)))`,
+    params: [...params, JSON.stringify([...span.excludeSenders])],
+  };
+}
+
 /** Media kinds a digest counts by type. */
 export const DIGEST_MEDIA = ["image", "video", "voice", "audio", "document", "sticker", "location", "contact"] as const;
 export type DigestMedia = (typeof DIGEST_MEDIA)[number];
+/** The kinds catch_up names by id for get_media: what it opens as a view or as text. */
+export const OPENED_MEDIA: readonly DigestMedia[] = ["image", "video", "document", "sticker", "audio"];
+
+/** The columns of an InboundAggregate over `m`, as inbound() and inboundMany() select them. */
+const INBOUND_AGGREGATE = `sum(m.type <> 'call') AS count, count(DISTINCT CASE WHEN m.type <> 'call' THEN m.sender_id END) AS senders,
+  max(CASE WHEN m.type <> 'call' THEN m.id END) AS newest_id, max(CASE WHEN m.type <> 'call' THEN m.ts END) AS newest_ts,
+  ${DIGEST_MEDIA.map((type) => `sum(m.type = '${type}') AS media_${type}`).join(", ")},
+  sum(m.type IN ('poll', 'event')) AS polls,
+  sum((m.flags & 1) <> 0) AS mentions, max(CASE WHEN (m.flags & 1) <> 0 THEN m.id END) AS last_mention,
+  sum(m.quoted_from_me = 1) AS replies, max(CASE WHEN m.quoted_from_me = 1 THEN m.id END) AS last_reply,
+  sum(m.type = 'voice' AND m.transcript IS NULL) AS voice_untranscribed`;
+
+function aggregateOf(row: Record<string, number | null>): InboundAggregate {
+  const media: Partial<Record<DigestMedia, number>> = {};
+  for (const type of DIGEST_MEDIA) {
+    const n = row[`media_${type}`] ?? 0;
+    if (n > 0) media[type] = n;
+  }
+  return {
+    count: row.count ?? 0,
+    senders: row.senders ?? 0,
+    newestId: row.newest_id ?? null,
+    newestTs: row.newest_ts ?? null,
+    media,
+    polls: row.polls ?? 0,
+    mentions: row.mentions ?? 0,
+    lastMentionId: row.last_mention ?? null,
+    replies: row.replies ?? 0,
+    lastReplyId: row.last_reply ?? null,
+    voiceUntranscribed: row.voice_untranscribed ?? 0,
+  };
+}
 
 export interface InboundAggregate {
   /** Inbound messages, calls left out (a call is its own section). */
@@ -229,37 +284,82 @@ export class Digest {
     const inSpan = spanOf(span);
     const inChat = familyCondition(family);
     const row = this.c.get<Record<string, number | null>>(
-      `SELECT sum(m.type <> 'call') AS count, count(DISTINCT CASE WHEN m.type <> 'call' THEN m.sender_id END) AS senders,
-         max(CASE WHEN m.type <> 'call' THEN m.id END) AS newest_id, max(CASE WHEN m.type <> 'call' THEN m.ts END) AS newest_ts,
-         ${DIGEST_MEDIA.map((type) => `sum(m.type = '${type}') AS media_${type}`).join(", ")},
-         sum(m.type IN ('poll', 'event')) AS polls,
-         sum((m.flags & 1) <> 0) AS mentions, max(CASE WHEN (m.flags & 1) <> 0 THEN m.id END) AS last_mention,
-         sum(m.quoted_from_me = 1) AS replies, max(CASE WHEN m.quoted_from_me = 1 THEN m.id END) AS last_reply,
-         sum(m.type = 'voice' AND m.transcript IS NULL) AS voice_untranscribed
+      `SELECT ${INBOUND_AGGREGATE}
        FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
        WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND}`,
       ...inChat.params,
       ...inSpan.params,
       now
     )!;
-    const media: Partial<Record<DigestMedia, number>> = {};
-    for (const type of DIGEST_MEDIA) {
-      const n = row[`media_${type}`] ?? 0;
-      if (n > 0) media[type] = n;
+    return aggregateOf(row);
+  }
+
+  /**
+   * inbound() for many chats in one statement: each a family of one with its
+   * own floor, the rest of the span shared. In the order asked; a chat with
+   * nothing in its span reads as inbound() reads it, all zeros.
+   */
+  inboundMany(chats: readonly ChatFloor[], span: Omit<DigestSpan, "afterId">, now: number): InboundAggregate[] {
+    if (chats.length === 0) return [];
+    const batch = batchOf(chats, span);
+    const rows = new Map<number, Record<string, number | null>>();
+    for (const row of this.c.all<Record<string, number | null> & { k: number }>(
+      `SELECT j.key AS k, ${INBOUND_AGGREGATE} FROM ${batch.from} WHERE ${batch.sql} AND ${INBOUND} GROUP BY j.key`,
+      ...batch.params,
+      now
+    )) {
+      rows.set(row.k, row);
     }
-    return {
-      count: row.count ?? 0,
-      senders: row.senders ?? 0,
-      newestId: row.newest_id ?? null,
-      newestTs: row.newest_ts ?? null,
-      media,
-      polls: row.polls ?? 0,
-      mentions: row.mentions ?? 0,
-      lastMentionId: row.last_mention ?? null,
-      replies: row.replies ?? 0,
-      lastReplyId: row.last_reply ?? null,
-      voiceUntranscribed: row.voice_untranscribed ?? 0,
-    };
+    return chats.map((_chat, index) => aggregateOf(rows.get(index) ?? {}));
+  }
+
+  /** topSenders() for many chats in one statement, as inboundMany() takes them; in the order asked. */
+  topSendersMany(chats: readonly ChatFloor[], span: Omit<DigestSpan, "afterId">, now: number, limit = 3): Array<Array<{ senderId: number; count: number }>> {
+    const out = chats.map(() => [] as Array<{ senderId: number; count: number }>);
+    if (chats.length === 0) return out;
+    const batch = batchOf(chats, span);
+    for (const row of this.c.all<{ k: number; sender_id: number; n: number }>(
+      `SELECT k, sender_id, n FROM (
+         SELECT j.key AS k, m.sender_id, count(*) AS n,
+           row_number() OVER (PARTITION BY j.key ORDER BY count(*) DESC, max(m.id) DESC) AS place
+         FROM ${batch.from}
+         WHERE ${batch.sql} AND ${INBOUND} AND m.type <> 'call' AND m.sender_id IS NOT NULL
+         GROUP BY j.key, m.sender_id)
+       WHERE place <= ${sqlLimit(limit)} ORDER BY k, place`,
+      ...batch.params,
+      now
+    )) {
+      out[row.k]!.push({ senderId: row.sender_id, count: row.n });
+    }
+    return out;
+  }
+
+  /** mostReacted() for many chats in one statement, as inboundMany() takes them; in the order asked, null where none qualifies. */
+  mostReactedMany(
+    chats: readonly ChatFloor[],
+    span: Omit<DigestSpan, "afterId">,
+    now: number,
+    options: { min?: number; excludeSenders?: ReadonlySet<number> } = {}
+  ): Array<number | null> {
+    const out: Array<number | null> = chats.map(() => null);
+    if (chats.length === 0) return out;
+    const batch = batchOf(chats, span);
+    for (const row of this.c.all<{ k: number; id: number }>(
+      `SELECT k, id FROM (
+         SELECT j.key AS k, m.id, row_number() OVER (PARTITION BY j.key ORDER BY count(*) DESC, m.id DESC) AS place
+         FROM ${batch.from} CROSS JOIN reactions r ON r.message_id = m.id
+         WHERE ${batch.sql} AND ${INBOUND}
+           AND (m.sender_id IS NULL OR m.sender_id NOT IN (SELECT value FROM json_each(?)))
+         GROUP BY j.key, m.id HAVING count(*) >= ?)
+       WHERE place = 1`,
+      ...batch.params,
+      now,
+      JSON.stringify([...(options.excludeSenders ?? [])]),
+      options.min ?? 2
+    )) {
+      out[row.k] = row.id;
+    }
+    return out;
   }
 
   /** How many inbound messages the chat holds in the span, counting at most `cap`. */
@@ -269,11 +369,10 @@ export class Digest {
     return (
       this.c.get<{ n: number }>(
         `SELECT count(*) AS n FROM (SELECT 1 FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
-           WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type <> 'call' LIMIT ?)`,
+           WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type <> 'call' LIMIT ${sqlLimit(cap)})`,
         ...inChat.params,
         ...inSpan.params,
-        now,
-        cap
+        now
       )?.n ?? 0
     );
   }
@@ -300,16 +399,13 @@ export class Digest {
         transcript: string | null;
       }>(
         `SELECT m.id, coalesce(m.stored_seq, 0) AS stored_seq, m.key_id, m.ts, m.type, m.flags, m.quoted_from_me, m.sender_id,
-           substr(m.text, 1, ?) AS text, substr(m.transcript, 1, ?) AS transcript
+           substr(m.text, 1, ${sqlLimit(maxChars)}) AS text, substr(m.transcript, 1, ${sqlLimit(maxChars)}) AS transcript
          FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
          WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type <> 'call'
-         ORDER BY m.id DESC LIMIT ?`,
-        maxChars,
-        maxChars,
+         ORDER BY m.id DESC LIMIT ${sqlLimit(limit)}`,
         ...inChat.params,
         ...inSpan.params,
-        now,
-        limit
+        now
       )
       .map((row) => ({
         id: row.id,
@@ -333,11 +429,10 @@ export class Digest {
       .all<{ sender_id: number; n: number }>(
         `SELECT m.sender_id, count(*) AS n FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
          WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type <> 'call' AND m.sender_id IS NOT NULL
-         GROUP BY m.sender_id ORDER BY n DESC, max(m.id) DESC LIMIT ?`,
+         GROUP BY m.sender_id ORDER BY n DESC, max(m.id) DESC LIMIT ${sqlLimit(limit)}`,
         ...inChat.params,
         ...inSpan.params,
-        now,
-        limit
+        now
       )
       .map((row) => ({ senderId: row.sender_id, count: row.n }));
   }
@@ -374,13 +469,32 @@ export class Digest {
       .all<{ id: number; key_id: string }>(
         `SELECT m.id, m.key_id FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
          WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type = 'voice' AND m.transcript IS NULL
-         ORDER BY m.id DESC LIMIT ?`,
+         ORDER BY m.id DESC LIMIT ${sqlLimit(limit)}`,
         ...inChat.params,
         ...inSpan.params,
-        now,
-        limit
+        now
       )
       .map((row) => ({ id: row.id, keyId: row.key_id }));
+  }
+
+  /**
+   * The newest media someone sent in the span that get_media opens as a view
+   * or text (photos, videos, documents, stickers, audio files; a voice note
+   * is a transcript, and the footer names those), newest first.
+   */
+  mediaTail(family: readonly number[], span: DigestSpan, now: number, limit: number): Array<{ id: number; keyId: string; type: string }> {
+    const inSpan = spanOf(span);
+    const inChat = familyCondition(family);
+    return this.c
+      .all<{ id: number; key_id: string; type: string }>(
+        `SELECT m.id, m.key_id, m.type FROM messages m CROSS JOIN chats c ON c.id = m.chat_id
+         WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND m.type IN (${OPENED_MEDIA.map((type) => `'${type}'`).join(", ")})
+         ORDER BY m.id DESC LIMIT ${sqlLimit(limit)}`,
+        ...inChat.params,
+        ...inSpan.params,
+        now
+      )
+      .map((row) => ({ id: row.id, keyId: row.key_id, type: row.type }));
   }
 
   /** Every handled mark, by the chat it was filed under. */

@@ -120,6 +120,31 @@ const ORACLE = {
     },
   ],
   P29: [async () => "Capitala Franței este Paris."],
+  // Remote sessions: what get_media shows, several media in one call, a window in one read.
+  P31: [
+    async (s, r) => {
+      const seen = await s.call("get_media", { message_id: r.messages.meter_photo.id });
+      assert.equal(seen.structuredContent.image_attached, true);
+      return "Pe poză e un contor de apă care arată indexul 004512.";
+    },
+  ],
+  P32: [
+    async (s, r) => {
+      const both = await s.call("get_media", { message_ids: [r.messages.meter_photo.id, r.messages.extras_pdf.id] });
+      assert.deepEqual(both.structuredContent.items.map((item) => item.type), ["image", "document"]);
+      assert.match(both.structuredContent.items[1].document_text, /18\.430,55/);
+      return "Contorul arată 004512, iar extrasul are soldul final de 18.430,55 lei.";
+    },
+  ],
+  P33: [
+    async (s, r) => {
+      // Yesterday as the world's own calendar has it, whatever the clock of this process says.
+      const day = r.calendar.yesterday_iso;
+      const read = await s.call("read_messages", { chat_id: "Dan Radu", since: day, until: day });
+      assert.deepEqual(read.structuredContent.messages.map((m) => m.text), ["Am vorbit cu clientul, vrea prezentarea finală până vineri."]);
+      return "Ieri seară Dan Radu ți-a scris că a vorbit cu clientul și că acesta vrea prezentarea finală până vineri.";
+    },
+  ],
   N6: [
     async (s) => {
       const found = await s.call("find_contact", { name: "mamei" });
@@ -278,7 +303,8 @@ describe("evaluation harness", () => {
 
   test("every case validates and every reference resolves in the world", async () => {
     const refs = await control.refs();
-    assert.equal(cases.length, 58);
+    assert.equal(cases.length, 61);
+    assert.deepEqual(selectCases(cases, "remote").map((entry) => entry.id), ["P25", "P26", "P31", "P32", "P33"]);
     for (const theCase of cases) assert.doesNotThrow(() => resolveCase(theCase, refs), theCase.id);
     assert.equal(selectCases(cases, "baseline-0.23").length, 26);
     assert.equal(selectCases(cases, "chatgpt").length, 22);

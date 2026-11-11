@@ -4,11 +4,14 @@ import { z } from "zod";
 import { assessSearch, parseMoment } from "./search-query.js";
 import { checkSearchSource, finalizeSearch, searchOwner, SEARCH_CHANGED } from "./search-finalize.js";
 import { resolveToolAccount } from "./account-resolve.js";
+import { chatByName } from "./chat-name.js";
 import { resolveMessageId, resolveMessageIdAcross } from "./message-ref.js";
 import { privateRule } from "./catchup.js";
 import { compactRecent } from "./recent-compact.js";
 import { WazapError } from "./errors.js";
-import { MESSAGE_TYPES, type MessageView, type RecentConversation, type RecentMessageRefs, type SearchContext, type WhatsAppApi } from "./wa-types.js";
+import { MAX_PREVIEWS, previewsLine } from "./previews.js";
+import { mediaAnswer, parsePages } from "./media-answer.js";
+import { MESSAGE_TYPES, type MediaDetail, type MessageView, type RecentConversation, type RecentMessageRefs, type SearchContext, type WhatsAppApi } from "./wa-types.js";
 import type { ToolArgs, ToolCtx, ToolDef, ToolResult } from "./tool-runtime.js";
 
 const account = {
@@ -106,11 +109,15 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
     pages.set(next, { ...page, refs: rest });
   }
   const images: ToolResult["content"] = [];
+  const previewed: string[] = [];
   if (args.include_previews === true) {
     for (const id of page.accounts) {
       const wa = resolveToolAccount(ctx.hub, { account_id: id }, { name: "get_status", write: false }).wa;
       const ids = conversations.filter((row) => row.account_id === id).flatMap((row) => row.messages.filter((m) => !m.private).map((m) => m.message_id));
-      for (const preview of await wa.previews(ids, Math.max(0, 12 - images.length))) images.push({ type: "image", data: preview.base64, mimeType: preview.mime });
+      for (const preview of await wa.previews(ids, Math.max(0, MAX_PREVIEWS - images.length), ctx.signal)) {
+        images.push({ type: "image", data: preview.base64, mimeType: preview.mime });
+        previewed.push(preview.message_id);
+      }
     }
   }
   // Re-link or roster replacement may happen while a read or preview awaits.
@@ -122,14 +129,27 @@ async function recent(args: ToolArgs, ctx: ToolCtx): Promise<ToolResult> {
     ...(page.compact ? { compact: true, shown_message_count: rendered.reduce((n, row) => n + ("shown_message_count" in row ? row.shown_message_count as number : 0), 0),
       line_count: rendered.reduce((n, row) => n + row.messages.length, 0) } : {}),
     next_cursor: next, partial: next !== null || page.sync !== "done", sync: page.sync,
+    ...(previewed.length === 0 ? {} : { previews: previewed }),
     account_id: page.accounts.length === 1 ? page.accounts[0] : null,
     notes: ["Available synced history only; an unanswered request may have been handled outside WhatsApp."] };
   const answer = result(payload, images);
-  if (page.compact) answer.content[0] = { type: "text", text: rendered.map((row) => {
-    const omitted = "omitted" in row ? Object.entries(row.omitted as Record<string, number>).map(([type, count]) => `${count} ${type}`) : [];
-    return `${row.chat_name}:\n${[...row.messages.map((m) => `${m.from_me ? "me" : m.sender.name}: ${m.text}`),
-      ...(omitted.length ? [`[omitted: ${omitted.join(", ")}]`] : [])].join("\n")}`;
-  }).join("\n\n") || "No recent messages in the available history." };
+  if (page.compact) {
+    // A transcript: who said what under each chat and its id. An assistant's session gets this text alone
+    // (answer-format), so the next page's cursor, the previews and the notes ride under it; message ids do not.
+    const several = page.accounts.length > 1;
+    const body = rendered.map((row) => {
+      const omitted = "omitted" in row ? Object.entries(row.omitted as Record<string, number>).map(([type, count]) => `${count} ${type}`) : [];
+      return `${row.chat_name} (${row.chat_id}${several ? `, account ${row.account_id}` : ""}):\n${[...row.messages.map((m) => `${m.from_me ? "me" : m.sender.name}: ${m.text}`),
+        ...(omitted.length ? [`[omitted: ${omitted.join(", ")}]`] : [])].join("\n")}`;
+    }).join("\n\n") || "No recent messages in the available history.";
+    const tail = [
+      next === null ? null : `More conversations are left: call get_recent_messages with cursor: "${next}".`,
+      next === null && page.sync !== "done" ? `History sync is ${page.sync}: some messages may not be here yet.` : null,
+      previewsLine(previewed),
+      ...payload.notes,
+    ].filter((line): line is string => line !== null);
+    answer.content[0] = { type: "text", text: `${body}\n\n${tail.join("\n")}` };
+  }
   return answer;
 }
 
@@ -145,10 +165,21 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     const accounts = [];
     let messages: Array<MessageView & { account_id: string; account_rank: number }> = [];
     let contexts: Array<SearchContext & { account_id: string }> = [];
-    const bindings = selected(args, ctx);
+    let bindings = selected(args, ctx);
+    // A chat named as the user says it is one chat on one account, resolved once (src/chat-name.ts): that account
+    // alone is searched, by the chat's id, and its hits are judged there. account_ids or all_accounts only bound it.
+    const named = typeof args.chat_id === "string" ? await chatByName(args.chat_id, args.account_id as string | undefined, ctx) : undefined;
+    if (named !== undefined) {
+      if (args.account_ids !== undefined && !bindings.some((b) => b.id === named.binding.id)) {
+        throw new WazapError("CHAT_NOT_FOUND", `"${named.asked}" is a chat on account "${named.binding.id}", which account_ids does not name. Nothing was searched.`, "Pass that account in account_ids, or leave account_ids out");
+      }
+      bindings = [named.binding];
+    }
+    const chatId = named?.chatId ?? (args.chat_id as string | undefined);
+    const asked = named === undefined ? args : { ...args, chat_id: chatId };
     const owners = bindings.map((b) => searchOwner(b.wa));
     if (args.before !== undefined && bindings.length > 1) throw new WazapError("INVALID_ID", "A search cursor belongs to one account.", "Pass account_id with before");
-    const results = await Promise.all(bindings.map((binding) => canonical("search").handler(args, { ...ctx, wa: binding.wa, accountId: binding.id, deferSearchFinalization: true })));
+    const results = await Promise.all(bindings.map((binding) => canonical("search").handler(asked, { ...ctx, wa: binding.wa, accountId: binding.id, deferSearchFinalization: true })));
     for (const [i, found] of results.entries()) {
       const binding = bindings[i]!;
       if (found.isError) return found;
@@ -171,7 +202,7 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     for (const [i, binding] of bindings.entries()) {
       checkSearchSource(ctx.hub, binding.id, binding.wa, owners[i]!);
       const final = finalizeSearch(binding.wa, messages.filter((m) => m.account_id === binding.id), contexts.filter((c) => c.account_id === binding.id),
-        args.chat_id as string | undefined, { includeContext: args.include_context !== false, private: rules[i], from: accounts[i]!.from_resolved,
+        chatId, { includeContext: args.include_context !== false, private: rules[i], from: accounts[i]!.from_resolved,
           sinceMs: parseMoment(args.since as string | undefined, "since"), untilMs: parseMoment(args.until as string | undefined, "until", true) }, args.query as string);
       finalMessages.push(...final.messages);
       finalContexts.push(...(final.contexts ?? []).map((c) => ({ ...c, account_id: binding.id })));
@@ -189,6 +220,7 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     const top = new Set(shown.slice(0, 5).map((m) => `${m.account_id}:${m.message_id}`));
     const assessment = assessSearch(args.query as string, shown.map((m) => ({ ...m, chat_id: `${m.account_id}:${m.chat_id}` })), mode === "words");
     return result({ query: args.query, mode, count: shown.length, messages: shown, accounts, assessment,
+      ...(named === undefined ? {} : { chat_id: chatId, resolved: { from: named.asked, name: named.name, kind: named.kind } }),
       ...(args.include_context === false ? {} : { contexts: contexts.filter((c) => top.has(`${c.account_id}:${c.anchor_id}`)) }),
       next_before: mode !== "hybrid" && accounts.length === 1 && shown.length === args.limit ? shown.at(-1)!.message_id : null,
       partial: changed || accounts.some((entry) => entry.scan_capped === true) || (accounts.length > 1 && messages.length >= (args.limit as number)),
@@ -201,7 +233,10 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
       account_id: accounts.length === 1 ? accounts[0]!.account_id : null,
       sync: accounts.some((entry) => entry.sync !== "done") ? "partial" : "done" });
   };
+  // The old names open one message, as they always did: message_id is theirs to give, and get_media's batch is not.
+  const oneMessage = ({ message_ids: _several, ...schema }: z.ZodRawShape): z.ZodRawShape => ({ ...schema, message_id: z.string().min(5) });
   const transcribe = alias("transcribe_audio", "get_media");
+  transcribe.schema = oneMessage(transcribe.schema);
   delete transcribe.outputSchema;
   transcribe.handler = async (args, ctx) => {
     const answer = await canonical("get_media").handler(args, ctx);
@@ -211,6 +246,7 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     return { ...answer, structuredContent: { ...transcript, message_id: args.message_id, account_id: answer.structuredContent?.account_id } };
   };
   const download = alias("download_media", "get_media");
+  download.schema = oneMessage(download.schema);
   delete download.outputSchema;
   download.handler = async (args, ctx) => {
     const messageId = args.message_id as string;
@@ -218,9 +254,24 @@ export function legacyReadTools(current: readonly ToolDef[]): ToolDef[] {
     const found = args.account_id === undefined
       ? await resolveMessageIdAcross(ctx.hub, resolved, messageId)
       : { binding: resolved, sid: await resolveMessageId(ctx.wa, messageId) };
-    const { inline_base64, ...file } = await found.binding.wa.downloadMedia(found.sid, args.save_to as string | undefined);
-    const images: ToolResult["content"] = inline_base64 ? [{ type: "image", data: inline_base64, mimeType: file.mime }] : [];
-    return result({ ...file, message_id: messageId, account_id: found.binding.id }, images);
+    // The file as get_media opens it, never a transcript: a remote session gets what it can see, and no path.
+    // detail and pages are get_media's, which this alias's schema inherits: they are honoured, not dropped.
+    const saveTo = args.save_to as string | undefined;
+    const detail = args.detail as MediaDetail | undefined;
+    const pages = args.pages === undefined ? undefined : parsePages(args.pages as string);
+    const opened = await found.binding.wa.openMedia(found.sid, {
+      ...(ctx.localFiles === false ? { noFile: true } : {}),
+      ...(saveTo === undefined ? {} : { saveTo }),
+      ...(detail === undefined ? {} : { detail }),
+      ...(pages === undefined ? {} : { pages }),
+      ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+    });
+    const shown = mediaAnswer(opened);
+    const { rendition: _rendition, ...file } = opened;
+    return result(
+      { ...file, ...shown.structured, ...(shown.notes.length > 0 ? { notes: shown.notes } : {}), message_id: messageId, account_id: found.binding.id },
+      shown.blocks
+    );
   };
   return [search, download, transcribe, alias("list_accounts", "get_status"),
     {

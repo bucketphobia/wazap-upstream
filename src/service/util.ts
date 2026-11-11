@@ -2,6 +2,7 @@
 
 import { isAbsolute, relative, sep } from "node:path";
 import { proto } from "baileys";
+import { protoNumber } from "../messages.js";
 
 /** How long a profile photo lookup may take before the answer goes without it. */
 export const PROFILE_LOOKUP_MS = 8_000;
@@ -33,6 +34,19 @@ export function insideDir(dir: string, path: string): boolean {
 /** A result limit a caller left out or spelled wrong reads as the tools' own default. */
 export function pageLimit(limit: number): number {
   return Number.isFinite(limit) && limit >= 1 ? Math.floor(limit) : 20;
+}
+
+/**
+ * The time WhatsApp's description of a chat states (conversationTimestamp, in
+ * seconds), which list_chats orders by before the newest message's; null when
+ * it states none or does not decode.
+ */
+export function chatActivity(bytes: Uint8Array): number | null {
+  try {
+    return protoNumber(proto.Conversation.decode(bytes).conversationTimestamp) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** A group the account left: WhatsApp delivers it as read-only (see chatSummary). */

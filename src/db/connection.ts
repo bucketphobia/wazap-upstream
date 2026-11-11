@@ -37,6 +37,70 @@ export const DEFAULT_CHUNK_SIZE = 200;
 const DEFAULT_CHUNK_BUDGET_MS = 15;
 const DEFAULT_CHECKPOINT_DELAY_MS = 2_000;
 const MAX_CHECKPOINT_RETRIES = 6;
+/**
+ * Writes quiet this long, the write-ahead log is checkpointed from a timer,
+ * off every commit's path. SQLite's own checkpoint runs inside whichever
+ * commit crosses its threshold — a live message, a tool's write — and stalls
+ * that commit 15-30 ms; a checkpoint after a quiet second copies only the few
+ * pages the last writes touched, each once however often it was rewritten.
+ */
+const DEFAULT_IDLE_CHECKPOINT_MS = 1_000;
+/** Under a steady trickle of writes the log is still checkpointed at least this often, so reads never wade through a long one. */
+const IDLE_CHECKPOINT_MAX_MS = 15_000;
+/** A checkpoint a reader kept from finishing is tried again this many times before the next write asks. */
+const IDLE_CHECKPOINT_RETRIES = 4;
+/**
+ * The backstop under the idle checkpoint: a log this many pages long (~40 MB)
+ * is checkpointed by the commit that reaches it, as SQLite does by itself at
+ * 1,000. Only a stretch of writes with no quiet second in it — a first
+ * history sync — gets there. Measured against 2,000 and 4,000 on the service's
+ * own history ingest: a lower backstop checkpoints inside more of its commits
+ * (commit p99 7 ms here, 14-16 ms there; live notify p99 6 ms at 2,000). A
+ * raw, gap-free commit loop pauses somewhat longer at the worst with this one
+ * (max 177-242 ms against 113-153 ms at 1.6.0's 1,000), as each fold copies more.
+ */
+const WAL_GUARD_PAGES = 10_000;
+/**
+ * SQLite's own threshold, kept while a chunked operation runs: a clear, an
+ * expiry sweep or a fold rewrites (and, secure_delete on, zeroes) pages all
+ * over the file, so one checkpoint of 10,000 of them would stall a chunk's
+ * commit for 100-200 ms where 1,000 at a time cost 15-45 ms each.
+ */
+const BULK_AUTOCHECKPOINT_PAGES = 1_000;
+/**
+ * When the log starts over, at the first write after a complete checkpoint,
+ * its file is cut back to this size, so one long sync does not leave 40 MB
+ * beside the database for longer than its next quiet write. Not cut to zero
+ * after every idle checkpoint: a live message would then grow the file again,
+ * and overwriting a log costs a sync less than extending one.
+ */
+const WAL_SIZE_LIMIT_BYTES = 8 * 1024 * 1024;
+/**
+ * How much of the database file the server's connection reads through a
+ * memory map instead of a read() and a copy per page. The scans that cannot
+ * use an index (the vector scan, catch_up's scan, find_contact's fold) run
+ * 0-25% faster (bench-db, 100k messages), more on a busy machine. The mapped
+ * pages are the file's own, clean, and count in the process's resident size
+ * (up to this much more) until the system takes them back under memory
+ * pressure; past this size the rest of the file is read as before. Writes are
+ * unchanged. A file cut short under the server ends the process (SIGBUS) at
+ * the next read of a lost page; see docs/data.md.
+ */
+const MMAP_BYTES = 256 * 1024 * 1024;
+
+/**
+ * A row count written into a statement's text (`LIMIT ${sqlLimit(n)}`) rather
+ * than bound. node:sqlite's SQLite (3.47+) lets the planner read a bound LIMIT
+ * and marks the statement to be prepared again whenever that parameter is
+ * bound, which is every run: 20-30 µs a run for a statement of a few joins,
+ * against 2 µs for the same text with the number in it. For the reads that run
+ * once per chat (catch_up); the values are a handful of constants, so the
+ * statement cache gains a few entries, not one per call.
+ */
+export function sqlLimit(n: number): string {
+  if (!Number.isSafeInteger(n) || n < 0) throw new RangeError(`Not a row count: ${n}`);
+  return String(n);
+}
 
 export interface ConnectionOptions {
   /** status and doctor: never migrates, never writes, refuses a schema it would have to change. */
@@ -68,6 +132,13 @@ export interface ConnectionOptions {
    * 0 turns the timer off; bulk deletes always try a checkpoint when they finish.
    */
   checkpointDelayMs?: number;
+  /**
+   * Writes quiet this long, a passive checkpoint moves the write-ahead log
+   * into the database file from a timer, and commits stop checkpointing below
+   * the ~40 MB backstop. 0 leaves checkpoints to SQLite, inside the commit
+   * that fills 1,000 pages. Writable opens only.
+   */
+  idleCheckpointMs?: number;
   /**
    * The copy taken beside an existing database before it is migrated. Unset
    * follows WAZAP_PRE_MIGRATION_BACKUP (on unless it says otherwise); false
@@ -313,8 +384,17 @@ export class Connection {
   private bulkTail: Promise<unknown> = Promise.resolve();
   private checkpointTimer: NodeJS.Timeout | null = null;
   private checkpointRetries = 0;
+  private readonly idleCheckpointMs: number;
+  private idleTimer: NodeJS.Timeout | null = null;
+  /** performance.now() of the last commit, and of the first one the log has held since its last idle checkpoint (null: none). */
+  private lastCommitAt = 0;
+  private dirtySince: number | null = null;
+  private idleRetries = 0;
+  /** Chunked operations running now; while there are any, commits checkpoint at SQLite's own 1,000 pages. */
+  private chunkedRunning = 0;
   private readonly timeoutMs: number;
   private closed = false;
+  private namesEpoch = 0;
 
   private constructor(
     readonly path: string,
@@ -326,6 +406,7 @@ export class Connection {
     this.chunkSize = Math.max(1, Math.floor(options.chunkSize ?? DEFAULT_CHUNK_SIZE));
     this.chunkBudgetMs = Math.max(1, options.chunkBudgetMs ?? DEFAULT_CHUNK_BUDGET_MS);
     this.checkpointDelayMs = Math.max(0, options.checkpointDelayMs ?? DEFAULT_CHECKPOINT_DELAY_MS);
+    this.idleCheckpointMs = this.readOnly ? 0 : Math.max(0, options.idleCheckpointMs ?? DEFAULT_IDLE_CHECKPOINT_MS);
     this.timeoutMs = Math.max(0, Math.floor(options.timeoutMs ?? DEFAULT_TIMEOUT_MS));
   }
 
@@ -384,6 +465,10 @@ export class Connection {
       }
       db.exec("PRAGMA synchronous = FULL; PRAGMA secure_delete = ON; PRAGMA foreign_keys = ON;");
       const connection = new Connection(path, db, options);
+      db.exec(`PRAGMA mmap_size = ${MMAP_BYTES}`);
+      if (connection.idleCheckpointMs > 0) {
+        db.exec(`PRAGMA wal_autocheckpoint = ${WAL_GUARD_PAGES}; PRAGMA journal_size_limit = ${WAL_SIZE_LIMIT_BYTES};`);
+      }
       connection.migrate();
       return connection;
     } catch (err) {
@@ -485,7 +570,24 @@ export class Connection {
   }
 
   run(sql: string, ...params: SQLInputValue[]): number {
-    return Number(this.stmt(sql).run(...params).changes);
+    const changes = Number(this.stmt(sql).run(...params).changes);
+    // A statement on its own commits on its own.
+    if (!this.db.isTransaction) this.committed();
+    return changes;
+  }
+
+  /**
+   * Moves whenever a write may have changed what names a jid: a contact's or a
+   * chat's name, a note or a tag, a lid paired with a number, a chat or
+   * contact folded into another — and on every rollback, which may undo one a
+   * reader saw. A cache of names is good for as long as this stays put.
+   */
+  get namesVersion(): number {
+    return this.namesEpoch;
+  }
+
+  namesChanged(): void {
+    this.namesEpoch++;
   }
 
   /**
@@ -499,10 +601,108 @@ export class Connection {
     try {
       const result = body();
       this.db.exec("COMMIT");
+      this.committed();
       return result;
     } catch (err) {
       if (this.db.isTransaction) this.db.exec("ROLLBACK");
+      this.namesEpoch++;
       throw err;
+    }
+  }
+
+  /**
+   * One part of a write that may fail on its own. Inside a transaction it runs
+   * under a savepoint: an error undoes what this part wrote, goes to `failed`,
+   * and the transaction goes on with the parts before and after it. Outside one
+   * it is a write transaction of its own. An error that took the whole
+   * transaction with it (SQLite rolls one back on a full disk or an I/O error)
+   * is thrown, never swallowed: the parts before it are gone too.
+   */
+  attempt(body: () => void, failed: (err: unknown) => void): void {
+    this.assertWritable();
+    if (!this.db.isTransaction) {
+      try {
+        this.write(body);
+      } catch (err) {
+        failed(err);
+      }
+      return;
+    }
+    // Savepoints nest by name: ROLLBACK TO and RELEASE take the newest one called this.
+    this.db.exec("SAVEPOINT wazap_part");
+    try {
+      body();
+    } catch (err) {
+      this.namesEpoch++;
+      if (!this.db.isTransaction) throw err;
+      this.db.exec("ROLLBACK TO wazap_part");
+      this.db.exec("RELEASE wazap_part");
+      failed(err);
+      return;
+    }
+    this.db.exec("RELEASE wazap_part");
+  }
+
+  /**
+   * A commit grew the log: the idle checkpoint is due a quiet second from now,
+   * and no later than IDLE_CHECKPOINT_MAX_MS after the first commit it covers.
+   * One timer serves a whole burst; it re-arms itself rather than being reset
+   * on every commit.
+   */
+  private committed(): void {
+    if (this.idleCheckpointMs === 0) return;
+    const now = performance.now();
+    this.lastCommitAt = now;
+    if (this.dirtySince === null) {
+      this.dirtySince = now;
+      this.idleRetries = 0;
+    }
+    if (this.idleTimer === null) this.armIdleCheckpoint(this.idleCheckpointMs);
+  }
+
+  private armIdleCheckpoint(delay: number): void {
+    this.idleTimer = setTimeout(() => this.idleCheckpoint(), Math.max(1, Math.ceil(delay)));
+    this.idleTimer.unref();
+  }
+
+  /**
+   * A passive checkpoint once writes went quiet: it copies what it can and
+   * never waits on a reader or a writer. One a reader kept from finishing
+   * tries again a few times; the next commit asks anew either way.
+   */
+  private idleCheckpoint(): void {
+    this.idleTimer = null;
+    if (this.closed || this.dirtySince === null) return;
+    const now = performance.now();
+    const quiet = now - this.lastCommitAt;
+    const pending = now - this.dirtySince;
+    if (quiet < this.idleCheckpointMs && pending < IDLE_CHECKPOINT_MAX_MS) {
+      this.armIdleCheckpoint(Math.min(this.idleCheckpointMs - quiet, IDLE_CHECKPOINT_MAX_MS - pending));
+      return;
+    }
+    if (this.db.isTransaction) {
+      this.armIdleCheckpoint(this.idleCheckpointMs);
+      return;
+    }
+    const done = this.passiveCheckpoint();
+    if (!done && this.idleRetries < IDLE_CHECKPOINT_RETRIES) {
+      this.idleRetries++;
+      this.dirtySince = performance.now() - IDLE_CHECKPOINT_MAX_MS;
+      this.armIdleCheckpoint(this.idleCheckpointMs * 2 ** this.idleRetries);
+    }
+  }
+
+  /**
+   * PRAGMA wal_checkpoint(PASSIVE), which the idle checkpoint is: whether it
+   * copied the whole log. A failure counts as done; the next commit asks again.
+   */
+  private passiveCheckpoint(): boolean {
+    this.dirtySince = null;
+    try {
+      const row = this.db.prepare("PRAGMA wal_checkpoint(PASSIVE)").get() as CheckpointResult | undefined;
+      return row === undefined || (row.busy === 0 && row.checkpointed >= row.log);
+    } catch {
+      return true;
     }
   }
 
@@ -510,12 +710,41 @@ export class Connection {
    * A large operation as many small transactions: `step` does at most one
    * chunk and says whether more is left. Between chunks the event loop runs,
    * so live messages keep flowing while a chat of 50,000 rows is cleared.
+   *
+   * What the log already holds (up to the ~40 MB backstop after a burst) is
+   * folded first, in a turn of its own: once the threshold drops to 1,000
+   * pages, the first chunk's commit would fold all of it inside that commit,
+   * a longer pause than either step alone. Two setImmediates follow it: a
+   * caller in a socket's callback (most are) is in the loop's I/O phase, from
+   * which one fires in the check phase right after, with no I/O between.
    */
   async chunked(step: () => boolean): Promise<void> {
-    for (;;) {
-      if (!this.write(step)) return;
-      await new Promise<void>((resolve) => setImmediate(resolve));
+    if (this.chunkedRunning === 0 && this.foldBacklog()) await new Promise<void>((resolve) => setImmediate(() => setImmediate(resolve)));
+    this.autocheckpointFor(+1);
+    try {
+      for (;;) {
+        if (!this.write(step)) return;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    } finally {
+      this.autocheckpointFor(-1);
     }
+  }
+
+  /** The idle checkpoint, now, when one is pending and no transaction is open; whether it ran. One a reader cut short is asked again by the next commit. */
+  private foldBacklog(): boolean {
+    if (this.idleCheckpointMs === 0 || this.closed || this.dirtySince === null || this.db.isTransaction) return false;
+    if (!this.passiveCheckpoint()) this.dirtySince = performance.now();
+    return true;
+  }
+
+  /** Commits checkpoint at 1,000 pages while a chunked operation runs, at the ~40 MB backstop otherwise (see BULK_AUTOCHECKPOINT_PAGES). */
+  private autocheckpointFor(delta: 1 | -1): void {
+    if (this.idleCheckpointMs === 0) return;
+    const before = this.chunkedRunning;
+    this.chunkedRunning = Math.max(0, before + delta);
+    if (this.closed || (before > 0) === (this.chunkedRunning > 0)) return;
+    this.db.exec(`PRAGMA wal_autocheckpoint = ${this.chunkedRunning > 0 ? BULK_AUTOCHECKPOINT_PAGES : WAL_GUARD_PAGES}`);
   }
 
   /** Large operations run one at a time; two chunked loops over one chat would race each other's cursors. */
@@ -557,6 +786,8 @@ export class Connection {
       this.scheduleCheckpoint(true);
     } else {
       this.checkpointRetries = 0;
+      // The log is empty: the idle checkpoint has nothing left to do.
+      this.dirtySince = null;
     }
     return result;
   }
@@ -616,6 +847,10 @@ export class Connection {
     if (this.checkpointTimer !== null) {
       clearTimeout(this.checkpointTimer);
       this.checkpointTimer = null;
+    }
+    if (this.idleTimer !== null) {
+      clearTimeout(this.idleTimer);
+      this.idleTimer = null;
     }
     this.statements.clear();
     if (this.db.isOpen) this.db.close();

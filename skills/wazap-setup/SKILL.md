@@ -80,7 +80,7 @@ keeps whatever else is in the file, backs it up once, and prints the next step
 - Claude Code users can install this plugin instead, which registers the server.
 - An agent on another machine (claude.ai, ChatGPT, a cloud agent) reaches wazap by URL: `npx wazap-mcp service install`, then `npx wazap-mcp expose`, and give the agent the URL only; the person signs in on its consent page. If `get_status` says write tools are missing, run `npx wazap-mcp config writes on` and restart the server.
 
-Done when `get_status` returns `status: "connected"`. Then call `learn` once before using the other tools.
+Done when `get_status` returns `status: "connected"`. `learn` gives the id formats, the workflows and every error code, a topic at a time, whenever they are needed.
 
 ## Allow writes
 

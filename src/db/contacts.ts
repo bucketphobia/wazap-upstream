@@ -536,6 +536,13 @@ export function compareAddressBook(order: AddressBookOrder, a: AddressBookKey, b
   return a.listed - b.listed || a.id - b.id;
 }
 
+/**
+ * How long find_contact reuses the list of everyone without reading the
+ * contacts again. Every write that changes a person moves namesVersion and
+ * ends it sooner; this bounds what a write that forgot to say so leaves.
+ */
+const PEOPLE_TTL_MS = 60_000;
+
 const PEOPLE_SQL = `SELECT k.id, k.phone_jid, k.lid, k.name, k.notify, k.push_name, k.verified_name, k.is_business, n.note, n.tags, n.fields
   FROM contacts k LEFT JOIN contact_notes n ON n.contact_id = k.id
   WHERE k.merged_into IS NULL AND (k.phone_jid IS NOT NULL OR k.lid IS NOT NULL)
@@ -544,6 +551,12 @@ const PEOPLE_SQL = `SELECT k.id, k.phone_jid, k.lid, k.name, k.notify, k.push_na
 export class Contacts {
   /** People as last folded, by contact id; an entry is folded again when anything it was read from changes. */
   private folded = new Map<number, Person>();
+  /**
+   * The last list people() read, reused whole while the database's
+   * namesVersion has not moved (no contact, note, tag or pairing written
+   * since), the owner is the same, and it is not older than PEOPLE_TTL_MS.
+   */
+  private snapshot: { version: number; owner: string | null; at: number; people: Person[] } | null = null;
 
   constructor(
     private readonly c: Connection,
@@ -779,6 +792,10 @@ export class Contacts {
   /** Everyone matching may read, the account itself left out, folded names reused while nothing about them changed. */
   private people(): Person[] {
     const owner = this.c.get<{ value: string }>("SELECT value FROM meta WHERE key = 'owner'")?.value ?? null;
+    const version = this.c.namesVersion;
+    const at = performance.now();
+    const last = this.snapshot;
+    if (last !== null && last.version === version && last.owner === owner && at - last.at < PEOPLE_TTL_MS) return last.people;
     const ownLids = new Set(owner === null ? [] : this.c.all<{ lid: string }>("SELECT lid FROM lid_phones WHERE phone_jid = ?", owner).map((row) => row.lid));
     const next = new Map<number, Person>();
     const out: Person[] = [];
@@ -792,6 +809,7 @@ export class Contacts {
       out.push(person);
     }
     this.folded = next;
+    this.snapshot = { version, owner, at, people: out };
     return out;
   }
 

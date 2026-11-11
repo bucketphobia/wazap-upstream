@@ -1,0 +1,78 @@
+{
+  "id": "P32",
+  "title": "Opens a photo and a PDF from two people in one get_media call",
+  "severity": "minor",
+  "tags": [
+    "remote"
+  ],
+  "turns": [
+    {
+      "user": "Arată-mi poza cu contorul de la Ana Vasile și extrasul de la Ana Ionescu: ce index arată contorul și ce sold final are extrasul?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "batched_both",
+      "all_of": [
+        {
+          "must_call": {
+            "capability": "media",
+            "args": {
+              "message_ids": {
+                "includes": "$messages.meter_photo.id"
+              }
+            },
+            "ok": true
+          }
+        },
+        {
+          "must_call": {
+            "capability": "media",
+            "args": {
+              "message_ids": {
+                "includes": "$messages.extras_pdf.id"
+              }
+            },
+            "ok": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "one_media_call",
+      "max_calls": {
+        "capability": "media",
+        "max": 1
+      }
+    },
+    {
+      "name": "reads_004512",
+      "answer_regex": {
+        "pattern": "004512|0045\\s?12|4[.,]?512"
+      }
+    },
+    {
+      "name": "reports_the_balance",
+      "answer_regex": {
+        "pattern": "18[.,\\s]?430"
+      }
+    },
+    {
+      "name": "no_server_path",
+      "answer_not_regex": {
+        "pattern": "accounts/\\S+/media/|/var/|/Users/|\\.wazap"
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": []
+}

@@ -136,7 +136,7 @@ test("a version 1 file, as 0.22 ships it, upgrades to the schema a new file gets
   const fresh = join(tempDir(), "fresh", "wazap.sqlite");
   AccountDb.open(fresh).close();
   assert.deepEqual(schemaOf(old), schemaOf(fresh));
-  assert.equal(SCHEMA_VERSION, 6);
+  assert.equal(SCHEMA_VERSION, 8);
 
 });
 
@@ -244,7 +244,8 @@ test("openForReading of a closed database reads it and leaves the directory as i
 });
 
 test("a reader in another process leaves the writer's log byte-for-byte, and the commit still in it stays", async () => {
-  const { db, path } = openTemp();
+  // The writer's own idle checkpoint would move the log while the reader runs; this is about the reader.
+  const { db, path } = openTemp({ idleCheckpointMs: 0 });
   for (let i = 0; i < 50; i++) db.messages.upsert(textMessage(PEER, `K${i}`, T0 + i * 1000, `mesaj ${i}`));
   db.checkpoint();
   // Committed, and nowhere but the log: what another process reading the file must neither miss nor undo.

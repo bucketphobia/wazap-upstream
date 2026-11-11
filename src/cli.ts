@@ -31,8 +31,8 @@ import {
   type RecallSettings,
 } from "./recall/index.js";
 import { PAIRING_TIMEOUT_MS, linkSession, prettyCode, settledAccount, startPairing } from "./pairing.js";
-import { runHttp, runStdio, startLoopbackEndpoint } from "./server.js";
-import { SUPERVISORS, fetchHealth, serviceHolding, tunnelsTo, type Supervisor } from "./service.js";
+import { ACCOUNTS_STOP_MS, drainHttpEndpoints, drainWithin, HTTP_DRAIN_MS, runHttp, runStdio, startLoopbackEndpoint } from "./server.js";
+import { SUPERVISORS, fetchHealth, reinstallCommand, serviceHolding, serviceStopMs, tunnelsTo, type Supervisor } from "./service.js";
 import { applyWrites } from "./settings.js";
 import { storageReport, type StorageReport } from "./storage-status.js";
 import {
@@ -670,15 +670,30 @@ export async function runServe(config: Config): Promise<void> {
     }
     throw err;
   }
+  // The drain's ten seconds plus the accounts' three stay inside the 15 s the
+  // units wazap writes allow a stop (systemd's TimeoutStopSec, launchd's
+  // ExitTimeOut, the compose file's stop_grace_period). A launchd unit from
+  // before ExitTimeOut is killed five seconds after SIGTERM, and a process
+  // killed mid-drain never stops its accounts, so under one the drain shrinks.
+  const stopMs = config.transport === "http" ? serviceStopMs(config.dataDir) : null;
+  const drainMs = drainWithin(stopMs);
+  if (stopMs !== null && drainMs < HTTP_DRAIN_MS) {
+    log(
+      `the service unit allows ${stopMs / 1000} s to stop, so calls under way get ${drainMs / 1000} s at a restart; run \`${reinstallCommand(config.dataDir)}\` once (this service's own node and script; the port stays) to give them ${HTTP_DRAIN_MS / 1000}`
+    );
+  }
   let stopping = false;
   const shutdown = (reason: string): void => {
     if (stopping) return;
     stopping = true;
     log(`received ${reason}, shutting down`);
     // A wedged socket must not cost the user a kill -9; the lock goes on "exit".
-    setTimeout(() => process.exit(0), 3_000).unref();
-    void hub
-      .stop()
+    setTimeout(() => process.exit(0), drainMs + ACCOUNTS_STOP_MS).unref();
+    // HTTP first: tool calls under way answer (a send in flight is not cut
+    // off), then the accounts they used stop.
+    void drainHttpEndpoints(drainMs)
+      .catch((err: unknown) => logError("shutdown", err))
+      .then(() => hub.stop())
       .catch((err: unknown) => logError("shutdown", err))
       .finally(() => process.exit(0));
   };

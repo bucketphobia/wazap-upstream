@@ -7,8 +7,15 @@ import { withCode } from "./error-code.js";
 
 const MEDIA_MAX = 100 * 1024 * 1024;
 
+/**
+ * The URL guard's fix. It holds in every session: a local one lists file_path
+ * among the tool's other ways, a remote one does not, and neither is told it
+ * cannot use host files, which is MEDIA_ACCESS_DENIED's other cause.
+ */
+const URL_DENIED_FIX = "Pass a public http(s) URL without credentials, or the file another way the tool lists (send_message's data_base64, up to 5 MB)";
+
 function denied(message: string): never {
-  throw new WazapError("MEDIA_ACCESS_DENIED", message);
+  throw new WazapError("MEDIA_ACCESS_DENIED", message, URL_DENIED_FIX);
 }
 
 export function publicAddress(address: string): boolean {
@@ -63,11 +70,27 @@ function tooLarge(size: number, maxBytes: number): WazapError {
   );
 }
 
+/** The name a Content-Disposition header gives the file (filename*, then filename), or null. */
+export function dispositionFilename(header: string | undefined): string | null {
+  if (header === undefined) return null;
+  const extended = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(header);
+  if (extended !== null) {
+    try {
+      return decodeURIComponent(extended[1]!.trim());
+    } catch {
+      // A malformed escape: the plain filename below, if any.
+    }
+  }
+  const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/.exec(header);
+  const name = (plain?.[1] ?? plain?.[2] ?? "").trim();
+  return name === "" ? null : name;
+}
+
 /** Dependency injection is only a test seam; callers cannot set it through an MCP tool. */
 export async function publicMedia(
   urlText: string,
   io: Partial<MediaNetwork> = {}
-): Promise<{ buffer: Buffer; mime: string | null; url: string }> {
+): Promise<{ buffer: Buffer; mime: string | null; url: string; filename: string | null }> {
   const net: MediaNetwork = { ...network, ...io };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), net.timeoutMs);
@@ -146,6 +169,7 @@ export async function publicMedia(
         buffer: Buffer.concat(chunks),
         mime: response.headers["content-type"]?.split(";")[0] ?? null,
         url: url.href,
+        filename: dispositionFilename(response.headers["content-disposition"]),
       };
     }
     throw new WazapError("URL_FETCH_FAILED", `Media URL exceeded ${net.maxRedirects} redirects.`);

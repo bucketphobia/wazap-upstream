@@ -71,7 +71,9 @@ test("live writes land between chunks of a clear, and the barrier already holds 
   const { db } = openTemp({ chunkSize: 50 });
   fill(db, PEER, 1000);
   const clearing = db.messages.clearChat(PEER, T0 + 999_000);
-  await new Promise((resolve) => setImmediate(resolve));
+  // The clear first folds the log the fill left, in a turn of its own; then its chunks start.
+  const rows = () => db["connection"].get("SELECT count(*) AS n FROM messages").n;
+  for (let turns = 0; rows() === 1000 && turns < 5; turns++) await new Promise((resolve) => setImmediate(resolve));
   const older = db.messages.upsert(textMessage(PEER, "LATE-OLD", T0 + 10, "vechi"));
   const newer = db.messages.upsert(textMessage(PEER, "LIVE", T0 + 2_000_000, "nou"));
   const midway = db["connection"].get("SELECT count(*) AS n FROM messages").n;
@@ -247,6 +249,8 @@ test("finding 2: a clear hides everything under its barrier at once, stays hidde
     assert.deepEqual(store.vectors.backlog({ model: "m", limit: 5 }).items, []);
   };
   hidden(db);
+  // The fold of what the fill left takes two turns, then one chunk commits.
+  await turn();
   await turn();
   await turn();
   db.close();
@@ -269,6 +273,8 @@ test("finding 2: the file of a row purged before a stop stays queued for unlink 
   db.messages.setMedia(sid(false, PEER, "K0"), "download", "/data/photo-K0.jpg");
   const clearing = db.messages.clearChat(PEER, T0 + 99_000);
   clearing.catch(() => {});
+  // The fold of what the fill left takes two turns, then K0's chunk commits.
+  await turn();
   await turn();
   await turn();
   db.close();

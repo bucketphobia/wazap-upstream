@@ -27,7 +27,7 @@
  */
 import { readsAsAsk } from "./asks.js";
 import type { AccountDb, ChatRecord, DigestMedia, DigestSpan, InboundAggregate, TailMessage, WindowMessage } from "./db/index.js";
-import { idLowerBound, secondOfId } from "./db/index.js";
+import { idLowerBound, OPENED_MEDIA, secondOfId } from "./db/index.js";
 import { PRIVATE_TAG, privatePeople } from "./private-contacts.js";
 import { signalsOf, type Signal } from "./signals.js";
 
@@ -53,6 +53,8 @@ export const WINDOW_FLOOR_MS = WAITING_HORIZON_MS;
 const ASK_SCAN = 30;
 /** Voice notes the footer names by id. */
 const VOICE_IDS_MAX = 10;
+/** Media a direct or group entry names by id when ids are asked for, newest first: a get_media batch holds eight. */
+export const MEDIA_IDS_MAX = 3;
 /** Group metadata fetched to name senders: this many groups, within this long. */
 export const GROUP_META_MAX = 12;
 export const GROUP_META_MS = 1_000;
@@ -92,6 +94,8 @@ export interface CatchupScanRequest {
   tags?: CatchupTagJids;
   /** The instant the digest started, shared by every account it covers; the host's clock when omitted. */
   at?: number;
+  /** Name the newest media of each person and group by message id (catch_up's `ids`). */
+  mediaIds?: boolean;
 }
 
 /** What the service knows that the database does not: names, the account itself, the network-bound lookups. */
@@ -190,6 +194,8 @@ export interface DirectEntry {
   /** Tagged #private: counted, never quoted. */
   private: boolean;
   quoteId: number | null;
+  /** With mediaIds: the newest media get_media opens, by message id; never a #private person's. */
+  mediaIds?: string[];
 }
 
 export interface GroupEntry {
@@ -203,6 +209,8 @@ export interface GroupEntry {
   newestTs: number;
   addressed: boolean;
   hotId: number | null;
+  /** With mediaIds: the newest media get_media opens, by message id; none from someone #private. */
+  mediaIds?: string[];
 }
 
 export interface MutedGroups {
@@ -447,6 +455,11 @@ function sidOf(chatJid: string, keyId: string, fromMe = false): string {
   return `${fromMe}_${chatJid}_${keyId}`;
 }
 
+/** Whether a chat's window holds media get_media opens as a view or text. */
+function opensMedia(aggregate: InboundAggregate): boolean {
+  return OPENED_MEDIA.some((type) => (aggregate.media[type] ?? 0) > 0);
+}
+
 /** A bare placeholder ("[image]", "[sticker]") says nothing worth quoting. */
 function quotable(message: TailMessage): boolean {
   if (message.transcript !== null && message.transcript.trim() !== "") return true;
@@ -468,6 +481,17 @@ function emptySkips(): CatchupScan["skipped"] {
     newsletters: { chats: 0, messages: 0 },
     broadcasts: { chats: 0, messages: 0 },
   };
+}
+
+/**
+ * One read per chat, as one statement for the chats `batchable` admits and one
+ * each for the rest; the answers in the order of `items`.
+ */
+function inBatches<T, R>(items: readonly T[], batchable: (item: T) => boolean, many: (batch: T[]) => R[], one: (item: T) => R): R[] {
+  const batch = items.filter(batchable);
+  const answers = many(batch);
+  let next = 0;
+  return items.map((item) => (batchable(item) ? answers[next++]! : one(item)));
 }
 
 // ---------------------------------------------------------------- tags
@@ -580,6 +604,19 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
   const peopleToName = new Set<string>();
   const contactIds = new Set<number>();
 
+  /**
+   * The chats active since `ts`, newest first: read once for the widest
+   * instant asked (the 14-day horizon, for waiting), and a later instant
+   * filtered out of that list, in the same order, instead of read again.
+   */
+  let widest: { ts: number; chats: ChatRecord[] } | null = null;
+  const activeSince = (ts: number): ChatRecord[] => {
+    if (widest !== null && ts >= widest.ts) return ts === widest.ts ? widest.chats : widest.chats.filter((chat) => chat.lastTs !== null && chat.lastTs >= ts);
+    const chats = digest.chatsActiveSince(ts);
+    if (widest === null || ts < widest.ts) widest = { ts, chats };
+    return chats;
+  };
+
   // -------------------------------------------------------------- calls, 14 days
   const horizonTs = now - WAITING_HORIZON_MS;
   const horizonId = idBefore(horizonTs);
@@ -600,7 +637,7 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
   const waitingChats = new Set<number>();
   if (include.has("waiting")) {
     const handled = digest.handled();
-    for (const chat of digest.chatsActiveSince(horizonTs)) {
+    for (const chat of activeSince(horizonTs)) {
       if (host.isNoise(chat.jid) || chat.jid === own) continue;
       const family = familyOf(chat);
       // A chat tagged #no-catchup is read counting its person, so its own reads keep what they sent.
@@ -679,10 +716,10 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
           const lows = digest.chatsStoredIn(windowSpan(sinceId));
           return digest.chatsByIds(lows.keys()).map(({ chat, asked }) => ({ chat, low: Math.min(...asked.map((id) => lows.get(id)!)) }));
         })()
-      : digest.chatsActiveSince(sinceId === 0 ? 0 : tsOfId(sinceId)).map((chat) => ({ chat, low: sinceId + 1 }));
+      : activeSince(sinceId === 0 ? 0 : tsOfId(sinceId)).map((chat) => ({ chat, low: sinceId + 1 }));
   const chatsById = new Map(active.map(({ chat }) => [chat.id, chat]));
   type RawDirect = Omit<DirectEntry, "name" | "note" | "saved" | "business" | "unknown"> & { chatRecord: ChatRecord };
-  type RawGroup = Omit<GroupEntry, "name" | "top"> & { chatRecord: ChatRecord; floor: number; topIds: number[] };
+  type RawGroup = Omit<GroupEntry, "name" | "top"> & { chatRecord: ChatRecord; family: readonly number[]; floor: number; topIds: number[] };
   const rawDirect: RawDirect[] = [];
   const rawGroups: RawGroup[] = [];
   type RawAddressed = Omit<AddressedEntry, "name" | "from"> & { senderId: number | null };
@@ -690,12 +727,21 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
   const mutedGroups = { groups: 0, count: 0, chats: [] as Array<{ jid: string; count: number }> };
   const wantsWindow = include.has("addressed") || include.has("direct") || include.has("groups");
   const leftGroups = new Set<number>();
-  for (const { chat, low } of wantsWindow ? active : []) {
-    if (chat.kind === "status" || host.isNoise(chat.jid) || chat.jid === own) continue;
-    const family = familyOf(chat);
+  const windowChats = (wantsWindow ? active : []).flatMap(({ chat, low }) => {
+    if (chat.kind === "status" || host.isNoise(chat.jid) || chat.jid === own) return [];
     const floor = floorOf(chat, low);
-    if (floor >= untilId) continue;
-    const aggregate: InboundAggregate = digest.inbound(family, isExcluded(chat) ? counting(windowSpan(floor)) : windowSpan(floor), now);
+    return floor >= untilId ? [] : [{ chat, family: familyOf(chat), floor }];
+  });
+  // Every chat's aggregate in one statement; a chat still folding another in, or counted whole (#no-catchup), on its own.
+  const batchable = (entry: { chat: ChatRecord; family: readonly number[] }): boolean => entry.family.length === 1 && !isExcluded(entry.chat);
+  const aggregates = inBatches(
+    windowChats,
+    batchable,
+    (batch) => digest.inboundMany(batch.map(({ chat, floor }) => ({ chatId: chat.id, afterId: floor })), windowSpan(0), now),
+    ({ chat, family, floor }) => digest.inbound(family, isExcluded(chat) ? counting(windowSpan(floor)) : windowSpan(floor), now)
+  );
+  for (const [index, { chat, family, floor }] of windowChats.entries()) {
+    const aggregate: InboundAggregate = aggregates[index]!;
     if (aggregate.count === 0) continue;
     if (chat.kind === "newsletter" || chat.kind === "broadcast") {
       const bucket = chat.kind === "newsletter" ? skipped.newsletters : skipped.broadcasts;
@@ -740,15 +786,15 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
         mutedGroups.chats.push({ jid: chat.jid, count: aggregate.count });
         continue;
       }
-      const top = digest.topSenders(family, windowSpan(floor), now, 3);
-      for (const sender of top) contactIds.add(sender.senderId);
       rawGroups.push({
         chat: chat.jid,
         chatRecord: chat,
+        family,
         floor,
         count: aggregate.count,
         senders: aggregate.senders,
-        topIds: top.map((sender) => sender.senderId),
+        // Filled for every group at once, below.
+        topIds: [],
         media: aggregate.media,
         polls: aggregate.polls,
         newestTs: aggregate.newestTs ?? 0,
@@ -776,9 +822,24 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
       muted: muted(chat),
       private: privateChat(chat),
       quoteId: privateChat(chat) ? null : (newest?.id ?? null),
+      ...(request.mediaIds === true && !privateChat(chat) && opensMedia(aggregate)
+        ? { mediaIds: digest.mediaTail(family, windowSpan(floor), now, MEDIA_IDS_MAX).map((media) => sidOf(chat.jid, media.keyId)) }
+        : {}),
     });
     if (chat.contactId !== null) contactIds.add(chat.contactId);
     peopleToName.add(chat.jid);
+  }
+
+  // Who wrote most in each group, every group in one statement.
+  const tops = inBatches(
+    rawGroups,
+    (group) => group.family.length === 1,
+    (batch) => digest.topSendersMany(batch.map((group) => ({ chatId: group.chatRecord.id, afterId: group.floor })), windowSpan(0), now, 3),
+    (group) => digest.topSenders(group.family, windowSpan(group.floor), now, 3)
+  );
+  for (const [index, group] of rawGroups.entries()) {
+    group.topIds = tops[index]!.map((sender) => sender.senderId);
+    for (const id of group.topIds) contactIds.add(id);
   }
 
   // Polls and events nobody has answered for the user, even in a muted group.
@@ -806,15 +867,34 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
   }
 
   // Hot quotes: the most reacted message, or the newest one worth quoting — never from someone #private.
-  for (const group of rawGroups) {
-    if (privateChat(group.chatRecord)) continue;
-    const family = familyOf(group.chatRecord);
+  const quotedGroups = rawGroups.filter((group) => !privateChat(group.chatRecord));
+  const reacted = inBatches(
+    quotedGroups,
+    (group) => group.family.length === 1,
+    (batch) =>
+      digest.mostReactedMany(batch.map((group) => ({ chatId: group.chatRecord.id, afterId: group.floor })), windowSpan(0), now, {
+        excludeSenders: tags.privateSenders,
+      }),
+    (group) => digest.mostReacted(group.family, windowSpan(group.floor), now, { excludeSenders: tags.privateSenders })
+  );
+  for (const [index, group] of quotedGroups.entries()) {
     group.hotId =
-      digest.mostReacted(family, windowSpan(group.floor), now, { excludeSenders: tags.privateSenders }) ??
+      reacted[index] ??
       digest
-        .inboundTail(family, windowSpan(group.floor), now, 10, 400)
+        .inboundTail(group.family, windowSpan(group.floor), now, 10, 400)
         .find((message) => quotable(message) && message.text.length >= 20 && !privateSender(message.senderId))?.id ??
       null;
+  }
+
+  // The newest media of each group, from nobody #private, when ids were asked for.
+  if (request.mediaIds === true) {
+    const hidden = new Set([...(excludeSenders ?? []), ...tags.privateSenders]);
+    for (const group of quotedGroups) {
+      if (!OPENED_MEDIA.some((type) => (group.media[type] ?? 0) > 0)) continue;
+      group.mediaIds = digest
+        .mediaTail(group.family, { ...windowSpan(group.floor), excludeSenders: hidden }, now, MEDIA_IDS_MAX)
+        .map((media) => sidOf(group.chat, media.keyId));
+    }
   }
 
   // -------------------------------------------------------------- missed calls
@@ -930,7 +1010,7 @@ export async function scanCatchup(db: AccountDb, host: CatchupHost, request: Cat
     });
 
   const groups: GroupEntry[] = rawGroups
-    .map(({ chatRecord: _chat, floor: _floor, topIds, ...entry }) => ({
+    .map(({ chatRecord: _chat, family: _family, floor: _floor, topIds, ...entry }) => ({
       ...entry,
       name: host.nameOf(entry.chat),
       top: topIds.map((id) => personName(id, "someone")),

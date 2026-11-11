@@ -141,9 +141,15 @@ const cloudflare: TunnelProvider = {
     );
   },
   close: () => {},
+  // --no-autoupdate: the supervisor keeps cloudflared running and the package
+  // manager updates it; a self-update restarts the tunnel on its own schedule,
+  // dropping every call and SSE stream it carries at that moment. The origin
+  // keep-alive needs no flag: cloudflared pools idle connections for 90 s and
+  // wazap keeps them open for 120 (server.ts HTTP_KEEP_ALIVE_MS).
   command: (port) => [
     which("cloudflared") ?? "cloudflared",
     "tunnel",
+    "--no-autoupdate",
     "run",
     "--url",
     `http://127.0.0.1:${port}`,

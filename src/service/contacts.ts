@@ -389,7 +389,7 @@ export class AccountContacts {
         if (trimmed === "") removeFields.add(normalized);
         else {
           if (trimmed.length > MAX_FIELD_VALUE_CHARS) {
-            throw new WazapError("TEXT_TOO_LONG", `Detail "${normalized}" is over ${MAX_FIELD_VALUE_CHARS} characters.`);
+            throw new WazapError("TEXT_TOO_LONG", `Detail "${normalized}" is over ${MAX_FIELD_VALUE_CHARS} characters.`, "Shorten the detail");
           }
           set[normalized] = trimmed;
         }
@@ -416,10 +416,10 @@ export class AccountContacts {
         ).size;
         const who = jids.length === 1 ? "A contact" : this.identity.displayName(jid);
         if (tagCount > MAX_CONTACT_TAGS) {
-          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_TAGS} tags.`);
+          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_TAGS} tags.`, "Remove some with remove_tags, in this call or first");
         }
         if (fieldCount > MAX_CONTACT_FIELDS) {
-          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_FIELDS} details.`);
+          throw new WazapError("TEXT_TOO_LONG", `${who} holds at most ${MAX_CONTACT_FIELDS} details.`, "Remove some with remove_fields, in this call or first");
         }
       }
       db.transaction(() => {

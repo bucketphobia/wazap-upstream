@@ -91,6 +91,7 @@ export class Merger {
   /** The synchronous half: the pairing, the contact rows and the chat rows. Runs inside write(). */
   private pair(lid: string, phone: string): { contactId: number; chatId: number | null } {
     const now = this.c.now();
+    this.c.namesChanged();
     this.c.run(
       `INSERT INTO lid_phones(lid, phone_jid, learned_at) VALUES (?, ?, ?)
        ON CONFLICT(lid) DO UPDATE SET phone_jid = excluded.phone_jid, learned_at = excluded.learned_at`,
@@ -196,6 +197,7 @@ export class Merger {
       this.c.write(() => {
         this.moveContactRefs(contact.merged_into, contact.id, null);
         this.c.run("DELETE FROM contacts WHERE id = ?", contact.id);
+        this.c.namesChanged();
       });
     }
     for (;;) {
@@ -305,7 +307,8 @@ export class Merger {
       const drop = this.c.get<ChatRow>("SELECT * FROM chats WHERE id = ?", dropId)!;
       this.c.run(
         `UPDATE chats SET name = coalesce(name, ?), pinned = coalesce(pinned, ?), muted_until = coalesce(muted_until, ?),
-           unread = unread + ?, proto = coalesce(proto, ?), archived = CASE WHEN ? = 0 THEN 0 ELSE archived END,
+           unread = unread + ?, described_ts = CASE WHEN proto IS NULL THEN ? ELSE described_ts END, proto = coalesce(proto, ?),
+           archived = CASE WHEN ? = 0 THEN 0 ELSE archived END,
            cleared_through_ts = CASE WHEN ? IS NULL THEN cleared_through_ts
              ELSE max(coalesce(cleared_through_ts, 0), ?) END
          WHERE id = ?`,
@@ -313,6 +316,7 @@ export class Merger {
         drop.pinned,
         drop.muted_until,
         drop.unread,
+        drop.described_ts,
         drop.proto,
         drop.archived,
         drop.cleared_through_ts,
@@ -338,6 +342,7 @@ export class Merger {
       this.c.run("DELETE FROM retracted WHERE chat_id = ?", dropId);
       this.c.run("DELETE FROM chats WHERE id = ?", dropId);
       this.c.run(RECOMPUTE_LAST, keepId);
+      this.c.namesChanged();
     });
     // A clear of either spelling that landed while the fold ran may have raised the barrier since the first purge.
     report.mediaPaths.push(...(await this.messages.purgeCleared(keepId)).mediaPaths);

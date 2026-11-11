@@ -4,7 +4,8 @@ import type { SendRecord, Sends } from "./db/index.js";
 import { styleCheckLines, type StyleCheck } from "./draft-style.js";
 import { WazapError } from "./errors.js";
 import { isoWithOffset } from "./messages.js";
-import { captionTravels, mimeOfSource } from "./outgoing-media.js";
+import { captionTravels, mimeOfSource, nativeKind } from "./outgoing-media.js";
+import type { PinnedMedia } from "./pinned-media.js";
 import { describeInstant } from "./schedule-time.js";
 import type { MediaSource, OutgoingTarget, SentMessage } from "./wa-types.js";
 
@@ -34,6 +35,8 @@ export type DraftPayload =
       asGif: boolean;
       /** A scheduled media draft: the file's SHA-256 when the user approved it; another file at that path is refused. */
       sha256?: string;
+      /** Media from a URL or from the call itself, fetched and kept when drafted: the bytes that leave (src/pinned-media.ts). */
+      pinned?: PinnedMedia;
     }
   | { kind: "poll"; chatId: string; question: string; options: string[]; multiSelect: boolean }
   | {
@@ -84,6 +87,8 @@ export interface DraftView {
   /** A scheduled draft: when confirm_send has it sent, ISO in time_zone, and that zone. */
   send_at?: string;
   time_zone?: string;
+  /** A media draft whose file was fetched or given when drafted: what will leave, as it is kept. */
+  media?: { filename: string; mime: string; size: number };
   /**
    * A text draft to a direct chat, against how the user writes there: the
    * mismatches found (none is fine) and what they were measured on. Absent
@@ -320,6 +325,10 @@ export class DraftStore {
       view.time_zone = draft.schedule.zone;
     }
     if (looksUnnamed(draft.to)) view.unnamed_recipient = true;
+    if (draft.payload.kind === "media" && draft.payload.pinned !== undefined) {
+      const { filename, mime, size } = draft.payload.pinned;
+      view.media = { filename, mime, size };
+    }
     return view;
   }
 
@@ -426,22 +435,20 @@ export function formatDraftPreview(to: OutgoingTarget, payload: DraftPayload, sc
   return `${formatToLine(to)}${when}\n${formatBody(payload)}`;
 }
 
-export function renderDraft(view: DraftView): string {
-  const lines = [`Draft ${view.draft_id}. Not sent.`, "", view.preview];
-  if (view.unnamed_recipient === true) {
-    lines.push(
-      "",
-      "Note: the recipient is not a saved contact — the name shown is their public WhatsApp name, or only their number."
-    );
-  }
+
+/**
+ * A draft as text: its id, when it expires, the preview to show, the style
+ * check, then the answer's notes and its next step, the same strings the
+ * structured answer carries (tools.ts drafted), so a client that reads only
+ * the text is told the same approval rule.
+ */
+export function renderDraft(view: DraftView, notes: readonly string[], next: string): string {
+  // The preview names a person by number, which is a chat_id too; a group or a LID by its id here.
+  const numbered = view.to.number !== undefined || /^\d+@s\.whatsapp\.net$/.test(view.to.chat_id);
+  const lines = [`Draft ${view.draft_id}${numbered ? "" : ` to ${view.to.chat_id}`}. Not sent. Expires at ${view.expires_at.slice(11, 16)}.`, "", view.preview];
   const style = styleCheckLines(view.style_check);
   if (style.length > 0) lines.push("", ...style);
-  lines.push(
-    "",
-    view.send_at === undefined
-      ? "Show this to the user. After they say yes, call confirm_send with this draft_id."
-      : "Show this to the user, the time included. After they say yes, call confirm_send with this draft_id: it schedules the message, and nothing is sent before that time."
-  );
+  lines.push("", ...notes, next);
   return lines.join("\n");
 }
 
@@ -468,12 +475,31 @@ function formatBody(payload: DraftPayload): string {
 }
 
 function mediaBody(payload: Extract<DraftPayload, { kind: "media" }>): string {
-  const name = mediaLabel(payload);
-  const tag = payload.asVoice ? "voice" : payload.asDocument ? "document" : payload.asGif ? "gif" : "media";
+  const pinned = payload.pinned;
+  // A URL's file was fetched when drafted, before any yes: the preview says from where, the host a redirect led to first.
+  const asked = pinned === undefined ? undefined : hostOf(payload.source.url);
+  const came = pinned?.fetchedFrom ?? asked;
+  const fetched = came === undefined ? "" : `, already fetched from ${came}${asked !== undefined && asked !== came ? ` (via ${asked})` : ""}`;
+  const name = pinned === undefined ? mediaLabel(payload) : `${pinned.filename} (${pinned.mime}, ${sizeLabel(pinned.size)})${fetched}`;
+  const tag = payload.asVoice ? "voice" : payload.asDocument ? "document" : payload.asGif ? "gif" : pinned === undefined ? "media" : nativeKind(pinned.mime);
   const line = `[${tag}] ${name}`;
   // Only a caption that will travel: a voice note or an audio file goes without one.
-  const shown = payload.caption && captionTravels(mimeOfSource(payload.source), payload);
+  const shown = payload.caption && captionTravels(pinned?.mime ?? mimeOfSource(payload.source), payload);
   return shown ? `${line}\n"${payload.caption}"` : line;
+}
+
+
+function hostOf(url: string | undefined): string | undefined {
+  if (url === undefined) return undefined;
+  try {
+    return new URL(url).host || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function sizeLabel(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
 
 function mediaLabel(payload: Extract<DraftPayload, { kind: "media" }>): string {

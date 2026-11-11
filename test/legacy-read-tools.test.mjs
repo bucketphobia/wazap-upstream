@@ -66,10 +66,35 @@ test("remote HTTP hides compatibility names but cached SDK calls remain validate
     assert.ok(!answer.isError, `${name}: ${allText(answer)}`);
     if (name === "search_messages") assert.equal(answer.structuredContent.messages[0].message_id, sid);
     if (name === "transcribe_audio") assert.equal(answer.structuredContent.text, "lista pentru transport");
-    if (name === "download_media") assert.ok(answer.content.some((block) => block.type === "image"));
+    if (name === "download_media") {
+      assert.ok(answer.content.some((block) => block.type === "image"));
+      assert.equal(answer.structuredContent.path, undefined, "a remote session is named no path");
+      assert.ok(!allText(answer).includes(f.svc.config.dataDir), "nor any of the data dir");
+    }
   }
   const blocked = await client.callTool({ name: "download_media", arguments: { message_id: image, save_to: "/unused" } });
   assert.equal(textError(blocked).error, "MEDIA_ACCESS_DENIED");
+});
+
+test("download_media honours detail and pages, which its schema inherits from get_media", async (t) => {
+  const f = fixture(t);
+  const { default: sharp } = await import("sharp");
+  const big = await sharp({ create: { width: 3000, height: 2000, channels: 3, background: "#c0c0c0" } }).jpeg().toBuffer();
+  const image = f.arrive(DAN, { imageMessage: { mimetype: "image/jpeg", fileLength: big.length } });
+  f.svc.mediaBuffer = async () => big;
+  assert.equal((await f.call("download_media", { message_id: image })).structuredContent.view.width, 1024);
+  const high = (await f.call("download_media", { message_id: image, detail: "high" })).structuredContent;
+  assert.equal(high.view.width, 2048);
+  assert.equal(high.view.detail, "high");
+
+  const { pdfOf } = await import("./media-fixtures.mjs");
+  const pdf = pdfOf([["unu"], ["doi"], ["trei"]]);
+  const document = f.arrive(DAN, { documentMessage: { mimetype: "application/pdf", fileName: "a.pdf", fileLength: pdf.length } });
+  f.svc.mediaBuffer = async () => pdf;
+  const second = (await f.call("download_media", { message_id: document, pages: "2" })).structuredContent;
+  assert.equal(second.document.pages, "2-2");
+  assert.equal(second.document_text, "--- page 2 ---\ndoi");
+  assert.equal(textError(await f.call("download_media", { message_id: document, pages: "x" })).error, "INVALID_ID");
 });
 
 test("contact search returns ambiguous candidates; exact message search ignores accents and obeys author/date", async (t) => {
@@ -540,7 +565,12 @@ test("compact cursors keep their mode; an all-media page reports omissions inste
   assert.equal(first.structuredContent.shown_message_count, 0);
   assert.deepEqual(first.structuredContent.conversations[0].omitted, { voice: 1 });
   assert.doesNotMatch(first.content[0].text, /No recent messages/);
+  // The transcript is all an assistant's session gets: the chat's id, the next page and the notes are in it.
+  assert.ok(first.content[0].text.startsWith(`Angela A (${ANA}):\n`), first.content[0].text);
+  assert.ok(first.content[0].text.includes(`call get_recent_messages with cursor: "${first.structuredContent.next_cursor}"`), first.content[0].text);
+  assert.ok(first.content[0].text.endsWith(`\n${first.structuredContent.notes.join("\n")}`), first.content[0].text);
   const next = await f.call("get_recent_messages", { cursor: first.structuredContent.next_cursor, limit: 10 });
+  assert.doesNotMatch(next.content[0].text, /with cursor:/, "the last page names no next one");
   assert.equal(next.structuredContent.compact, true);
   assert.equal(next.structuredContent.shown_message_count, 1);
   assert.deepEqual(next.structuredContent.conversations[0].omitted, { image: 1 });
@@ -569,16 +599,16 @@ test("compact reads keep missed calls, bracketed words and quotes, without mergi
 
 test("remote learn and instructions prefer the current catalogue and explain callable cached fallbacks", async (t) => {
   const f = fixture(t);
-  const guide = (await f.call("learn", {})).content[0].text;
+  const guide = (await f.call("learn", { topic: "workflows" })).content[0].text;
   for (const name of LEGACY) assert.ok(guide.includes(name), name);
-  assert.ok(Buffer.byteLength(guide) / 4 <= 2000, "remote learn stays within 2000 tokens");
+  assert.ok(Buffer.byteLength(guide) <= 3_000, "remote learn's workflows stay short");
   assert.match(guide, /catch_up/);
   assert.match(guide, /Compatibility names remain callable but are not advertised/);
   assert.match(guide, /words and meaning with contexts/i);
   assert.match(guide, /check corrections, clarify ambiguity/i);
   assert.match(guide, /get_unanswered/);
   const local = schemaCheckedTools(f.svc, { allowWrite: false });
-  assert.match((await local.call("learn", {})).content[0].text, /catch_up/);
+  assert.match((await local.call("learn", { topic: "workflows" })).content[0].text, /catch_up/);
   const stop = new AbortController();
   t.after(() => stop.abort());
   const port = await startHttpEndpoint(asToolSource(f.svc), f.svc.config, {

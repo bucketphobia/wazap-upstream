@@ -424,7 +424,7 @@ test("recall off answers RECALL_UNAVAILABLE with the fix, and search falls back 
     assert.equal(result.isError, undefined);
     assert.equal(result.structuredContent.mode, "keyword_fallback");
     assert.match(result.structuredContent.recall_unavailable.fix, /wazap config recall local/);
-    assert.match(result.content[0].text, /Meaning search is unavailable .*match the words only/);
+    assert.match(result.content[0].text, /Meaning search is unavailable, so these match the words only: recall_unavailable says why\.\nrecall_unavailable: [A-Z_]+: /);
     assert.match((result.structuredContent.notes ?? []).join(" "), /words only/, "said in the structured content too");
   } finally {
     await svc.stop();
@@ -452,7 +452,7 @@ test("an embedding server that fails or refuses the query leaves search answerin
       assert.equal(result.structuredContent.recall_unavailable.code, code);
       assert.match(result.structuredContent.recall_unavailable.message, new RegExp(`HTTP ${status}`));
       assert.deepEqual(result.structuredContent.messages.map((m) => m.message_id), [`false_${PEER}_M1`]);
-      assert.match(result.content[0].text, /Meaning search is unavailable .*match the words only/);
+      assert.match(result.content[0].text, /Meaning search is unavailable, so these match the words only: recall_unavailable says why\.\nrecall_unavailable: [A-Z_]+: /);
     } finally {
       await svc.stop();
       stub.server.close();
@@ -800,7 +800,7 @@ test("the tool renders each hit with its date, score, what matched and the index
     const out = result.content[0].text;
     assert.match(out, /# Search results for "the invoice" \(2\)/);
     assert.match(out, /score \d\.\d{3}, meaning/);
-    assert.match(out, /\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    assert.match(out, /\n- \d{4}-\d{2}-\d{2} \d{2}:\d{2} /);
     assert.match(out, /index only/);
     assert.match(out, /factura veche din index/);
     assert.equal(result.structuredContent.count, 2);

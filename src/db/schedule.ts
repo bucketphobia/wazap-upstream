@@ -429,6 +429,15 @@ export class Schedule {
     );
   }
 
+  /** The pinned media a scheduled message waiting or being sent names, by SHA-256: what must stay on disk until it goes. */
+  pinnedMedia(): string[] {
+    return this.c
+      .all<{ sha: string | null }>(
+        `SELECT json_extract(payload, '$.payload.pinned.sha256') AS sha FROM scheduled WHERE kind = 'media' AND state IN ('pending', 'sending')`
+      )
+      .flatMap((row) => (typeof row.sha === "string" ? [row.sha] : []));
+  }
+
   /** pending → cancelled. False when it is already under way or closed. */
   cancelScheduled(id: string, now: number): boolean {
     return this.change("UPDATE scheduled SET state = 'cancelled', next_attempt_at = NULL, updated_at = ? WHERE id = ? AND state = 'pending'", now, id) === 1;

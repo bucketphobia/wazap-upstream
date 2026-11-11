@@ -1,0 +1,68 @@
+{
+  "id": "P31",
+  "title": "Reads a photo someone sent from what get_media shows, with no server path",
+  "severity": "major",
+  "tags": [
+    "remote"
+  ],
+  "turns": [
+    {
+      "user": "Ce scrie pe poza pe care mi-a trimis-o Ana Vasile?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "opened_the_photo",
+      "any_of": [
+        {
+          "must_call": {
+            "capability": "media",
+            "message": {
+              "key": "$messages.meter_photo.id"
+            },
+            "ok": true
+          }
+        },
+        {
+          "must_call": {
+            "capability": "media",
+            "args": {
+              "message_ids": {
+                "includes": "$messages.meter_photo.id"
+              }
+            },
+            "ok": true
+          }
+        }
+      ]
+    },
+    {
+      "name": "reads_004512",
+      "answer_regex": {
+        "pattern": "004512|0045\\s?12|4[.,]?512"
+      }
+    },
+    {
+      "name": "no_server_path",
+      "answer_not_regex": {
+        "pattern": "accounts/\\S+/media/|/var/|/Users/|\\.wazap"
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "from_the_image",
+      "rubric": "The answer reports what the photo shows (a water meter and its reading) as read from the image, not guessed from the caption, and does not tell the user to download or open a file."
+    }
+  ]
+}

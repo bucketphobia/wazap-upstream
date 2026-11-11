@@ -356,8 +356,8 @@ test("read_messages tags the user's own messages with how far they got, and get_
   const read = await call("read_messages", { chat_id: ANA });
   const tags = read.content[0].text
     .split("\n")
-    .filter((line) => line.startsWith("- **"))
-    .map((line) => line.match(/ \[([^\]]*)\] · id:/)?.[1] ?? null);
+    .filter((line) => /^- \d{2}:\d{2} /.test(line))
+    .map((line) => line.match(/ \[([^\]]*)\] · (true|false)_/)?.[1] ?? null);
   assert.deepEqual(tags, [null, "read", "sent", null]);
   assert.deepEqual(
     read.structuredContent.messages.map((m) => m.delivery?.status ?? null),

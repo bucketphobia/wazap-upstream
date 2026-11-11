@@ -46,11 +46,11 @@ test("a note on a contact rides along wherever the person shows, and lives in th
   const { svc, call, arrive } = setup();
   arrive(DAN, "salut");
   const noted = await call("remember", { chat_id: "+40 700 000 003", note: "Hermi, my own agent" });
-  assert.match(noted.content[0].text, /Noted for Dan: Hermi, my own agent/);
+  assert.match(noted.content[0].text, /Noted for Dan \(\+40 700 000 003\): Hermi, my own agent/);
   const found = await call("find_contact", { name: "Dan" });
   assert.equal(found.structuredContent.contact.note, "Hermi, my own agent");
   assert.match(found.content[0].text, /note: Hermi, my own agent/);
-  assert.match((await call("list_chats", {})).content[0].text, /## Dan \(\+40 700 000 003\) · Hermi, my own agent/);
+  assert.match((await call("list_chats", {})).content[0].text, /\n- Dan \(\+40 700 000 003\) · Hermi, my own agent · /);
   assert.equal(svc.db.identity.notes(DAN).note, "Hermi, my own agent");
 
   const again = openService(WhatsAppService, { ...offlineConfig("x"), dataDir: svc.config.dataDir });
@@ -69,7 +69,7 @@ test("remember files a note, tags and details in one call, and a refused edit fi
   assert.equal(filed.structuredContent.note, "colegul de birou");
   assert.deepEqual(filed.structuredContent.tags, ["echipa"]);
   assert.deepEqual(filed.structuredContent.fields, { role: "contabil" });
-  assert.match(filed.content[0].text, /Noted for Dan: colegul de birou/);
+  assert.match(filed.content[0].text, /Noted for Dan \(\+40 700 000 003\): colegul de birou/);
   assert.match(filed.content[0].text, /\*\*role\*\*: contabil/);
 
   const refused = await call("remember", { chat_id: DAN, note: "altceva", add_tags: ["#"] });
@@ -89,7 +89,7 @@ test("remember handled: true takes a chat off the waiting list until the other s
   );
 
   const marked = await call("remember", { chat_id: ANA, handled: true });
-  assert.match(marked.content[0].text, /Ana is off the waiting list until they write again/);
+  assert.match(marked.content[0].text, /Ana \(\+40 700 000 002\) is off the waiting list until they write again/);
   assert.equal(marked.structuredContent.handled.ask_text, "poți să mă suni?");
   assert.deepEqual(await waiting(), []);
 
@@ -299,6 +299,6 @@ test("in a group the note introduces the sender once, then the name alone", asyn
   arrive(GROUP, "și tu?", { participant: ANA, at: t + 10 * 60_000 });
   arrive(GROUP, "tot aici", { participant: DAN, at: t + 20 * 60_000 });
   const read = (await call("read_messages", { chat_id: GROUP })).content[0].text;
-  assert.equal((read.match(/\*\*Dan · Hermi\*\*/g) || []).length, 1, "introduced once");
-  assert.equal((read.match(/\*\*Dan\*\* ·/g) || []).length, 1, "then the name alone");
+  assert.equal((read.match(/ Dan \(\+40 700 000 003\) · Hermi · /g) || []).length, 1, "introduced once, with the number and the note");
+  assert.equal((read.match(/ Dan · false_/g) || []).length, 1, "then the name alone");
 });

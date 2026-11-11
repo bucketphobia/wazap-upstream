@@ -27,13 +27,36 @@ wazap refuses to bind a non-loopback address without a read token.
 
 ### Client isolation
 
-HTTP MCP sessions are bound to the exact bearer credential that initialized
-them (stored in memory as a SHA-256 fingerprint), including its read/write
-permissions. Another credential cannot use that session's POST, GET or DELETE
-endpoint, even if it knows the session id; it receives `404 Session not found`.
-Each request still validates the token, so expiry or revocation returns 401.
-After an OAuth access token rotates, initialize a new MCP session when the old
-session returns 404.
+HTTP MCP sessions are bound to the credential that initialized them,
+including its read/write permissions: a static token by its SHA-256
+fingerprint, an OAuth agent by its grant (its client id and granted scopes)
+rather than the access token of the day, so the daily rotation keeps its
+sessions, and its POST budget, as they were. A refresh that narrows the scopes
+is a different owner. Another credential cannot use that session's POST, GET
+or DELETE endpoint, even if it knows the session id; it receives
+`404 Session not found`. Each request still validates the token, so expiry or
+revocation returns 401.
+
+A session outlives the process holding it. Its id is `<uuid>.<mark>`, the mark
+an HMAC over the uuid, the credential and what the session handed its client
+at `initialize` (the tools, workflows and instructions, as one digest), keyed
+by `<data-dir>/session.key` (made on first use, `0600`). When a POST or GET
+arrives with an id this process does not hold — after a restart, after the
+idle sweep, after an eviction — and the mark matches the credential presenting
+it and what wazap would hand that client now, wazap opens the session again
+under that id and serves the request: the client never sees a 404 or redoes
+its handshake. A revived session has the credential's tools and drafts; what
+it loses is what the client said in its first `initialize` (its name and
+capabilities, which wazap does not use). When what the client was handed has
+changed — an update to another version, writes switched on or off, an account
+added or renamed — the session is not revived: the client gets the 404, and
+the fresh `initialize` it answers with gives it the new tools and
+instructions. Any other credential still gets 404,
+as does an id wazap did not mint; anonymous loopback sessions are never
+revived, and neither is a session its client ended with DELETE (the process
+remembers the last 1,024 ended ids; a restart forgets them). Revived sessions count against the caps below, and each revival is
+logged without the id. Deleting `session.key` and restarting makes every
+outstanding id unrevivable.
 
 Clients sharing a static token share an identity, and unauthenticated readers
 share an anonymous identity. Use distinct credentials/OAuth grants for isolation;
@@ -57,16 +80,83 @@ tools unless a trusted harness enforces approval.
 ### Request budgets
 
 MCP POSTs authenticate before JSON parsing, accept at most 100 KiB and refuse
-compressed bodies. Each credential has 240 POSTs/minute across its sessions;
-429 responses include `Retry-After`. The session registry holds at most 128
-sessions overall and 32 per credential, evicting that credential's oldest first.
+compressed bodies. The one exception is a write credential's POST that
+declares its length, which may carry up to 8 MiB: enough for `send_message`'s
+`data_base64` at its 5 MB, line-wrapped with CRLF too, and no more. Those large
+bodies are read and served at most 32 MiB at a time across every credential
+(four of the largest); past that a POST gets 503 with `Retry-After: 2`, and a
+read credential's, or a body sent without a length, keeps the 100 KiB limit.
+A body past its limit gets 413 with a JSON-RPC error that names the limit, and
+for a write credential the 5 MB of `data_base64` and the fix of passing a
+larger file as a `url`: an MCP client shows the agent those words. Measured on the
+development machine: one 5 MB `data_base64` draft raises the server's peak RSS
+by about 26 MB, four at once by about 85 MB. Each credential has 240 POSTs/minute across its sessions;
+429 responses include `Retry-After`. The session registry holds at most 64
+sessions overall and 32 per credential, evicting that credential's least
+recently used session first, and never one answering a request while another
+can go; it drops a session nobody has used for 24 hours. Either way a session
+comes back on its owner's next call (see [Client isolation](#client-isolation)),
+within the same caps: a POST revives it if that closes no session answering a
+request, and a GET (a client reconnecting its notification stream) only into a
+free place, so clients past the cap do not evict one another round and round.
+Otherwise the call gets the 404, and a fresh `initialize` takes the idlest
+place.
 Tool work is capped at eight concurrent operations per MCP session and 32
 across the process, including stdio/bridges. Slots remain held until work settles,
-not merely until a client disconnects. Retry once after pending work completes.
+not merely until a client disconnects. A call the client cancels
+(`notifications/cancelled`), or one whose session is closed, stops waiting,
+and the stream its answer would have taken ends at once:
+`wait_for_messages` answers at once, a media download stops at its next chunk
+(or leaves the line for a download slot, or stops waiting for the phone to
+upload expired media), a document read ends its worker, a frame grab, page
+render or SVG drawing is killed or leaves its queue, and a transcription stops
+being waited on. A transcription several callers
+share (two sessions, or a call and the auto queue) goes on for the others; its
+download stops only when every one of them has cancelled, and a provider
+already running finishes and keeps its transcript. Its slot comes back as soon
+as it has stopped. A disconnect alone is not a cancel, as the MCP
+specification says. Retry once after pending work completes.
+
+Answers to a POST are gzip-compressed when the client's `Accept-Encoding`
+takes gzip (Node's `fetch`, and so every TypeScript MCP client, does; so does
+`curl --compressed`), with a flush after every SSE event so a streamed answer
+is not held back. An answer under 1 KiB that is complete within 20 ms goes as
+it is; one still being written after 20 ms (a `wait_for_messages`, a slow
+tool) is streamed compressed whatever its size, which costs it about 20 bytes
+of framing. Nothing is compressed for a client that did not ask. The tool catalogue crosses the wire as 11 KB
+instead of 56 KB. The GET notification stream is never compressed, and neither is a download
+link's file (`/media/<token>`), which goes out as it is with its own headers.
+
+A restart (`SIGTERM` or `SIGINT`: `wazap update`, `wazap service restart`, a
+supervisor stopping the service) drains HTTP first. The listener closes at
+once, so a new connection is refused (through a tunnel, a 502); a request on
+a connection that was already open gets 503 with `Retry-After`. A
+`wait_for_messages` under way answers at once with what it has, and every
+other call under way, one whose client has left included, and every download
+link's file still being fetched, gets up to ten seconds to finish before the
+accounts stop. A call its client cancelled holds
+nothing up: its answer stream has already ended. The client's session is
+revived by the next process. The units `wazap service
+install` writes allow 15 seconds for that (launchd's `ExitTimeOut`, systemd's
+`TimeoutStopSec`), as does the compose file. launchd kills a job whose plist
+sets no `ExitTimeOut` about five seconds after `SIGTERM`, so under a unit
+written by an older wazap the drain lasts one second, and the log says so at
+startup, with the command that rewrites the unit: `service install` run by the
+service's own node and script, since a `wazap` on the shell's PATH may be
+another install, and with the service's `--port`, since a `WAZAP_PORT` left
+in `.env` (which the unit's own `--port` overrides while it runs) would move
+it. A reinstall keeps the service's port unless `--port` or `WAZAP_PORT`
+names another; an empty `WAZAP_PORT` names none. The next
+process warms its catalogue and transport right after it binds, so the first
+`initialize` after a restart costs about half what it did: 22–39 ms instead
+of 40–72 measured side by side on a loaded laptop over loopback, and 8–10 ms
+when the laptop was quieter.
 
 The HTTP listener caps connections at 256, header receipt at ten seconds and
 request-body receipt at thirty seconds; this does not time out legitimate SSE
-streams or long-running tools. Anonymous loopback requests must have a loopback
+streams or long-running tools. An idle keep-alive connection stays open for
+120 seconds, longer than a tunnel keeps one in its pool (cloudflared: 90), so
+the tunnel never sends a request on a socket wazap is closing. Anonymous loopback requests must have a loopback
 Host name (on any port, so a mapped container port works) and, when supplied, a
 matching Origin; browser rebinding/cross-origin
 requests are refused. Always configure credentials for a proxy/tunnel. These
@@ -80,10 +170,27 @@ loopback: a reverse proxy or tunnel also reaches the server from localhost.
 The tools return `MEDIA_ACCESS_DENIED` before looking up a path or touching a
 file. A write token grants WhatsApp writes, not access to the host filesystem.
 
-Remote clients can use public HTTP(S) media URLs, forward existing WhatsApp
-messages, and download attachments into the account's default media directory.
-Small downloaded images still return inline. Other attachments are saved on the
-server; there is no arbitrary-file upload/download endpoint.
+Remote clients can use public HTTP(S) media URLs (fetched and kept when the
+message is drafted, so the preview names the real file and the send sends
+exactly that; see [Media from a URL](tools.md#media-from-a-url)), send a file of
+their own of up to 5 MB in the call (`data_base64`, write credentials only), forward existing WhatsApp
+messages, and see attachments through `get_media`: an image as a view, a video as
+a contact sheet, a document as its text (see [Media for remote agents](tools.md#media-for-remote-agents)).
+Nothing is written to the server's disk for a remote read, and no server path is
+returned; a draft's media waits in `accounts/<id>/outgoing/` until it is sent,
+expires or is cancelled. There is no arbitrary-file upload/download endpoint.
+
+With `WAZAP_PUBLIC_URL` set, a remote `get_media` also returns `link`: the
+original file at `<public URL>/media/<token>`, valid for 30 minutes. The token
+is the only credential the route takes (it is signed with a secret kept in
+`media-links.key` in the data dir), so treat a link like the file. It is mainly
+for the person, who can tap it in the chat: claude.ai, ChatGPT and the API's MCP
+connector do not fetch URLs that came from a tool result, and Claude Code on the
+web reaches the tunnel only if its network access allows the host. Cursor's
+cloud agents and local CLIs can download it. A deleted or expired message, an
+expired link and a forged one all answer 404; the file always comes as a
+download, never rendered by the browser. A `HEAD` on a link answers with the
+file's type and name without fetching it.
 
 Local stdio clients retain local file access. A local bridge gets it only through
 the private daemon credential stored in `daemon.json`, never through a public
@@ -98,6 +205,21 @@ request bodies and raw Accept headers; malformed-request errors are sanitized.
 Client labels are bounded and stripped of log/terminal control characters. Do
 not place secrets in client names or User-Agent labels, which remain diagnostic
 metadata.
+
+What the log does say, so the owner can tell which cloud clients connect and
+what crosses the tunnel: each `initialize` logs the client's own name and
+version, the protocol version, the kind of credential (`oauth`, `token`,
+`local` or `anonymous`, never which one), the `Host` it came through and the
+answer format the session got (`answers=text` for an assistant, `full`
+otherwise; see `WAZAP_ANSWER_FORMAT` in [settings](settings.md)); each
+request line ends with the body bytes sent, their encoding (`gzip` or
+`identity`) and what became of the session (`new`, `reused`, `revived`,
+`lost`). For example:
+
+```text
+MCP initialize: client="claude-ai 0.1.0" protocol=2025-06-18 credential=oauth host=wazap.example.com answers=text
+HTTP POST /mcp rpc=tools/list auth accept="json+sse" -> 200 (3ms) bytes=10953 enc=gzip session=reused client="node"
+```
 
 ## Self-host
 
@@ -135,6 +257,11 @@ docker compose up -d
 curl -s http://127.0.0.1:8766/healthz
 ```
 
+The image carries poppler and ffmpeg, so `get_media` shows a PDF's pages (a
+scan has nothing else to read) and a video as a sheet of frames, as on a Mac
+with them installed, and the Liberation fonts, which stand in for the standard
+PDF fonts (Helvetica, Times, Courier) a file names without embedding them.
+
 The container publishes `8766` on loopback only; add the same TLS proxy in front. Upgrading is `docker compose pull && docker compose up -d`; the volume keeps the session. To stay on one line, change `latest` in the compose file to `1.3`. To build from source instead, run `docker build -t ghcr.io/razvangirgiz/wazap:latest .` in a clone.
 
 A proxy on the host reaches the container through the published port, so inside
@@ -157,10 +284,10 @@ wazap keeps binding loopback either way; only the tunnel reaches it.
 cloudflared tunnel login
 cloudflared tunnel create wazap
 cloudflared tunnel route dns wazap wazap.example.com
-cloudflared tunnel run --url http://127.0.0.1:8766 wazap
+cloudflared tunnel --no-autoupdate run --url http://127.0.0.1:8766 wazap
 ```
 
-Set `WAZAP_PUBLIC_URL=https://wazap.example.com` for OAuth and keep `cloudflared` running the way you keep wazap running (a systemd unit, a launchd agent). Tailscale Funnel or ngrok work the same way: whatever ends at `https://your-host` with `/mcp` behind it.
+Set `WAZAP_PUBLIC_URL=https://wazap.example.com` for OAuth and keep `cloudflared` running the way you keep wazap running (a systemd unit, a launchd agent). `--no-autoupdate` leaves updates to your package manager: a self-update restarts the tunnel whenever it lands, cutting off every call it carries. Tailscale Funnel or ngrok work the same way: whatever ends at `https://your-host` with `/mcp` behind it.
 
 </details>
 
@@ -215,6 +342,11 @@ What to know before exposing it:
   everyone for one minute.
 - With OAuth on, `/mcp` never answers an unauthenticated request, whether or
   not a read token is set.
+- The OAuth routes (`/authorize`, `/token`, `/register`, `/revoke` and the
+  consent page) read a body before anyone has signed in, so they refuse a
+  compressed one (415) and one declared larger than 64 KiB (413) before
+  reading a byte of it; a body sent without a length still meets the parsers'
+  100 KiB limit.
 - Grants live in `<data-dir>/oauth.json` as hashes. Delete the file to sign
   every agent out at once, running server included; `wazap status` lists who
   holds one. Disconnecting an agent on its side revokes its refresh token and

@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startHttpEndpoint } from "../dist/server.js";
 import { registerTools } from "../dist/tools.js";
+import { loadMedia } from "../dist/outgoing-media.js";
 import { asToolSource, draftStub, offlineConfig } from "./helpers.mjs";
 
 const CHAT = "40722123456@s.whatsapp.net";
@@ -35,9 +36,10 @@ function fixture(t) {
       return { applied: "ok" };
     },
     // A directory-write attempt need not write anything to prove it reached the service.
-    downloadMedia: async () => {
+    openMedia: async (_sid, opts) => {
       downloads++;
-      return { path: join(dir, "media", "test.txt"), mime: "text/plain", size: 4, filename: "test.txt" };
+      const file = opts.noFile ? {} : { path: join(dir, "media", "test.txt"), filename: "test.txt" };
+      return { ...file, mime: "text/plain", size: 4, source: "whatsapp", rendition: { kind: "none", note: "facts only" } };
     },
   };
   return { dir, file, hub: asToolSource(wa), reads: () => reads, downloads: () => downloads };
@@ -76,6 +78,38 @@ test("stdio-compatible tool registration retains intentional local file access",
   const result = await tools.get("send_message")({ chat_id: CHAT, text: "", file_path: f.file });
   assert.equal(result.structuredContent.status, "draft");
   assert.equal(f.reads(), 1);
+});
+
+test("a media URL that fails says what the session can do: a remote one is never sent to file_path, a local one never told host files are off", async () => {
+  const unresolvable = {
+    resolve: async () => {
+      throw Object.assign(Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+    },
+  };
+  const wa = {
+    getStatus: () => ({ status: "connected", status_since: new Date().toISOString(), read_only: false }),
+    // The draft fetches its URL through the public-address guard, as the service's does.
+    draft: async (payload) => {
+      await loadMedia(payload.source, undefined, unresolvable);
+      assert.fail("the URL cannot load");
+    },
+  };
+  for (const allowLocalFiles of [false, true]) {
+    const tools = new Map();
+    registerTools({ registerTool: (name, _meta, handler) => tools.set(name, handler) }, asToolSource(wa), {
+      allowWrite: true,
+      allowLocalFiles,
+    });
+    const send = async (url) => JSON.parse((await tools.get("send_message")({ chat_id: CHAT, text: "", url })).content[0].text);
+    const unfetched = await send("https://nonexistent-host.invalid/poza.jpg");
+    assert.equal(unfetched.error, "URL_FETCH_FAILED");
+    assert.doesNotMatch(unfetched.fix, /file_path/);
+    assert.match(unfetched.fix, /check it with the user, or pass the file another way the tool lists \(send_message's data_base64/);
+    const loopback = await send("http://127.0.0.1:9/chart.png");
+    assert.equal(loopback.error, "MEDIA_ACCESS_DENIED");
+    assert.doesNotMatch(loopback.fix, /host files|route around|file_path/);
+    assert.match(loopback.fix, /Pass a public http\(s\) URL without credentials/);
+  }
 });
 
 async function boot(t) {
@@ -130,7 +164,7 @@ test("an HTTP read token cannot choose the download directory", async (t) => {
   assert.equal(f.downloads(), 0);
 });
 
-test("remote clients retain public URLs and default-directory downloads", async (t) => {
+test("remote clients retain public URLs, and get_media writes them no file and names no path", async (t) => {
   const f = await boot(t);
   const remote = await connect(t, f.base, "remote-write");
   const draft = await remote.callTool({
@@ -140,7 +174,9 @@ test("remote clients retain public URLs and default-directory downloads", async 
   assert.equal(draft.structuredContent.status, "draft");
   const reader = await connect(t, f.base, "remote-read");
   const result = await reader.callTool({ name: "get_media", arguments: { message_id: `false_${CHAT}_msg` } });
-  assert.equal(result.structuredContent.filename, "test.txt");
+  assert.equal(result.structuredContent.filename, undefined);
+  assert.equal(result.structuredContent.path, undefined);
+  assert.equal(result.structuredContent.mime, "text/plain");
   assert.equal(f.downloads(), 1);
   assert.equal(f.reads(), 0);
 });
