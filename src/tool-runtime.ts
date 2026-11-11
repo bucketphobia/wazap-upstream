@@ -99,7 +99,7 @@ export interface ToolDef {
   description: string;
   schema: z.ZodRawShape;
   /** The structured content's shape, when the tool declares one; an object schema may leave keys open. */
-  outputSchema?: z.ZodRawShape | z.AnyZodObject;
+  outputSchema?: z.ZodRawShape | z.ZodObject;
   /** Registered only in a session that can write, and refused on an account that cannot. */
   write: boolean;
   hints: ToolHints;

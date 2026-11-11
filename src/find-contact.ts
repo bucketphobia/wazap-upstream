@@ -524,7 +524,7 @@ const listedSchema = z.object({
   business: z.boolean().optional(),
   note: z.string().optional(),
   tags: z.array(z.string()).optional(),
-  fields: z.record(z.string()).optional(),
+  fields: z.record(z.string(), z.string()).optional(),
 });
 
 export const FIND_CONTACT_OUTPUT = {
@@ -550,7 +550,7 @@ export const FIND_CONTACT_OUTPUT = {
       business: z.boolean().optional(),
       note: z.string().optional(),
       tags: z.array(z.string()).optional(),
-      fields: z.record(z.string()).optional(),
+      fields: z.record(z.string(), z.string()).optional(),
     })
     .optional()
     .describe("Only when resolved"),

@@ -128,7 +128,7 @@ const acct = z.string().optional().describe("The account the entry is from, when
 const at = z.string().describe("When, as a clock time (with the day when not today)");
 const q = z.string().optional().describe("Quote: the message's own words, cut to fit the budget");
 const sig = z.string().optional().describe("Signals in the quote, comma-separated: amount, date, time, address, link, question");
-const media = z.record(z.number()).optional().describe("Media by kind: image, video, voice, audio, document, sticker, location, contact");
+const media = z.record(z.string(), z.number()).optional().describe("Media by kind: image, video, voice, audio, document, sticker, location, contact");
 const privateFlag = z.literal(true).optional().describe("Someone the user tagged #private: counted, never quoted");
 const messageIdOut = z.string().optional().describe("ids: the message_id of what the entry quotes or names");
 const mediaIdsOut = z.array(z.string()).optional().describe("ids: the newest photos, videos, documents, stickers and audio, by message_id, for get_media");
@@ -280,7 +280,7 @@ export const CATCHUP_OUTPUT = {
     .nullable()
     .describe("On the last page: what the entries leave out"),
   more: z
-    .object({ cursor: z.string(), remaining: z.record(z.number()), approx_tokens: z.number() })
+    .object({ cursor: z.string(), remaining: z.record(z.string(), z.number()), approx_tokens: z.number() })
     .nullable()
     .describe("Set when entries are left: call catch_up again with more.cursor"),
   approx_tokens: z.number(),

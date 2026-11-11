@@ -311,7 +311,7 @@ const REMEMBER_OUTPUT = {
   name: z.string().optional(),
   note: z.string().optional(),
   tags: z.array(z.string()).optional(),
-  fields: z.record(z.string()).optional(),
+  fields: z.record(z.string(), z.string()).optional(),
   number: z.string().nullable().optional(),
   is_my_contact: z.boolean().optional(),
   is_business: z.boolean().optional(),
@@ -423,7 +423,7 @@ function tool<S extends z.ZodRawShape>(def: {
   title: string;
   description: string;
   schema: S;
-  outputSchema?: z.ZodRawShape | z.AnyZodObject;
+  outputSchema?: z.ZodRawShape | z.ZodObject;
   write: boolean;
   rate?: number;
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolCtx) => Promise<ToolResult>;
@@ -808,7 +808,7 @@ const TOOLS: readonly ToolDef[] = [
       note: z.string().max(200).optional().describe('"" removes it'),
       add_tags: z.array(z.string().min(1).max(40)).max(30).optional().describe('e.g. ["client"]'),
       remove_tags: z.array(z.string().min(1).max(40)).optional(),
-      fields: z.record(z.string().max(200)).optional().describe('e.g. {"nickname": "Mișu", "role": "contabil"}; "" deletes a key'),
+      fields: z.record(z.string(), z.string().max(200)).optional().describe('e.g. {"nickname": "Mișu", "role": "contabil"}; "" deletes a key'),
       remove_fields: z.array(z.string().min(1).max(40)).optional(),
       handled: z.literal(true).optional().describe("Off catch_up's waiting until they write again"),
     },

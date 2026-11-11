@@ -47,7 +47,8 @@ export function buildToolCatalogue(defs: readonly ToolDef[], allowLocalFiles: bo
     name: def.name,
     title: def.title,
     description: def.description,
-    inputSchema: advertised(toJsonSchemaCompat(z.object(def.schema), { strictUnions: true, pipeStrategy: "input" }) as JsonSchema, allowLocalFiles) as Tool["inputSchema"],
+    // Strict, so the list says a tool takes these arguments and no others (zod 4 leaves that out for a plain object's input).
+    inputSchema: advertised(toJsonSchemaCompat(z.strictObject(def.schema), { strictUnions: true, pipeStrategy: "input" }) as JsonSchema, allowLocalFiles) as Tool["inputSchema"],
     ...(def.outputSchema === undefined || format === "text"
       ? {}
       : {
