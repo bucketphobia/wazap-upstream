@@ -468,6 +468,28 @@ test("A-S4 the public zero setting installs no cache tracking triggers", async (
   }
 });
 
+test("WAZAP_RECALL_CACHE_MAX_MB sets the cache limit a new cache enforces", async (t) => {
+  // 300 vectors of 4096 bytes need ~1.2 MiB: over a 1 MiB limit, under 2 MiB.
+  const saved = process.env.WAZAP_RECALL_CACHE_MAX_MB;
+  t.after(() => {
+    if (saved === undefined) delete process.env.WAZAP_RECALL_CACHE_MAX_MB;
+    else process.env.WAZAP_RECALL_CACHE_MAX_MB = saved;
+  });
+  const states = {};
+  for (const value of ["1", "2", "nonsense"]) {
+    process.env.WAZAP_RECALL_CACHE_MAX_MB = value;
+    const { cache } = rawFixture(t, 300, 4096);
+    await cache.warm("m");
+    states[value] = { state: cache.status().state, reason: cache.status().reason };
+    if (value === "2") assert.ok(cache.status().sharedBytes <= 2 * 1048576);
+  }
+  assert.deepEqual(states, {
+    1: { state: "disabled", reason: "size_limit" },
+    2: { state: "ready", reason: undefined },
+    nonsense: { state: "disabled", reason: "disabled" },
+  });
+});
+
 for (const count of [128, 1000]) {
   test(`background reconciliation preserves failure at a yielded ${count}-row batch`, async (t) => {
     const { cache, raw } = rawFixture(t, count);
