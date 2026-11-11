@@ -1,0 +1,189 @@
+{
+  "id": "P35",
+  "title": "What I promised people and have not done",
+  "severity": "major",
+  "tags": [
+    "f3",
+    "relationship",
+    "commitments"
+  ],
+  "fixture": {
+    "patch": {
+      "accounts": {
+        "personal": {
+          "+messages": [
+            {
+              "chat": "bogdan",
+              "from": "bogdan",
+              "at": "-45d 12:10",
+              "text": "Bună ziua, mașina e gata. Am schimbat plăcuțele față și uleiul, 850 lei. O puteți lua de la service după 17."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-45d 12:40",
+              "text": "Mulțumesc, trec la 18."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-4d 09:20",
+              "text": "Bună, Bogdan. Cât m-ar costa să schimb distribuția?"
+            },
+            {
+              "chat": "bogdan",
+              "from": "bogdan",
+              "at": "-4d 09:45",
+              "text": "Mă uit la piese și vă trimit oferta până vineri."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-4d 09:50",
+              "text": "Mulțumesc, aștept."
+            },
+            {
+              "chat": "laura",
+              "from": "laura",
+              "at": "-9d 10:00",
+              "text": "Bună ziua! RCA-ul dumneavoastră expiră pe 30. Vă fac reînnoirea la aceeași companie?"
+            },
+            {
+              "chat": "laura",
+              "from": "me",
+              "at": "-9d 10:30",
+              "text": "Da, vă rog."
+            },
+            {
+              "chat": "laura",
+              "from": "laura",
+              "at": "-8d 16:00",
+              "text": "Vă trimit polița pe email mâine dimineață."
+            },
+            {
+              "chat": "laura",
+              "from": "laura",
+              "at": "-7d 09:10",
+              "text": "V-am trimis polița RCA pe email, e valabilă 12 luni."
+            },
+            {
+              "chat": "laura",
+              "from": "me",
+              "at": "-7d 09:40",
+              "text": "Am primit-o, mulțumesc!"
+            },
+            {
+              "chat": "dan_pop",
+              "from": "dan_pop",
+              "at": "-9d 20:00",
+              "text": "Salut! Mai ții minte de cei 200 de lei de la concert?"
+            },
+            {
+              "chat": "dan_pop",
+              "from": "me",
+              "at": "-9d 20:15",
+              "text": "Da, scuze! Ți-i dau înapoi până duminică."
+            },
+            {
+              "chat": "dan_pop",
+              "from": "me",
+              "at": "-5d 18:00",
+              "text": "Ți-am trimis cei 200 de lei pe Revolut."
+            },
+            {
+              "chat": "dan_pop",
+              "from": "dan_pop",
+              "at": "-5d 18:05",
+              "text": "Am primit, mersi!"
+            },
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-20d 19:00",
+              "text": "Pentru ziua mamei luăm tortul de la Patiseria Ana, îl comand eu."
+            },
+            {
+              "chat": "mihai",
+              "from": "me",
+              "at": "-20d 19:10",
+              "text": "Ok, perfect."
+            },
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-6d 17:30",
+              "text": "Schimbare: Patiseria Ana nu mai face torturi. Am comandat de la Cofetăria Dalia, cu fructe de pădure."
+            },
+            {
+              "chat": "mihai",
+              "from": "me",
+              "at": "-6d 17:40",
+              "text": "Bine. Îți trimit diseară banii pentru jumătate din tort."
+            },
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-6d 17:41",
+              "text": "Ok, mersi."
+            }
+          ],
+          "contacts": {
+            "bogdan": {
+              "phone": "40790000031",
+              "name": "Bogdan Tudor"
+            },
+            "laura": {
+              "phone": "40790000032",
+              "name": "Laura Matei"
+            }
+          }
+        }
+      }
+    }
+  },
+  "turns": [
+    {
+      "user": "Ce le-am promis oamenilor în ultimele două săptămâni și n-am făcut încă?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "read_whatsapp",
+      "must_call": {
+        "capability": "whatsapp_read",
+        "ok": true
+      }
+    },
+    {
+      "name": "lists_mihai",
+      "answer_regex": {
+        "pattern": "Mihai|Mi[sș]u|fratele",
+        "fold": true
+      }
+    },
+    {
+      "name": "lists_cake_money",
+      "answer_regex": {
+        "pattern": "tort|banii",
+        "fold": true
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "open_only",
+      "rubric": "Lists the promises still open, does not list a promise Andrei already kept as open, and says how sure it is (it can only see WhatsApp).",
+      "truth": "Open: Andrei told Mihai 6 days ago he would send that evening the money for half of the cake; nothing shows he did. Kept: the 200 lei to Dan Pop, sent on Revolut 5 days ago and confirmed; the July invoices to Ana Ionescu (she confirmed); the presentation draft to Dan Radu (put in the drive). Acceptable extras, if flagged as attendance rather than a task: the match with Mihai on Saturday, yesterday's association meeting with Ana Vasile."
+    }
+  ]
+}

@@ -573,6 +573,8 @@ export interface SearchContext {
   anchor_id: string;
   /** Neighbouring sources in time order; not all necessarily answer the query. */
   messages: Array<Pick<MessageView, "message_id" | "chat_id" | "from_me" | "sender" | "timestamp" | "type" | "text" | "quoted"> & { text_truncated?: true; text_offset?: number }>;
+  /** Newer messages of the same chat on the anchor's subject, past the window: they may change or settle it. */
+  later?: SearchContext["messages"];
   bounded: true;
 }
 

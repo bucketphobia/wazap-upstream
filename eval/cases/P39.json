@@ -1,0 +1,89 @@
+{
+  "id": "P39",
+  "title": "Checking whether a promise was kept",
+  "severity": "minor",
+  "tags": [
+    "f3",
+    "relationship",
+    "commitments"
+  ],
+  "fixture": {
+    "patch": {
+      "accounts": {
+        "personal": {
+          "+messages": [
+            {
+              "chat": "dan_pop",
+              "from": "dan_pop",
+              "at": "-9d 20:00",
+              "text": "Salut! Mai ții minte de cei 200 de lei de la concert?"
+            },
+            {
+              "chat": "dan_pop",
+              "from": "me",
+              "at": "-9d 20:15",
+              "text": "Da, scuze! Ți-i dau înapoi până duminică."
+            },
+            {
+              "chat": "dan_pop",
+              "from": "me",
+              "at": "-5d 18:00",
+              "text": "Ți-am trimis cei 200 de lei pe Revolut."
+            },
+            {
+              "chat": "dan_pop",
+              "from": "dan_pop",
+              "at": "-5d 18:05",
+              "text": "Am primit, mersi!"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "turns": [
+    {
+      "user": "I-am dat banii înapoi lui Dan Pop?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "read_whatsapp",
+      "must_call": {
+        "capability": "whatsapp_read",
+        "ok": true
+      }
+    },
+    {
+      "name": "says_paid",
+      "answer_regex": {
+        "pattern": "Revolut|trimis|da",
+        "fold": true
+      }
+    },
+    {
+      "name": "says_amount",
+      "answer_regex": {
+        "pattern": "200",
+        "fold": true
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "evidence",
+      "rubric": "Answers yes with the evidence: when it was sent and that Dan confirmed it.",
+      "truth": "Yes: 200 lei on Revolut 5 days ago, and Dan Pop answered \"Am primit, mersi!\"."
+    }
+  ]
+}

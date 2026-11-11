@@ -1,0 +1,93 @@
+{
+  "id": "P34",
+  "title": "Who someone is, from the history alone",
+  "severity": "major",
+  "tags": [
+    "f3",
+    "relationship"
+  ],
+  "fixture": {
+    "patch": {
+      "accounts": {
+        "personal": {
+          "+messages": [
+            {
+              "chat": "bogdan",
+              "from": "bogdan",
+              "at": "-45d 12:10",
+              "text": "Bună ziua, mașina e gata. Am schimbat plăcuțele față și uleiul, 850 lei. O puteți lua de la service după 17."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-45d 12:40",
+              "text": "Mulțumesc, trec la 18."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-4d 09:20",
+              "text": "Bună, Bogdan. Cât m-ar costa să schimb distribuția?"
+            },
+            {
+              "chat": "bogdan",
+              "from": "bogdan",
+              "at": "-4d 09:45",
+              "text": "Mă uit la piese și vă trimit oferta până vineri."
+            },
+            {
+              "chat": "bogdan",
+              "from": "me",
+              "at": "-4d 09:50",
+              "text": "Mulțumesc, aștept."
+            }
+          ],
+          "contacts": {
+            "bogdan": {
+              "phone": "40790000031",
+              "name": "Bogdan Tudor"
+            }
+          }
+        }
+      }
+    }
+  },
+  "turns": [
+    {
+      "user": "Cine e Bogdan Tudor?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "read_whatsapp",
+      "must_call": {
+        "capability": "whatsapp_read",
+        "ok": true
+      }
+    },
+    {
+      "name": "says_mechanic",
+      "answer_regex": {
+        "pattern": "mecanic|service|auto",
+        "fold": true
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "grounded",
+      "rubric": "Says who Bogdan is to Andrei from what the chat shows, and marks it as inferred from the messages rather than as something Andrei said.",
+      "truth": "Nobody filed a note on Bogdan Tudor. The chat shows he runs or works at the service that changed Andrei's front brake pads and oil 45 days ago (850 lei), and 4 days ago he promised an offer for the timing belt by Friday."
+    }
+  ]
+}

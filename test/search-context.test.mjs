@@ -323,3 +323,23 @@ test("many rejected literal prefixes stop within a bounded candidate budget and 
     );
   }
 });
+
+test("a plan changed two weeks on comes back under later, without the question's words", async (t) => {
+  const f = await setup(t, false);
+  const now = Math.floor(Date.now() / 1000);
+  const day = 86_400;
+  const plan = f.arrive(PEER, "Pentru ziua mamei luăm tortul de la Patiseria Ana, îl comand eu.", { messageTimestamp: now - 20 * day });
+  f.arrive(PEER, "Ok, perfect.", { key: { fromMe: true }, messageTimestamp: now - 20 * day + 600 });
+  const change = f.arrive(PEER, "Schimbare: Patiseria Ana nu mai face torturi. Am comandat de la Cofetăria Dalia.", { messageTimestamp: now - 6 * day });
+  f.arrive(PEER, "Bună ziua, mulțumesc mâine!", { messageTimestamp: now - 5 * day });
+  f.arrive(PEER, "Vii sâmbătă la meci?", { messageTimestamp: now - 2 * day });
+  f.arrive(OTHER, "Patiseria Ana are torturi noi, am comandat unul.", { messageTimestamp: now - day });
+
+  const result = await f.call("search", { query: "ziua mamei", match: "words" });
+  const context = result.structuredContent.contexts.find((c) => c.anchor_id === plan);
+  assert.deepEqual(context.later.map((m) => m.message_id), [change], "only the same chat's message on the same subject");
+  assert.match(result.content[0].text, /Later in this chat, same subject[^\n]*\n- [^\n]*Cofetăria Dalia/);
+
+  const before = await f.call("search", { query: "ziua mamei", match: "words", until: new Date((now - 10 * day) * 1000).toISOString() });
+  assert.equal(before.structuredContent.contexts.find((c) => c.anchor_id === plan).later, undefined, "until bounds what came later");
+});

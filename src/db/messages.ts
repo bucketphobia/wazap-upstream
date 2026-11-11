@@ -1358,6 +1358,31 @@ export class Messages {
     return [...side(true).reverse(), anchor, ...side(false)];
   }
 
+  /**
+   * The newest visible messages of a visible message's chat after it, newest
+   * first and at most `limit`: what a search hit's chat said later. Same
+   * folds, tombstones and barriers as `around`; never asks the phone.
+   */
+  later(sid: string, options: { limit: number; since?: number; until?: number }): StoredMessage[] {
+    const anchor = this.get(sid);
+    if (anchor === null) return [];
+    const chat = this.identity.chat(anchor.chatJid);
+    if (chat === null) return [];
+    const since = Math.max(options.since ?? 0, anchor.ts);
+    const until = options.until ?? NO_UPPER_BOUND;
+    if (since > until) return [];
+    const family = this.identity.chatIdsOf(chat);
+    const inChat = chatCondition(family);
+    const once = foldTwinCondition(family, chat.id);
+    return this.c.all<MessageRow>(
+      `SELECT ${MESSAGE_COLUMNS} FROM ${MESSAGE_FROM}
+       WHERE ${inChat.sql} AND m.id > ? AND m.id < ?
+         AND m.ts >= ? AND m.ts <= ? AND ${VISIBLE} ${once.sql}
+       ORDER BY m.id DESC LIMIT ?`,
+      ...inChat.params, anchor.id, idUpperBound(until), since, until, this.c.now(), ...once.params, clampLimit(options.limit)
+    ).map(messageFromRow);
+  }
+
   /** Messages across every chat since a time, newest first, walked straight off the primary key. */
   recent(options: {
     since: number;

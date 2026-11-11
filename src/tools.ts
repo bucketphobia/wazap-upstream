@@ -200,7 +200,7 @@ const SEARCH_OUTPUT = {
   count: z.number(),
   assessment: z.object({ state: z.enum(["no_matches", "ambiguous", "candidates"]), note: z.string() }),
   changed_during_read: z.boolean().optional(),
-  contexts: z.array(z.object({ anchor_id: z.string(), messages: z.array(MESSAGE_OUT), bounded: z.literal(true) })).optional(),
+  contexts: z.array(z.object({ anchor_id: z.string(), messages: z.array(MESSAGE_OUT), later: z.array(MESSAGE_OUT).optional(), bounded: z.literal(true) })).optional(),
   messages: z.array(
     MESSAGE_OUT.extend({
       score: z.number().optional(),
@@ -2161,11 +2161,15 @@ function renderSearchContexts(contexts: readonly SearchContext[] | undefined, hi
   const today = localDay(Date.now());
   const blocks = contexts
     .map((context) => {
+      const line = (message: SearchContext["messages"][number]): string =>
+        `- ${shortStamp(message.timestamp, today)} ${senderLabel(message, introduced)}: ${message.text_offset ? "… " : ""}${message.text}${message.text_truncated ? "… [cut; get_message reads it whole]" : ""} · ${message.message_id}`;
       const around = context.messages.filter((message) => !hits.has(message.message_id));
-      if (around.length === 0) return null;
-      return `Around ${context.anchor_id}:\n` + around.map((message) =>
-        `- ${shortStamp(message.timestamp, today)} ${senderLabel(message, introduced)}: ${message.text_offset ? "… " : ""}${message.text}${message.text_truncated ? "… [cut; get_message reads it whole]" : ""} · ${message.message_id}`
-      ).join("\n");
+      const later = (context.later ?? []).filter((message) => !hits.has(message.message_id));
+      if (around.length === 0 && later.length === 0) return null;
+      return [
+        ...(around.length === 0 ? [] : [`Around ${context.anchor_id}:`, ...around.map(line)]),
+        ...(later.length === 0 ? [] : ["Later in this chat, same subject (may change or settle the above):", ...later.map(line)]),
+      ].join("\n");
     })
     .filter((block): block is string => block !== null);
   return blocks.length === 0 ? "" : "\n\n# Nearby context (bounded; chronological, not additional search hits)\n" + blocks.join("\n");

@@ -1,0 +1,88 @@
+{
+  "id": "P37",
+  "title": "A decision that changed: the latest one counts",
+  "severity": "major",
+  "tags": [
+    "f3",
+    "relationship",
+    "decisions"
+  ],
+  "fixture": {
+    "patch": {
+      "accounts": {
+        "personal": {
+          "+messages": [
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-20d 19:00",
+              "text": "Pentru ziua mamei luăm tortul de la Patiseria Ana, îl comand eu."
+            },
+            {
+              "chat": "mihai",
+              "from": "me",
+              "at": "-20d 19:10",
+              "text": "Ok, perfect."
+            },
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-6d 17:30",
+              "text": "Schimbare: Patiseria Ana nu mai face torturi. Am comandat de la Cofetăria Dalia, cu fructe de pădure."
+            },
+            {
+              "chat": "mihai",
+              "from": "me",
+              "at": "-6d 17:40",
+              "text": "Bine. Îți trimit diseară banii pentru jumătate din tort."
+            },
+            {
+              "chat": "mihai",
+              "from": "mihai",
+              "at": "-6d 17:41",
+              "text": "Ok, mersi."
+            }
+          ]
+        }
+      }
+    }
+  },
+  "turns": [
+    {
+      "user": "De unde luăm tortul pentru ziua mamei?"
+    }
+  ],
+  "assert": [
+    {
+      "name": "read_whatsapp",
+      "must_call": {
+        "capability": "whatsapp_read",
+        "ok": true
+      }
+    },
+    {
+      "name": "says_dalia",
+      "answer_regex": {
+        "pattern": "Dalia",
+        "fold": true
+      }
+    },
+    {
+      "name": "no_write_calls",
+      "must_not_call": {
+        "capability": "write"
+      }
+    },
+    {
+      "name": "nothing_reached_whatsapp",
+      "effects_none": {}
+    }
+  ],
+  "judge": [
+    {
+      "id": "latest",
+      "rubric": "Gives the latest decision as the current one; if it mentions the earlier plan, it says that plan was dropped.",
+      "truth": "Cofetăria Dalia, with forest fruit; Mihai ordered it 6 days ago. The earlier plan, Patiseria Ana (20 days ago), was dropped because they no longer make cakes. Andrei still owes Mihai half the price."
+    }
+  ]
+}

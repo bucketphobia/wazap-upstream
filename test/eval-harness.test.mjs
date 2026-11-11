@@ -303,7 +303,8 @@ describe("evaluation harness", () => {
 
   test("every case validates and every reference resolves in the world", async () => {
     const refs = await control.refs();
-    assert.equal(cases.length, 61);
+    assert.equal(cases.length, 68);
+    assert.equal(selectCases(cases, "relationship").length, 8);
     assert.deepEqual(selectCases(cases, "remote").map((entry) => entry.id), ["P25", "P26", "P31", "P32", "P33"]);
     for (const theCase of cases) assert.doesNotThrow(() => resolveCase(theCase, refs), theCase.id);
     assert.equal(selectCases(cases, "baseline-0.23").length, 26);

@@ -11,6 +11,7 @@ import {
   type StoredMessage,
   type HybridHit,
 } from "../db/index.js";
+import { QUERY_STOPWORDS } from "../db/vectors.js";
 import { withoutPrivateQuote, type PrivatePeople } from "../private-contacts.js";
 import { contentTokens } from "../search-query.js";
 import type { SearchContext, SearchOptions } from "../wa-types.js";
@@ -20,6 +21,13 @@ import { isFirstName } from "../db/names.js";
 
 export const CONTEXT_CANDIDATES = 30;
 export const CONTEXT_SHOWN = 5;
+/** How far back from the newest message a hit's chat is read for what it said later, and how much of that is shown. */
+export const LATER_SCAN = 200;
+export const LATER_SHOWN = 2;
+/** Words every chat repeats: sharing them says nothing about sharing a subject. */
+const CHAT_FILLER = new Set(
+  "buna ziua seara dimineata salut hello multumesc mersi maine astazi acum bine poate foarte doar mult inca deja atunci toate totul vreau trebuie putem thanks thank okay today tomorrow just like will".split(" ")
+);
 const CONTEXT_TEXT_CHARS = 600;
 const NAME_PREPOSITIONS = new Set(["pentru", "lui", "pe", "cu", "despre", "for", "about"]);
 const TEMPORAL_NAMES = new Set(
@@ -65,6 +73,59 @@ export function contextRows(
       rows.push(quoted);
   }
   return rows.filter((row) => allowedContext(row, people, authorIds)).sort((a, b) => a.id - b.id);
+}
+
+/** A message's subject words, each cut to five letters: Romanian and English endings move, the start of a word seldom does. */
+function subjectStems(message: StoredMessage): Set<string> {
+  const stems = new Set<string>();
+  for (const word of `${message.text ?? ""}\n${message.transcript ?? ""}`.match(/[\p{L}\p{N}]+/gu) ?? []) {
+    const folded = foldText(word);
+    if ([...folded].length < 4 || QUERY_STOPWORDS.has(folded) || CHAT_FILLER.has(folded)) continue;
+    stems.add([...folded].slice(0, 5).join(""));
+  }
+  return stems;
+}
+
+/**
+ * What a hit's chat said later on the same subject, past its window: a plan
+ * changed two weeks on rarely repeats the words of the question, but it
+ * repeats the plan's. The newest messages sharing two of the hit's subject
+ * words, at most LATER_SHOWN, chronological; inside the search's dates.
+ */
+export function laterRows(
+  db: AccountDb,
+  anchor: StoredMessage,
+  window: readonly StoredMessage[],
+  opts: SearchOptions,
+  people: PrivatePeople | null,
+  author?: string
+): StoredMessage[] {
+  const subject = subjectStems(anchor);
+  if (subject.size < 2) return [];
+  const authorIds = author === undefined ? [] : db.identity.contactIdsOf(author);
+  const shown = new Set(window.map((row) => row.id));
+  return db.messages
+    .later(anchor.sid, {
+      limit: LATER_SCAN,
+      ...(opts.sinceMs === undefined ? {} : { since: opts.sinceMs }),
+      ...(opts.untilMs === undefined ? {} : { until: opts.untilMs }),
+    })
+    .filter((row) => !shown.has(row.id) && allowedContext(row, people, authorIds))
+    .filter((row) => [...subjectStems(row)].filter((stem) => subject.has(stem)).length >= 2)
+    .slice(0, LATER_SHOWN)
+    .reverse();
+}
+
+/** `laterRows` for the hits whose windows are shown. */
+export function laterOf(
+  db: AccountDb,
+  hits: readonly StoredMessage[],
+  rows: ReadonlyMap<number, StoredMessage[]>,
+  opts: SearchOptions,
+  people: PrivatePeople | null,
+  author?: string
+): Map<number, StoredMessage[]> {
+  return new Map(hits.slice(0, CONTEXT_SHOWN).map((hit) => [hit.id, laterRows(db, hit, rows.get(hit.id) ?? [hit], opts, people, author)]));
 }
 
 /**
@@ -125,19 +186,18 @@ export function namedEvidence(
   });
 }
 
-/** The top five windows, each chronological, compact and carrying exact source ids. */
+/** The top five windows, each chronological, compact and carrying exact source ids, with what the chat said later on it. */
 export function renderContexts(
   hits: readonly StoredMessage[],
   rows: ReadonlyMap<number, StoredMessage[]>,
   views: MessageViews,
   people: PrivatePeople | null,
   author?: string,
-  query = ""
+  query = "",
+  later: ReadonlyMap<number, StoredMessage[]> = new Map()
 ): SearchContext[] {
-  return hits.slice(0, CONTEXT_SHOWN).flatMap((anchor) => {
-    const stored = rows.get(anchor.id);
-    if (stored === undefined || !stored.some((m) => m.id === anchor.id)) return [];
-    const messages = views.viewsOfStored(stored).map((view) => {
+  const render = (stored: readonly StoredMessage[]): SearchContext["messages"] =>
+    views.viewsOfStored(stored).map((view) => {
       const safe = people === null ? view : withoutPrivateQuote(view, people, author);
       const text = safe.transcript ?? safe.text;
       const excerpt = contextExcerpt(text, query);
@@ -154,7 +214,11 @@ export function renderContexts(
           : { quoted: { ...safe.quoted, text: safe.quoted.text.slice(0, CONTEXT_TEXT_CHARS) } }),
       };
     });
-    return [{ anchor_id: anchor.sid, messages, bounded: true }];
+  return hits.slice(0, CONTEXT_SHOWN).flatMap((anchor) => {
+    const stored = rows.get(anchor.id);
+    if (stored === undefined || !stored.some((m) => m.id === anchor.id)) return [];
+    const after = later.get(anchor.id) ?? [];
+    return [{ anchor_id: anchor.sid, messages: render(stored), ...(after.length === 0 ? {} : { later: render(after) }), bounded: true as const }];
   });
 }
 

@@ -197,7 +197,9 @@ function claudeSession({ options, attemptDir, sessionIndex, mcpConfigPath, syste
       session.model = event.model;
       const servers = event.mcp_servers ?? [];
       const foreignTools = (event.tools ?? []).filter((tool) => !tool.startsWith(`mcp__${SERVER_NAME}__`));
-      if (servers.length !== 1 || servers[0].name !== SERVER_NAME || foreignTools.length > 0 || (event.plugins ?? []).length > 0) {
+      // Plugins shipped inside the CLI (path "builtin", 2.1.3xx) are the CLI itself; any tool they added is still caught above.
+      const foreignPlugins = (event.plugins ?? []).filter((plugin) => plugin.path !== "builtin" || !String(plugin.source ?? "").endsWith("@builtin"));
+      if (servers.length !== 1 || servers[0].name !== SERVER_NAME || foreignTools.length > 0 || foreignPlugins.length > 0) {
         session.isolation = `init lists servers ${JSON.stringify(servers)}, other tools ${JSON.stringify(foreignTools)}, plugins ${JSON.stringify(event.plugins)}`;
       } else if (servers[0].status !== "connected") {
         session.notConnected = `the evaluation server is ${servers[0].status}`;
