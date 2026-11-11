@@ -29,6 +29,14 @@ reranking. Context does not add an always-on index or a cached copy of message
 text; edits, retractions, expiry and private tags are read fresh. No history is
 fetched from the phone to fill a window.
 
+A window can also carry `later`: at most two newer messages of the same chat,
+past the window, that share two of the hit's subject words (cut to five
+letters, so "tortul" meets "torturi"; greetings and filler do not count). A
+plan changed two weeks on seldom repeats the question's words, but it repeats
+the plan's, so the hit and what replaced it arrive together. The same date
+limits and privacy rules apply, and only the newest 200 messages after the hit
+are read for it.
+
 Long context messages use a contiguous, query-relevant excerpt; `text_offset`
 locates it in the source and `text_truncated` says it is incomplete. Search
 rechecks sources after identity/metadata work, and all accounts again before a

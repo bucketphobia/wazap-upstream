@@ -62,7 +62,7 @@ import type { AccountIdentity } from "./identity.js";
 import type { AccountStorage } from "./storage.js";
 import type { MessageViews } from "./views.js";
 import type { AccountVoice } from "./voice.js";
-import { CONTEXT_SHOWN, contextRows, renderContexts } from "./search-context.js";
+import { CONTEXT_SHOWN, contextRows, laterOf, renderContexts } from "./search-context.js";
 import { literalMatches } from "../search-query.js";
 
 /** Unknown sends a read of one chat lists at most. */
@@ -519,7 +519,7 @@ export class AccountReads {
       if (opts.includeContext && !opts.deferContext) {
         const top = found.slice(0, CONTEXT_SHOWN);
         const rows = new Map(top.map((message) => [message.id, contextRows(db, message, opts, people, author)]));
-        answer.contexts = renderContexts(top, rows, this.views, people, author, query);
+        answer.contexts = renderContexts(top, rows, this.views, people, author, query, laterOf(db, top, rows, opts, people, author));
       }
       if (capped !== null) answer.scanCapped = { searchedBackTo: isoWithOffset(secondOfId(capped) * 1000) };
       if (privateOmitted > 0) answer.privateOmitted = privateOmitted;
@@ -548,9 +548,11 @@ export class AccountReads {
       stored.push(message);
       rows.push({ source_id: source.message_id, message: people === null ? fresh : withoutPrivateQuote(fresh, people, author) });
     }
-    const contexts = opts.includeContext
-      ? renderContexts(stored, new Map(stored.slice(0, CONTEXT_SHOWN).map((m) => [m.id, contextRows(db, m, opts, people, author)])), this.views, people, author, query)
-      : undefined;
+    let contexts: SearchRefresh["contexts"];
+    if (opts.includeContext) {
+      const windows = new Map(stored.slice(0, CONTEXT_SHOWN).map((m) => [m.id, contextRows(db, m, opts, people, author)]));
+      contexts = renderContexts(stored, windows, this.views, people, author, query, laterOf(db, stored, windows, opts, people, author));
+    }
     return { rows, dropped: messages.length - rows.length, ...(contexts === undefined ? {} : { contexts }) };
   }
 

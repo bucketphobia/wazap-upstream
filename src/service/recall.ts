@@ -28,7 +28,7 @@ import type { RecallAnswer, RecallHit, SearchOptions, Synced } from "../wa-types
 import type { AccountIdentity } from "./identity.js";
 import { pageLimit } from "./util.js";
 import type { MessageViews } from "./views.js";
-import { CONTEXT_CANDIDATES, contextRows, namedEvidence, rankWithContext, renderContexts } from "./search-context.js";
+import { CONTEXT_CANDIDATES, contextRows, laterOf, namedEvidence, rankWithContext, renderContexts } from "./search-context.js";
 
 /** Hybrid hits recall ranks for variety before it cuts the list to the limit. */
 const RECALL_RERANK_WINDOW = 100;
@@ -172,7 +172,7 @@ export class AccountRecall {
         from_index: hit.message.raw === null,
       })) satisfies RecallAnswer["hits"];
       return this.host.synced({ hits, index: this.recallStatus(), lexicalCapped: result.lexicalCapped, ...(privateOmitted > 0 ? { privateOmitted } : {}),
-        ...(opts.includeContext && !opts.deferContext ? { contexts: renderContexts(kept.map((hit) => hit.message), contexts, this.views, people, author, query) } : {}) });
+        ...(opts.includeContext && !opts.deferContext ? { contexts: renderContexts(kept.map((hit) => hit.message), contexts, this.views, people, author, query, laterOf(db, kept.map((hit) => hit.message), contexts, opts, people, author)) } : {}) });
     });
   }
 
