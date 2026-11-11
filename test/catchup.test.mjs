@@ -460,6 +460,15 @@ test("waiting holds an ask across catch-ups until it is answered, handled or two
   assert.deepEqual(chatsOf(third, "waiting"), []);
 });
 
+test("a statement that names a time is not an ask: a question word asks only when it opens a sentence", async () => {
+  const { svc, arrive } = account();
+  const { call } = toolsOf(svc);
+  arrive(ANA, "That’s correct, I’m not sure when I will get it.", { at: Date.now() - 2 * HOUR });
+  arrive(DAN, "Sună bine, nu știu încă unde stăm", { at: Date.now() - 2 * HOUR });
+  arrive(ELA, "Ok. Unde ești", { at: Date.now() - 2 * HOUR });
+  assert.deepEqual(chatsOf(await call("catch_up", { include: ["waiting"], hours: 24 }), "waiting"), [ELA]);
+});
+
 test("an answered call after an ask says it may have been dealt with; missed calls group by person with what followed", async () => {
   const { svc, arrive, callLog } = account();
   const { call } = toolsOf(svc);

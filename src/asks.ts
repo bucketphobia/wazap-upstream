@@ -4,14 +4,34 @@
  * disagree about who is waiting. Pure: it reads words, never a protobuf.
  */
 
-/** Words that make a message read as something asked of the user, when it has no question mark. */
-const ASK_PATTERN =
-  /\b(te rog|v[ăa] rog|po[țt]i|pute[țt]i|ai putea|a[țt]i putea|c[âa]nd|c[âa]t|unde|trimite|trimi[țt]i|sun[ăa]|spune-mi|zi-mi|confirm[ăai]?|urgent|please|can you|could you|would you|when|where|how much|send me|let me know|need)\b/i;
+/** Not inside a longer word, on either side: `\b` does not know ă, â, î, ș and ț are letters. */
+const START = String.raw`(?<![\p{L}\p{N}])`;
+const END = String.raw`(?![\p{L}\p{N}])`;
 
-/** A question mark or a request word, once links are taken out: a link's query string is not a question. */
+/**
+ * Words that ask something of the user wherever they stand, when the message
+ * has no question mark. "Sună bine" is a verdict, not "call me"; "don't need"
+ * asks for nothing.
+ */
+const REQUEST = new RegExp(
+  String.raw`${START}(?:te rog|v[ăa] rog|po[țt]i|pute[țt]i|ai putea|a[țt]i putea|trimite|trimi[țt]i|sun[ăa](?!\s+(?:bine|ok|okay|super|perfect|grozav|interesant|ciudat|ca)${END})|spune-mi|zi-mi|confirm[ăai]?|urgent|please|can you|could you|would you|send me|let me know|(?<!(?:${START}not|${START}no|n['’]t)\s)need)${END}`,
+  "iu"
+);
+
+/**
+ * Question words ask only when they open a sentence, after at most a
+ * connective: "când ajungi" and "and where are you" ask, "nu știu când vin"
+ * and "I'm not sure when I will get it" do not.
+ */
+const QUESTION = new RegExp(
+  String.raw`(?:^|[.!;:\n"“„])\s*(?:(?:[șs]i|dar|iar|ok|bun|and|but|so)[\s,]+)?(?:c[âa]nd|c[âa]t|unde|when|where|how much)${END}`,
+  "iu"
+);
+
+/** A question mark, a request word or a sentence opened by a question word, once links are taken out: a link's query string is not a question. */
 export function wordsAsk(text: string): boolean {
   const words = text.replace(/https?:\/\/\S+/g, "");
-  return words.includes("?") || ASK_PATTERN.test(words);
+  return words.includes("?") || REQUEST.test(words) || QUESTION.test(words);
 }
 
 /**

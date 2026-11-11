@@ -270,9 +270,10 @@ used to count 4 characters a token and so delivered about twice the tokens
 asked. `approx_tokens` is counted the same way. The order:
 
 1. **Waiting on you**: people whose last word asks for something — a question
-   mark, a request word, or a voice note nobody has heard, never "ok, thanks"
-   or a link — with the ask quoted (a voice note by its transcript) and what
-   they said after it. In a group only when the user was @-mentioned or replied
+   mark, a request word, a sentence that opens with a question word ("când
+   ajungi", not "not sure when I get it"), or a voice note nobody has heard,
+   never "ok, thanks" or a link — with the ask quoted (a voice note by its
+   transcript) and what they said after it. In a group only when the user was @-mentioned or replied
    to. An ask stays until the user answers, `remember` marks it `handled` or it
    is two weeks old; `new` marks one that
    arrived since the last catch-up, and an answered call after the ask says
