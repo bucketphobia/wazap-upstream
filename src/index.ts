@@ -15,7 +15,7 @@ import {
   runTranscribe,
 } from "./cli.js";
 import { runBackup } from "./backup-cli.js";
-import { BAILEYS_VERSION, WAZAP_VERSION, parseCli, pickDefaultAction, settingWarnings } from "./config.js";
+import { BAILEYS_VERSION, WAZAP_VERSION, parseCli, paths, pickDefaultAction, settingWarnings } from "./config.js";
 import { migrateLayout } from "./migrate.js";
 import { CLIENT_NAMES, runConnect } from "./connect.js";
 import { SKILL_TARGET_NAMES, runSkills } from "./skills.js";
@@ -41,6 +41,7 @@ const USAGE = `${BANNER}
 
 Usage:
   wazap [serve] [--http] [--host <host>] [--port <port>]   Run the MCP server (default: stdio)
+  wazap proxy                                              Serve stdio from the running server (the service), across its restarts
   wazap login [--phone +15550100] [--code]              Link a WhatsApp account (QR by default)
   wazap setup [--agent] [--client <name>]                  Link, connect your client and finish, in one command
   wazap connect <client> [--dry-run]                       Register wazap with an MCP client
@@ -141,6 +142,7 @@ async function main(): Promise<void> {
     "update",
     "transcribe",
     "embed",
+    "proxy",
   ]);
   if (!MIGRATE_EXEMPT.has(config.command)) migrateLayout(config.dataDir);
   switch (config.command) {
@@ -151,6 +153,14 @@ async function main(): Promise<void> {
       }
       await runServe(config);
       return;
+    case "proxy": {
+      // Loaded only here: the MCP client stack stays out of every other command's start.
+      const { runProxy } = await import("./proxy.js");
+      // WAZAP_PROXY_WAIT_MS: a development knob (tests), not a setting.
+      const waitMs = Number.parseInt(process.env.WAZAP_PROXY_WAIT_MS ?? "", 10);
+      await runProxy({ daemonFile: paths(config.dataDir).daemonFile, ...(waitMs > 0 ? { waitMs, helloWaitMs: waitMs } : {}) });
+      return;
+    }
     case "login":
       await runLogin(config);
       return;

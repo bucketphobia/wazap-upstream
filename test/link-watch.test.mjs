@@ -625,7 +625,7 @@ test("WhatsApp's unlink reaches the webhook as relink_required, in a lane no con
   const status = svc.getStatus();
   assert.equal(status.status, "logged_out");
   assert.equal(status.link.alerted, "relink_required");
-  assert.match(status.hint, /link it again with link_account/);
+  assert.match(status.hint, /call link_account/);
   const rows = storageRows(svc, "SELECT kind, lane, payload FROM events ORDER BY seq");
   const alert = rows.find((row) => row.kind === "alert");
   assert.ok(alert, "the alert is queued in the outbox");

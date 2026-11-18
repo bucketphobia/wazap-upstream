@@ -25,7 +25,7 @@ without writes sees 15 of them, and every tool also takes an optional `account_i
 
 The 23, each with what it requires: `learn` (), `get_status` (),
 `list_chats` (), `catch_up` (), `wait_for_messages` (), `find_contact` (),
-`list_contacts` (), `link_account` (`phone`), `search` (`query`), `get_group_info` (`group_id`),
+`list_contacts` (), `link_account` (), `search` (`query`), `get_group_info` (`group_id`),
 `confirm_send` (`draft_id`), `manage_group` (`action`),
 `read_messages` (`chat_id`), `remember` (`chat_id`), `get_message`
 (`message_id`), `get_media` (), `send_message` (`chat_id`, `text`),

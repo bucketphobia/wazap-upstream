@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { greetNext, leftoverFix, leftoverRefusal, parseLinkChoice, tunnelRefusal } from "../dist/cli.js";
+import { greetNext, leftoverFix, leftoverRefusal, parseLinkChoice, tunnelRefusal, writesQuestion } from "../dist/cli.js";
 import { SUPERVISORS } from "../dist/service.js";
 import { TOOL_NAMES } from "../dist/tools.js";
 import { childEnv, spawnWazap, waitFor } from "./helpers.mjs";
@@ -334,4 +334,17 @@ test("greetNext never advises a logout for credentials the file system would not
   assert.match(lines, /owns the account's auth folder/);
   const corrupt = greetNext({ linked: false, credentials_readable: false, credentials_error: null, server_pid: null }).join("\n");
   assert.match(corrupt, /wazap logout/, "a corrupt file still needs the logout");
+});
+
+test("a login given its number by flag never ends on the writes question, so a scripted relink cannot block", () => {
+  const tty = process.stdin.isTTY;
+  Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+  try {
+    assert.equal(writesQuestion({ writesAnswer: null, assumeYes: false, loginPhone: undefined }), true, "a person at a terminal is asked");
+    assert.equal(writesQuestion({ writesAnswer: null, assumeYes: false, loginPhone: "+40712345678" }), false);
+    assert.equal(writesQuestion({ writesAnswer: true, assumeYes: false, loginPhone: undefined }), false);
+    assert.equal(writesQuestion({ writesAnswer: null, assumeYes: true, loginPhone: undefined }), false);
+  } finally {
+    Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+  }
 });

@@ -12,7 +12,8 @@ import { WazapError, asWazapError } from "./errors.js";
 import { lockHolder, lockPid } from "./lock.js";
 import { oauthProblem, readGrants } from "./oauth.js";
 import { EMBED_MODELS, embedModelPath, embedReady, readRecallSettings } from "./recall/index.js";
-import { installedService, readService } from "./service.js";
+import { installedService, readService, unitScript } from "./service.js";
+import { readDaemon } from "./daemon.js";
 import { detectedTargets, skillState } from "./skills.js";
 import { storageReport, type AccountStorage, type BetaArchiveReport, type StorageReport } from "./storage-status.js";
 import {
@@ -190,6 +191,29 @@ function checkService(config: Config): Check {
   const pid = supervisor.pid(record);
   if (pid === null) {
     return { name: "service", state: "fail", detail: "installed but not running", fix: "run `wazap service start`" };
+  }
+  // What the service runs now (its sidecar names its version) against what its own install holds on disk.
+  const daemon = readDaemon(paths(config.dataDir).daemonFile);
+  const running = daemon !== null && daemon.pid === pid ? daemon.version : null;
+  const unit = unitScript(record);
+  if (running !== null && unit?.version != null && unit.version !== running) {
+    return {
+      name: "service",
+      state: "warn",
+      detail: `runs ${running}, but ${unit.version} is installed at ${unit.script}`,
+      fix: "a service on 1.8.0 or later restarts itself onto it within two minutes; otherwise run `wazap service restart`",
+    };
+  }
+  if (unit?.version != null && unit.version !== WAZAP_VERSION) {
+    return {
+      name: "service",
+      state: "info",
+      detail: `runs ${running ?? unit.version} from ${unit.script}, another install than this \`wazap\` (${WAZAP_VERSION})`,
+      fix: "run `wazap service install` to point it at this install, or upgrade that install too",
+    };
+  }
+  if (unit !== null && running !== null) {
+    return { name: "service", state: "ok", detail: `running ${running} (pid ${pid}, ${supervisor.name})` };
   }
   if (isNewer(WAZAP_VERSION, record.installedVersion)) {
     return {

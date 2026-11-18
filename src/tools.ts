@@ -418,6 +418,37 @@ const HINTS: Record<string, ToolHints> = {
   reminder: hint(false, false, false, false),
 };
 
+/**
+ * read_messages under the names mezzenger gives the same things, so an agent
+ * that uses both is not refused for its habits: cursor is before, and after
+ * (a message_id or a time) opens the window the way since does, just past that
+ * message. The wazap names win nothing: naming both is refused, never guessed.
+ */
+async function readAliases(
+  args: { before?: string; cursor?: string; since?: string; after?: string },
+  wa: Pick<WhatsAppApi, "getMessage">
+): Promise<{ before?: string; since?: string }> {
+  const out: { before?: string; since?: string } = {};
+  if (args.cursor !== undefined) {
+    if (args.before !== undefined && args.before !== args.cursor) {
+      throw new WazapError("INVALID_ID", "before and cursor name the same thing and differ.", "Pass only before");
+    }
+    out.before = args.cursor;
+  }
+  if (args.after !== undefined) {
+    if (args.since !== undefined) throw new WazapError("INVALID_ID", "after and since both say where the window starts.", "Pass only since");
+    if (/^\d{4}-\d{2}-\d{2}/.test(args.after.trim())) out.since = args.after.trim();
+    else {
+      const anchor = await wa.getMessage(args.after);
+      const ms = Date.parse(anchor.timestamp);
+      if (!Number.isFinite(ms)) throw new WazapError("INVALID_ID", `after: ${args.after} has no time to start from.`, "Pass since with a time instead");
+      // From the next second: WhatsApp's times are whole seconds, so one sent the same second is left out too.
+      out.since = isoWithOffset(ms + 1000);
+    }
+  }
+  return out;
+}
+
 function tool<S extends z.ZodRawShape>(def: {
   name: string;
   title: string;
@@ -649,8 +680,8 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "link_account",
     title: "Link a WhatsApp account",
-    description: `Pair wazap with the user's WhatsApp when get_status says not_linked, logged_out, session_corrupt or auth_failure. Show the user the code it returns: WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead. Then poll get_status every 10 s until connected.`,
-    schema: { phone: z.string().describe("e.g. +15550100") },
+    description: `On not_linked, logged_out, session_corrupt or auth_failure: drops the dead session (history kept), returns a pairing code. User: Linked devices → Link a device → Link with phone number instead. Poll get_status.`,
+    schema: { phone: z.string().optional().describe("+country code; omit: last number") },
     write: false,
     rate: 2,
     handler: async ({ phone }, { wa }) => {
@@ -698,12 +729,14 @@ const TOOLS: readonly ToolDef[] = [
   tool({
     name: "read_messages",
     title: "Read messages from a WhatsApp chat",
-    description: `Read one chat, oldest to newest: the latest messages, older ones with before (wazap asks the phone when the local history runs out), or a window with since/until. Long texts are cut unless full_text. chat_id "status": the stories of the last hours (a day at most), shown nowhere else.`,
+    description: `Read one chat, oldest to newest: the latest messages, older ones with before (asks the phone past local history), or a window with since (or after)/until. Long texts are cut unless full_text. chat_id "status": the stories of the last hours (a day at most), shown nowhere else.`,
     schema: {
       chat_id: chatId.describe('Chat id, number or name (one chat only); "status": stories'),
       limit: z.number().int().min(1).max(200).default(20),
       before: messageId.optional().describe("The oldest message_id you have"),
+      cursor: messageId.optional(),
       since: moment,
+      after: z.string().min(4).optional().describe("A time or message_id"),
       until: moment,
       types: messageTypes,
       include_previews: includePreviews,
@@ -714,10 +747,12 @@ const TOOLS: readonly ToolDef[] = [
     },
     outputSchema: READ_OUTPUT,
     write: false,
-    handler: async (args, outer) => {
+    handler: async (given, outer) => {
       // A name ("Ana", "mama", "Bloc 12") is read as the one chat find_contact resolves it to, on its account.
-      const named = await chatByName(args.chat_id, args.account_id, outer);
+      const named = await chatByName(given.chat_id, given.account_id, outer);
       const ctx = named === undefined ? outer : { ...outer, wa: named.binding.wa, accountId: named.binding.id };
+      // after's message is looked up on the account the chat is read from.
+      const args = { ...given, ...(await readAliases(given, ctx.wa)) };
       const chat_id = named?.chatId ?? args.chat_id;
       const { limit, before, since, until, types, include_previews, hours, full_text } = args;
       const { wa } = ctx;
@@ -903,6 +938,7 @@ const TOOLS: readonly ToolDef[] = [
     schema: {
       query: z.string().min(1),
       before: messageId.optional().describe("Older lexical matches; auto uses words with a cursor"),
+      cursor: messageId.optional(),
       match: z.enum(["auto", "hybrid", "words"]).default("auto").describe('auto: questions by meaning, codes/quotes by words'),
       include_context: z.boolean().default(true).describe("Nearby sources for the best five hits"),
       chat_id: chatId.optional().describe("Chat id, number or name (one chat only)"),
@@ -910,13 +946,18 @@ const TOOLS: readonly ToolDef[] = [
       since: moment,
       until: moment,
       from: z.string().min(1).optional().describe('"me", a number, an id, or a name only one person has'),
+      sender_id: z.string().min(1).optional(),
       tag: tagFilter,
       full_text: fullText,
       account_id: ACCOUNT_ID.optional(),
     },
     outputSchema: SEARCH_OUTPUT,
     write: false,
-    handler: async (args, outer) => {
+    handler: async ({ cursor, sender_id, ...given }, outer) => {
+      if ((cursor !== undefined && given.before !== undefined && cursor !== given.before) || (sender_id !== undefined && given.from !== undefined && sender_id !== given.from)) {
+        throw new WazapError("INVALID_ID", "An argument and its mezzenger name (before/cursor, from/sender_id) differ.", "Pass only before and from");
+      }
+      const args = { ...given, before: given.before ?? cursor, from: given.from ?? sender_id };
       const named = args.chat_id === undefined ? undefined : await chatByName(args.chat_id, args.account_id, outer);
       const ctx = named === undefined ? outer : { ...outer, wa: named.binding.wa, accountId: named.binding.id };
       const chat_id = named?.chatId ?? args.chat_id;
@@ -1100,6 +1141,7 @@ const TOOLS: readonly ToolDef[] = [
         .max(100)
         .optional()
         .describe('What the user calls them ("Ana", "mamei"), a number or an id'),
+      query: z.string().min(1).max(100).optional(),
       qualifier: z.string().max(100).optional().describe('Tells two apart: "contabilitate", a group, the last 4 digits'),
       kind: z.enum(["person", "group", "any"]).default("any"),
       tag: z.string().min(1).optional().describe("List everyone filed under this tag instead"),
@@ -1108,7 +1150,12 @@ const TOOLS: readonly ToolDef[] = [
     },
     outputSchema: FIND_CONTACT_OUTPUT,
     write: false,
-    handler: async (args, ctx) => runFindContact(args, ctx),
+    handler: async ({ query, ...args }, ctx) => {
+      if (query !== undefined && args.name !== undefined && query !== args.name) {
+        throw new WazapError("INVALID_ID", "name and query name the same thing and differ.", "Pass only name");
+      }
+      return runFindContact({ ...args, ...(args.name === undefined && query !== undefined ? { name: query } : {}) }, ctx);
+    },
   }),
   // ---- end find_contact ----------------------------------------------------
 

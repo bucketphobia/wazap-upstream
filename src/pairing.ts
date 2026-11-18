@@ -3,7 +3,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import makeWASocket, { Browsers, DisconnectReason, type UserFacingSocketConfig, type WASocket } from "baileys";
 import { readLinkedAccount, useAtomicAuthState, withoutAppStateSync, type LinkedAccount } from "./auth-state.js";
-import { RELINK_FIX, WazapError, asWazapError } from "./errors.js";
+import { WazapError, asWazapError } from "./errors.js";
 import { logError } from "./logger.js";
 
 /**
@@ -105,7 +105,7 @@ export async function linkSession(authDir: string, opts: LinkOptions): Promise<W
         throw new WazapError(
           "SESSION_EXPIRED",
           "WhatsApp rejected the link. The code may have expired or been entered wrong.",
-          RELINK_FIX
+          "Call link_account again for a new code"
         );
       }
       throw new WazapError(

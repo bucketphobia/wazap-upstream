@@ -82,6 +82,9 @@ function transcribable(raw: WAMessage, own: boolean): boolean {
 }
 
 /** A run's download failed because WhatsApp's CDN no longer has the file (404, 410): the phone may upload it again. */
+/** How old a queued voice note may be for the background queue to ask the phone to upload it again. */
+export const QUEUE_REUPLOAD_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
 function expiredCopy(err: unknown): boolean {
   return err instanceof WazapError && err.code === "MEDIA_UNAVAILABLE" && cdnExpired((err as { cause?: unknown }).cause);
 }
@@ -116,7 +119,7 @@ export interface VoiceHost {
   transcriber(...args: Parameters<typeof transcribeFile>): ReturnType<typeof transcribeFile>;
   transcribeReadiness(...args: Parameters<typeof transcribeReady>): ReturnType<typeof transcribeReady>;
   /** get_media's transcription as the service answers it, which a test may replace. */
-  transcribeAudio(messageId: string): Promise<TranscribeResult>;
+  transcribeAudio(messageId: string, opts?: TranscribeOptions): Promise<TranscribeResult>;
   /** The recall feed, to embed a note once it carries words. */
   embedFeed(): EmbedFeed | null;
   /** The worker is done with a note, or with every note: events held for them look again. */
@@ -452,7 +455,10 @@ export class AccountVoice {
     if (!transcribable(this.views.messageOrThrow(sid), this.transcribeClass === "local" || this.autoOwn)) {
       throw markFailure(new WazapError("MEDIA_UNAVAILABLE", "Not a short voice note to transcribe."), "gone", "not a voice note to transcribe");
     }
-    await this.host.transcribeAudio(sid);
+    // A recent note whose CDN copy expired is asked of the phone once (rate-limited, like a person's
+    // get_media): the phone usually still has it. An old one is not worth waking the phone for.
+    const recent = Date.now() - message.ts < QUEUE_REUPLOAD_MAX_AGE_MS;
+    await this.host.transcribeAudio(sid, recent ? { reupload: true } : {});
   }
 
   /**

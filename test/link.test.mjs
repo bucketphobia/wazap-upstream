@@ -142,3 +142,85 @@ test("relinking a dead session clears the credentials it is replacing", async ()
     stop();
   }
 });
+
+/** Credentials as a pairing leaves them once the code was asked for: they name the number, but were never registered. */
+function halfPaired(authDir, number = "40712345678") {
+  mkdirSync(authDir, { recursive: true });
+  const file = join(authDir, "creds.json");
+  writeFileSync(file, JSON.stringify({ me: { id: `${number}@s.whatsapp.net`, name: "~" }, registered: false }));
+  return file;
+}
+
+test("a refused pairing leaves no credentials behind, so the next link_account pairs afresh instead of being refused again", async () => {
+  const { svc } = await unlinkedService();
+  const first = await linking(svc);
+  const creds = halfPaired(svc.paths.authDir);
+  first.sock.ev.emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: LOGGED_OUT } } } });
+  await waitFor(() => svc.getStatus().status === "not_linked", 5_000, "the link to be given up");
+  first.stop();
+  assert.equal(existsSync(creds), false, "half-made credentials would make the next try log in with them and be refused (401)");
+
+  const second = await linking(svc);
+  try {
+    assert.equal(second.info.code, "ABCD-1234");
+    assert.equal(svc.getStatus().status, "linking");
+  } finally {
+    second.stop();
+  }
+});
+
+test("a link from not_linked clears credentials a crashed pairing left, never the account database", async () => {
+  const { svc } = await unlinkedService();
+  const creds = halfPaired(svc.paths.authDir);
+  const history = join(svc.paths.root, "history-stand-in.txt");
+  writeFileSync(history, "kept");
+  const { stop } = await linking(svc);
+  try {
+    assert.equal(existsSync(creds), false);
+    assert.equal(existsSync(history), true, "only auth/ goes; the account folder (database, kept media) stays");
+  } finally {
+    stop();
+  }
+});
+
+test("link_account without a number relinks the number the dead session had", async () => {
+  const { svc } = await unlinkedService();
+  halfPaired(svc.paths.authDir, "40712345678");
+  svc.setStatus("logged_out");
+  const sock = fakeSocket({ pairingCode: "WXYZ9876", user: USER });
+  const stub = stubSockets(socketFactory, [sock]);
+  try {
+    const started = svc.link();
+    await waitFor(() => stub.opened.length > 0, 5_000, "the pairing socket to open");
+    sock.ev.emit("connection.update", { qr: "a-qr" });
+    const info = await started;
+    assert.equal(info.code, "WXYZ-9876");
+    assert.match(info.phone_masked, /^\+40/);
+  } finally {
+    sock.end();
+    stub.restore();
+  }
+});
+
+test("link_account without a number, and none known, asks for one instead of guessing", async () => {
+  const { svc } = await unlinkedService();
+  await assert.rejects(svc.link(), (err) => {
+    assert.equal(err.code, "INVALID_PHONE");
+    return true;
+  });
+});
+
+test("a pairing WhatsApp accepted but whose reconnect failed keeps its credentials and connects with them", async () => {
+  const { svc, starts } = await unlinkedService();
+  const { sock, stop } = await linking(svc);
+  const creds = join(svc.paths.authDir, "creds.json");
+  mkdirSync(svc.paths.authDir, { recursive: true });
+  writeFileSync(creds, JSON.stringify({ me: { id: "40712345678:3@s.whatsapp.net", name: "Ana" }, account: { details: "c2lnbmVk" }, registered: true }));
+  try {
+    sock.ev.emit("connection.update", { connection: "close", lastDisconnect: { error: { output: { statusCode: 408 } } } });
+    await waitFor(() => starts.length === 1, 5_000, "the service to connect with the new credentials");
+    assert.equal(existsSync(creds), true, "credentials of a pairing that went through are never thrown away");
+  } finally {
+    stop();
+  }
+});

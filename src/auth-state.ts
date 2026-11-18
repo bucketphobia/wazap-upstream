@@ -325,6 +325,20 @@ export function readLinkedAccount(dir: string): LinkedAccount | null {
   return { id: `${number}@s.whatsapp.net`, name: creds.me.name || "", number };
 }
 
+/**
+ * Whether these credentials finished a pairing: WhatsApp's signed device identity (`account`) is
+ * only written on pair-success. Asking for a code already writes `me`, so `me` alone says nothing.
+ * False when there is no file or it cannot be read.
+ */
+export function pairingCompleted(dir: string): boolean {
+  try {
+    const creds = JSON.parse(readFileSync(fileFor(dir, CREDS_FILE), "utf8"), BufferJSON.reviver) as Partial<AuthenticationCreds>;
+    return creds.account != null;
+  } catch {
+    return false;
+  }
+}
+
 export function clearAuth(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }

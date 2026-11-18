@@ -21,7 +21,8 @@ export interface DownloadSource {
 /** WhatsApp's CDN no longer has the file (404, 410): the phone may upload it again. */
 export function cdnExpired(err: unknown): boolean {
   const status = statusCodeOf(err) ?? (err as { status?: unknown } | undefined)?.status;
-  return status === 404 || status === 410;
+  // 403 is how WhatsApp's CDN answers a url whose signature has run out, as often as 404/410 for a file it dropped.
+  return status === 403 || status === 404 || status === 410;
 }
 
 /** Why a download was stopped by its own clock. */

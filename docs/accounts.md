@@ -69,7 +69,17 @@ A bridge serves whatever the owner exposes, so an owner started `--read-only`
 makes every client read-only, whatever flags that client was launched with.
 
 When the owner exits, the bridges exit with it, and the next `wazap` a client
-starts becomes the new owner.
+starts becomes the new owner. Beside an installed service (`wazap service
+install`) a bridge waits for the service to come back instead (a restart, an
+update) and carries on, and calls made meanwhile answer `NOT_CONNECTED`.
+
+`wazap proxy` is that waiting bridge on purpose, for an agent that runs wazap as
+a subprocess next to the service (Hermes, a cron job): it never owns the
+session, so it can never keep the service from starting, it needs no OAuth (it
+reads the loopback token from `daemon.json`), and it reconnects whenever the
+service restarts. A tool call in flight when the service went away is never
+replayed: it answers `NOT_CONNECTED` with its outcome unknown. In the client's
+config: command `wazap`, args `["proxy"]`.
 
 An explicit `--http` is a server of its own rather than a bridge: a second one
 on the same directory exits with code 2 naming the pid of the one already

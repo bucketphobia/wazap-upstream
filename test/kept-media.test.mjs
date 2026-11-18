@@ -700,3 +700,35 @@ test("a kept folder that cannot be written costs a few downloads, not one per ca
   assert.equal(keptPath(svc, sid), undefined);
   assert.equal(state.downloads, 3, "three attempts in all");
 });
+
+test("a voice note is kept from a muted chat too, so its transcript can still be made later", async (t) => {
+  const { svc, arrive } = await setup(t);
+  arrive(ANA, { conversation: "salut" });
+  svc.sockClient.ev.emit("chats.update", [{ id: ANA, muteEndTime: Date.now() + 3_600_000 }]);
+  await waitFor(() => svc.db.identity.chat(ANA)?.mutedUntil > Date.now(), 2000, "the mute");
+  const bytes = Buffer.from("muted voice");
+  const note = arrive(ANA, voice(bytes), bytes);
+  const shot = arrive(ANA, photo(Buffer.from("muted photo")), Buffer.from("muted photo"));
+  await keptOf(svc, note);
+  await settled(svc);
+  assert.equal(keptPath(svc, shot), undefined, "other media of a muted chat still is not kept");
+});
+
+test("a download that failed for a passing reason is tried again on its own after a delay", async (t) => {
+  const { svc, arrive, state } = await setup(t);
+  svc.keep.retryScale = 0.001;
+  const bytes = Buffer.from("flaky voice");
+  const real = svc.mediaBuffer;
+  let failures = 2;
+  svc.mediaBuffer = async (...args) => {
+    if (failures > 0) {
+      failures--;
+      state.downloads++;
+      throw new WazapError("MEDIA_UNAVAILABLE", "Could not download: socket hang up");
+    }
+    return real(...args);
+  };
+  const note = arrive(ANA, voice(bytes), bytes);
+  await keptOf(svc, note);
+  assert.equal(failures, 0, "both passing failures were retried without a reconnect");
+});

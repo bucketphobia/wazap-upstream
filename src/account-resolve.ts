@@ -232,7 +232,7 @@ export function renderGetStatus(s: StatusInfo, writeTools: boolean, hub: Account
     `- **history**: ${historyLine(freshness)}`,
     `- **contacts named**: ${s.contacts_named}`,
     `- **data dir**: ${s.data_dir} · **read-only**: ${s.read_only} · **write tools**: ${writeLine} · **rate limit**: ${s.rate_limit}/min`,
-    `- **versions**: wazap ${s.wazap_version}, baileys ${s.baileys_version}`,
+    `- **versions**: wazap ${s.wazap_version}${s.installed_version === undefined ? "" : ` (installed: ${s.installed_version}, restart pending)`}, baileys ${s.baileys_version}`,
     s.pairing
       ? `- **pairing code**: ${s.pairing.code} for ${s.pairing.phone_masked}, until ${s.pairing.expires_at}`
       : null,

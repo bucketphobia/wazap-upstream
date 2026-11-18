@@ -68,7 +68,7 @@ export class WazapError extends Error {
   }
 }
 
-export const RELINK_FIX = "Run `npx wazap-mcp login`";
+export const RELINK_FIX = "Call link_account with the user's number (or run `wazap login --phone <number>`)";
 export const RESET_FIX = "Run `npx wazap-mcp logout` then `npx wazap-mcp login`";
 
 /**
@@ -80,10 +80,10 @@ export const RESET_FIX = "Run `npx wazap-mcp logout` then `npx wazap-mcp login`"
  * goes in that throw's own fix.
  */
 export const ERROR_GUIDE: Record<ErrorCode, string> = {
-  NOT_LINKED: "Nothing is linked: link_account, or the user runs `npx wazap-mcp login`.",
+  NOT_LINKED: "Nothing is linked: link_account with the user's number, or the user runs `wazap login`.",
   ALREADY_LINKED: "Already linked; call get_status.",
-  SESSION_EXPIRED: "The phone unlinked this device: link_account again. Do not retry.",
-  SESSION_CORRUPT: "Credentials are unreadable: link_account, or `npx wazap-mcp logout` then `login`.",
+  SESSION_EXPIRED: "The phone unlinked this device: call link_account (it clears the dead session, keeps the history) and show the user the code.",
+  SESSION_CORRUPT: "Credentials are unreadable: call link_account (it clears them, keeps the history).",
   NOT_CONNECTED: "Connecting, or preparing the database after an upgrade: get_status, wait, retry once.",
   ACCOUNT_RESTRICTED:
     "Restricted or banned by WhatsApp; nothing sent. Do not retry.",

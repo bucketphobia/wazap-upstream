@@ -346,7 +346,7 @@ test("link_account on a linked account reports ALREADY_LINKED instead of pairing
   };
   registerTools(server, asToolSource(wa), { allowWrite: true });
 
-  const result = await server.tools.get("link_account").handler({ phone: "+15550100" });
+  const result = await server.tools.get("link_account").handler({});
   assert.equal(result.isError, true);
   assert.equal(result.structuredContent.error, "ALREADY_LINKED");
   assert.equal(wa.getStatus().status, "connected", "the tool must not have touched the session");

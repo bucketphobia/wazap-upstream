@@ -32,8 +32,9 @@ import {
 } from "./recall/index.js";
 import { PAIRING_TIMEOUT_MS, linkSession, prettyCode, settledAccount, startPairing } from "./pairing.js";
 import { ACCOUNTS_STOP_MS, drainHttpEndpoints, drainWithin, HTTP_DRAIN_MS, runHttp, runStdio, startLoopbackEndpoint } from "./server.js";
-import { SUPERVISORS, fetchHealth, reinstallCommand, serviceHolding, serviceStopMs, tunnelsTo, type Supervisor } from "./service.js";
+import { SUPERVISORS, fetchHealth, readService, reinstallCommand, serviceHolding, serviceStopMs, tunnelsTo, type Supervisor } from "./service.js";
 import { applyWrites } from "./settings.js";
+import { watchInstalledVersion } from "./version-watch.js";
 import { storageReport, type StorageReport } from "./storage-status.js";
 import {
   MODELS,
@@ -619,6 +620,13 @@ export async function runServe(config: Config): Promise<void> {
     if (role.kind === "bridge") {
       // Bridging onto a running daemon is the rare role; the MCP client stack
       // it needs stays out of the common path until then.
+      // Beside an installed service, the holder comes back after a restart or an update: wait for it and
+      // carry on (src/proxy.ts) rather than exit, which most agent harnesses never restart.
+      if (readService(config.dataDir) !== null) {
+        const { runProxy } = await import("./proxy.js");
+        await runProxy({ daemonFile: p.daemonFile });
+        return;
+      }
       const { runBridge } = await import("./bridge.js");
       await runBridge(role.daemon, p.daemonFile);
       return;
@@ -724,6 +732,20 @@ export async function runServe(config: Config): Promise<void> {
 
   if (config.transport === "http") {
     const port = await runHttp(hub, config, token === null ? undefined : { token, write: true, localFiles: true, label: "local" });
+    // The supervisor's server (the unit names its port) follows an upgrade of its own install:
+    // it stops cleanly and the supervisor starts the new code. A server run by hand only says so.
+    if (readService(config.dataDir)?.port === port) {
+      watchInstalledVersion({
+        onUpgrade: (installed) => {
+          // Only the supervisor's own process: one started by hand on the same port would not come back.
+          if (serviceHolding(config.dataDir, process.pid) === null) {
+            log(`wazap ${installed} is installed, this server runs ${WAZAP_VERSION}: restart it to pick it up`);
+            return;
+          }
+          shutdown(`an upgrade on disk (${WAZAP_VERSION} → ${installed}); the supervisor restarts it`);
+        },
+      });
+    }
     // Off-loopback binds get no sidecar: a bridge on this machine could not reach them.
     if (token !== null && SHAREABLE_HOSTS.includes(config.httpHost)) {
       writeDaemon(p.daemonFile, { pid: process.pid, port, token, version: WAZAP_VERSION });
@@ -786,7 +808,7 @@ export async function runLogin(config: Config): Promise<void> {
   }
   const loginCode = linked ? config.loginCode : await chooseLoginCode(config);
   const resolved = { ...config, loginCode };
-  const askWrites = resolved.writesAnswer === null && !resolved.assumeYes && process.stdin.isTTY === true;
+  const askWrites = writesQuestion(resolved);
   const w = maybeWizard(linked ? 1 : loginWizardSteps(loginCode, askWrites));
   try {
     if (!w) say(banner());
@@ -895,7 +917,7 @@ export async function linkAndSync(
     process.off("SIGTERM", onTerminate);
   }
 
-  const askWrites = config.writesAnswer === null && !config.assumeYes && process.stdin.isTTY === true;
+  const askWrites = writesQuestion(config);
   if (w) {
     if (askWrites) {
       await w.next("Sending messages", [
@@ -1165,6 +1187,16 @@ function printLogout(outcome: LogoutOutcome): void {
 }
 
 /**
+ * Whether login ends by asking about writes: only a person at a terminal who
+ * typed nothing that answers it. A number passed with --phone is a scripted
+ * relink (an agent driving a pty, often), which keeps the setting as it is
+ * rather than blocking on a question nobody will answer.
+ */
+export function writesQuestion(config: Pick<Config, "writesAnswer" | "assumeYes" | "loginPhone">): boolean {
+  return config.writesAnswer === null && !config.assumeYes && config.loginPhone === undefined && process.stdin.isTTY === true;
+}
+
+/**
  * Writes stay off unless the user says otherwise, so a fresh link cannot message
  * anyone. A non-interactive login leaves the setting alone rather than guessing.
  */
@@ -1173,7 +1205,7 @@ export async function offerWrites(config: Config, w: Wizard | null = null): Prom
     applyWrites(config, config.writesAnswer);
     return;
   }
-  if (config.assumeYes || !process.stdin.isTTY) return;
+  if (!writesQuestion(config)) return;
   const question = "Allow the agent to send messages, react and manage chats? [y/N] ";
   const answer = w ? await w.prompt(question) : await ask(`${brand("?")} ${question}`);
   applyWrites(config, /^y(es)?$/i.test(answer.trim()));

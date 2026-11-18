@@ -63,6 +63,9 @@ const SWEEP_MS = 60 * 60 * 1000;
 
 /** A download that failed this often, or for good (gone, too big), is not tried again by this process. */
 const TRIES = 3;
+/** A download that failed for a passing reason (the link, a timeout) is tried again after these, not only at the next catch-up. */
+export const RETRY_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000];
+
 /** Bounded so a flood cannot grow the record of failures. */
 const FAILED_MAX = 5_000;
 
@@ -103,6 +106,10 @@ export class AccountKeep {
   private readonly queued = new Set<string>();
   /** Failed downloads by message, with how often they failed. */
   private readonly failures = new Map<string, number>();
+  /** Retries waiting out their delay, by message; cleared at stop. */
+  private readonly retries = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Tests shrink the retry delays. */
+  retryScale = 1;
   /** Something was turned away by a full queue: a catch-up runs once the queue drains. */
   private overflowed = false;
   private worker: Promise<void> | null = null;
@@ -200,6 +207,8 @@ export class AccountKeep {
       case "all":
         return true;
       case "unmuted": {
+        // A voice note is small, and its transcript needs the audio after WhatsApp lets it go: kept from muted chats too.
+        if (message.type === "voice") return true;
         const mutedUntil = db.identity.chat(message.chatJid)?.mutedUntil ?? null;
         // WhatsApp spells "muted for ever" as -1.
         return mutedUntil === null || (mutedUntil !== -1 && mutedUntil <= Date.now());
@@ -226,6 +235,21 @@ export class AccountKeep {
 
   private gaveUp(sid: string): boolean {
     return (this.failures.get(sid) ?? 0) >= TRIES;
+  }
+
+  /** A passing failure: the message is queued again after a growing delay, while tries are left. */
+  private retryLater(sid: string): void {
+    if (this.gaveUp(sid) || this.stopping || this.retries.has(sid)) return;
+    const tries = this.failures.get(sid) ?? 1;
+    const delay = RETRY_DELAYS_MS[Math.min(tries, RETRY_DELAYS_MS.length) - 1]! * this.retryScale;
+    const timer = setTimeout(() => {
+      this.retries.delete(sid);
+      if (this.stopping) return;
+      this.enqueue(sid);
+      if (this.canDownload()) this.kick();
+    }, delay);
+    timer.unref?.();
+    this.retries.set(sid, timer);
   }
 
   // Arriving -----------------------------------------------------------------
@@ -340,9 +364,11 @@ export class AccountKeep {
       // No more than a kept file may hold: an understated size costs at most that much.
       buffer = await this.host.mediaBuffer(sock, sid, raw, this.largest());
     } catch (err) {
-      // Expired, too big, or the link dropped: get_media will say which if asked. A dropped link is tried
-      // again by a later catch-up, a few times; expired and too big are not.
-      this.failed(sid, permanent(err));
+      // Expired, too big, or the link dropped: get_media will say which if asked. A dropped link or a
+      // timeout is tried again after a delay (and by a later catch-up), a few times; expired and too big are not.
+      const final = permanent(err);
+      this.failed(sid, final);
+      if (!final) this.retryLater(sid);
       return;
     }
     if (buffer.length === 0) {
@@ -595,6 +621,8 @@ export class AccountKeep {
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer !== null) clearInterval(this.timer);
+    for (const timer of this.retries.values()) clearTimeout(timer);
+    this.retries.clear();
     this.timer = null;
     this.queue.length = 0;
     this.queued.clear();

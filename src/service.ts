@@ -19,6 +19,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { WAZAP_VERSION, paths, type Config } from "./config.js";
 import { commandOnPath, isNpxPath, whereInstalled, type Install } from "./connect.js";
 import { WazapError } from "./errors.js";
+import { versionOnDisk } from "./version-watch.js";
+import { readDaemon } from "./daemon.js";
 import { lockHolder } from "./lock.js";
 import { say } from "./logger.js";
 import { dim, fail, fix, info, ok, shortPath } from "./ui.js";
@@ -332,6 +334,24 @@ function unitCommand(supervisor: SupervisorName, text: string): string {
     .split("\n")
     .filter((line) => /^\s*ExecStart\s*=/.test(line))
     .join("\n");
+}
+
+/**
+ * The wazap script a unit runs and the version installed beside it, or null
+ * when the unit cannot be read or names no script. The service may run another
+ * install than the `wazap` on the PATH (another node, another prefix), and an
+ * upgrade of one leaves the other where it was.
+ */
+export function unitScript(record: Pick<ServiceRecord, "supervisor" | "unitFile">): { script: string; version: string | null } | null {
+  let text: string;
+  try {
+    text = readFileSync(record.unitFile, "utf8");
+  } catch {
+    return null;
+  }
+  const script = /(\/[^\s<>"']*\/dist\/index\.js)/.exec(unitCommand(record.supervisor, text))?.[1];
+  if (script === undefined) return null;
+  return { script, version: versionOnDisk(join(dirname(script), "..", "package.json")) };
 }
 
 /**
@@ -695,9 +715,16 @@ async function serviceStatus(config: Config, registry: readonly Supervisor[]): P
         : info(`unhealthy · ${health.status} since ${health.since ?? "unknown"}`)
   );
   if (record.tunnel) say(info(`${record.tunnel.provider} · ${record.tunnel.url}/mcp`));
-  if (record.installedVersion !== WAZAP_VERSION) {
-    say(info(`runs ${record.installedVersion}, ${WAZAP_VERSION} is installed`));
-    say(fix("run `wazap service restart`, or `wazap service install` when the script path changed"));
+  const daemon = readDaemon(paths(config.dataDir).daemonFile);
+  const running = daemon !== null && daemon.pid === pid ? daemon.version : record.installedVersion;
+  const unit = unitScript(record);
+  const onDisk = unit?.version ?? WAZAP_VERSION;
+  if (running !== onDisk) {
+    say(info(`runs ${running}, ${onDisk} is installed${unit === null ? "" : ` at ${shortPath(unit.script)}`}`));
+    say(fix("a service on 1.8.0 or later restarts itself onto it within two minutes; otherwise run `wazap service restart`"));
+  } else if (onDisk !== WAZAP_VERSION && unit !== null) {
+    say(info(`runs ${shortPath(unit.script)} (${onDisk}), another install than this \`wazap\` (${WAZAP_VERSION})`));
+    say(fix("run `wazap service install` to point it at this install, or upgrade that install too"));
   }
   say(dim(supervisor.logs(record)[0]!));
 }

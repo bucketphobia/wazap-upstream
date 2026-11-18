@@ -20,7 +20,7 @@ import type { Readable } from "node:stream";
 import { downloadMediaMessage, proto, type BinaryNode, type WAMessage, type WASocket } from "baileys";
 import type { ILogger } from "baileys/lib/Utils/logger.js";
 import { accountPolicy, type AccountRecord } from "./accounts.js";
-import { cachedAuthState, clearAuth, CredentialsReadError, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
+import { cachedAuthState, clearAuth, CredentialsReadError, pairingCompleted, readLinkedAccount, useAtomicAuthState, type LinkedAccount } from "./auth-state.js";
 import {
   type CatchupQuote,
   type CatchupScan,
@@ -33,6 +33,9 @@ import { BAILEYS_VERSION, WAZAP_VERSION, writesHints, type AccountPaths, type Co
 import { AccountDb, chatKindOf, StorageError, type StoredMessage } from "./db/index.js";
 import { type DraftContext, type StyleCheck } from "./draft-style.js";
 import { asWazapError, RELINK_FIX, RESET_FIX, WazapError } from "./errors.js";
+import { installedDrift } from "./version-watch.js";
+import { markFailure } from "./transcribe/failure.js";
+import { statusCodeOf } from "./service/util.js";
 import { orCancelled, throwIfCancelled } from "./cancel.js";
 import { type AccountFind, type FindContactQuery } from "./find-contact.js";
 import { isGroupId, isNoiseJid, normalizePhone } from "./ids.js";
@@ -407,7 +410,7 @@ export class WhatsAppService implements WhatsAppApi {
         keptMedia: (messageId, raw) => this.keep.read(messageId, raw),
         transcriber: (...args) => this.transcriber(...args),
         transcribeReadiness: (...args) => this.transcribeReadiness(...args),
-        transcribeAudio: (messageId) => this.transcribeAudio(messageId),
+        transcribeAudio: (messageId, opts) => this.transcribeAudio(messageId, undefined, opts),
         embedFeed: () => this.recallIndex.embedFeed,
         webhookTranscriptSettled: (sid) => this.webhooks.webhookTranscriptSettled(sid),
       },
@@ -789,10 +792,19 @@ export class WhatsAppService implements WhatsAppApi {
    * pairing runs at a time: a second call while one is in flight hands back the
    * same code rather than opening a second socket on the same session.
    */
-  link(phone: string): Promise<PairingInfo> {
+  link(phone?: string): Promise<PairingInfo> {
     return this.guarded(async () => {
       if (this.linking) return this.linking;
-      const number = normalizePhone(phone);
+      const given = phone?.trim() ?? "";
+      const known = given === "" ? this.knownNumber() : null;
+      if (given === "" && known === null) {
+        throw new WazapError(
+          "INVALID_PHONE",
+          "No number was given, and none is known for this account.",
+          "Ask the user for their WhatsApp number with its country code, e.g. +40712345678"
+        );
+      }
+      const number = normalizePhone(given === "" ? `+${known}` : given);
       this.requireUnlinked();
       // Pairing clears the credentials: not while they would come back on their own.
       if (this.health.blocksLink()) throw this.health.refusal("link");
@@ -803,11 +815,23 @@ export class WhatsAppService implements WhatsAppApi {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
-      // The service claimed the database for these credentials at start; only they go.
-      if (this.status !== "not_linked") clearAuth(this.paths.authDir);
+      // Only the credentials go, never the account database (the history): a dead session's, or
+      // the half-made ones a failed pairing left. Those already name the number, so Baileys
+      // would log in with them instead of pairing, and WhatsApp refuses that with 401.
+      clearAuth(this.paths.authDir);
       this.linking = this.pair(number);
       return this.linking;
     });
+  }
+
+  /** The number this account was linked to, from the live record or the credentials left on disk. */
+  private knownNumber(): string | null {
+    if (this.account?.number) return this.account.number;
+    try {
+      return readLinkedAccount(this.paths.authDir)?.number ?? null;
+    } catch {
+      return null;
+    }
   }
 
   private requireUnlinked(): void {
@@ -874,6 +898,21 @@ export class WhatsAppService implements WhatsAppApi {
     this.pairingRun = null;
     // Cancelled by stop: nothing failed, so nothing to report.
     if (this.stopped) return;
+    // A pairing WhatsApp accepted, whose reconnect then failed (the network, a timeout), left good
+    // credentials: they are logged in with, as any start does, never thrown away.
+    if (pairingCompleted(this.paths.authDir)) {
+      logError("link", err);
+      log("the pairing went through but its connection did not; connecting with the new credentials");
+      void this.start().catch((startErr: unknown) => logError("link", startErr));
+      return;
+    }
+    // What the pairing wrote was never registered: left there, it would make the next start, or
+    // the next link_account, log in with it and be refused (401) instead of pairing afresh.
+    try {
+      clearAuth(this.paths.authDir);
+    } catch (clearErr) {
+      logError("link", clearErr);
+    }
     this.setStatus("not_linked");
     this.lastError = describe(err);
     logError("link", err);
@@ -940,6 +979,7 @@ export class WhatsAppService implements WhatsAppApi {
 
   getStatus(): StatusInfo {
     const inboundAt = this.latestInboundAt();
+    const drift = installedDrift();
     const info: StatusInfo = {
       status: this.status,
       status_since: isoWithOffset(this.statusSince),
@@ -952,6 +992,7 @@ export class WhatsAppService implements WhatsAppApi {
       last_message_received_at: inboundAt === null ? null : isoWithOffset(inboundAt),
       reconnect_attempts: this.reconnectAttempts,
       wazap_version: WAZAP_VERSION,
+      ...(drift === null ? {} : { installed_version: drift }),
       baileys_version: BAILEYS_VERSION,
       contacts_named: this.namedContacts(),
       data_dir: this.config.dataDir,
@@ -979,8 +1020,13 @@ export class WhatsAppService implements WhatsAppApi {
     if (restricted !== null) hints.push(restricted);
     const outage = this.linkWatch.hint();
     if (outage !== null) hints.push(outage);
+    if (drift !== null) {
+      hints.push(
+        `wazap ${drift} is installed, but this server still runs ${WAZAP_VERSION}. The background service restarts itself onto it within two minutes; otherwise run \`wazap service restart\` (or restart the client that started wazap).`
+      );
+    }
     if (this.status === "logged_out") {
-      hints.push("WhatsApp unlinked this device: link it again with link_account, or run `npx wazap-mcp logout` then `npx wazap-mcp login`.");
+      hints.push("WhatsApp unlinked this device: call link_account (the number is optional: the last one is reused). It clears the dead session, keeps the history and the settings, and returns a pairing code for the user.");
     }
     const scheduled = this.schedule.statusHint();
     if (scheduled !== null) hints.push(scheduled);
@@ -2137,18 +2183,27 @@ export class WhatsAppService implements WhatsAppApi {
     try {
       const answered = await orCancelled(Promise.race([sock.updateMediaMessage(target), late]), signal);
       if (answered === "late") {
-        throw new WazapError(
+        // The phone is offline: worth another try later, unlike a file it no longer has.
+        throw markFailure(new WazapError(
           "MEDIA_UNAVAILABLE",
           `WhatsApp's copy of the media of ${messageId} has expired, and the phone did not answer the request to upload it again within ${this.reuploadTimeoutMs / 1000} s.`,
           "The phone must be online with WhatsApp; retry once it is"
-        );
+        ), "transient", "the phone did not answer the re-upload request");
       }
     } catch (err) {
       if (err instanceof WazapError) throw err;
-      throw new WazapError(
-        "MEDIA_UNAVAILABLE",
-        `WhatsApp's copy of the media of ${messageId} has expired, and the phone could not upload it again (${describe(err)}).`,
-        "Ask the sender to resend it"
+      // Only the phone's own answer (not found 404, cannot decrypt 412) is final; a connection that
+      // closed under the request, or any other error, is worth a later try.
+      const answer = statusCodeOf(err);
+      const final = answer === 404 || answer === 412;
+      throw markFailure(
+        new WazapError(
+          "MEDIA_UNAVAILABLE",
+          `WhatsApp's copy of the media of ${messageId} has expired, and the phone could not upload it again (${describe(err)}).`,
+          "Ask the sender to resend it"
+        ),
+        final ? "permanent" : "transient",
+        final ? "media gone from WhatsApp and the phone" : "the re-upload request failed"
       );
     } finally {
       clearTimeout(timer);

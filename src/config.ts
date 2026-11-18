@@ -17,6 +17,7 @@ export type Source = "flag" | "env" | ".env" | "default";
 
 export type Command =
   | "serve"
+  | "proxy"
   | "login"
   | "setup"
   | "status"
@@ -185,6 +186,7 @@ export type CliInvocation = { kind: "help" } | { kind: "version"; json: boolean 
 /** How many positionals each command takes after its own name. */
 const COMMAND_ARGS: Record<Command, readonly number[]> = {
   serve: [0],
+  proxy: [0],
   login: [0],
   setup: [0],
   status: [0],

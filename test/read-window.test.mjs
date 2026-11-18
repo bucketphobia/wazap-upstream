@@ -269,3 +269,37 @@ test("types past the bound of one read's walk: the answer says it stopped and wh
   assert.ok(whole.structuredContent.notes.some((n) => n.includes(`stopped before the chat's start: older messages may match. read_messages again with before "${from}"`)));
   assert.deepEqual(asked, []);
 });
+
+test("mezzenger's names work too: after (a message or a time) opens the window, cursor pages like before", async (t) => {
+  const { call, arrive } = setup(t);
+  const today = new Date(`${dayOf(0)}T12:00:00`).getTime();
+  arrive("unu", today - 3 * 3_600_000);
+  const anchor = arrive("doi", today - 2 * 3_600_000);
+  arrive("trei", today - 3_600_000);
+  const afterMessage = await call("read_messages", { chat_id: ANA, after: anchor });
+  assert.deepEqual(afterMessage.structuredContent.messages.map((m) => m.text), ["trei"], "only what came after that message");
+  const afterTime = await call("read_messages", { chat_id: ANA, after: `${dayOf(0)}T09:30` });
+  assert.deepEqual(afterTime.structuredContent.messages.map((m) => m.text), ["doi", "trei"]);
+  const paged = await call("read_messages", { chat_id: ANA, cursor: anchor });
+  assert.deepEqual(paged.structuredContent.messages.map((m) => m.text), ["unu"], "cursor is before");
+  const both = await call("read_messages", { chat_id: ANA, after: anchor, since: dayOf(0) });
+  assert.equal(textError(both).error, "INVALID_ID");
+});
+
+test("search takes cursor and sender_id the way mezzenger names them", async (t) => {
+  const { call, arrive } = setup(t);
+  arrive("factura de gaz", Date.now() - 3_600_000);
+  const result = await call("search", { query: "factura", sender_id: ANA, match: "words" });
+  assert.equal(result.isError, undefined, JSON.stringify(result.content));
+  assert.match(JSON.stringify(result.structuredContent), /factura de gaz/);
+  const clash = await call("search", { query: "factura", sender_id: ANA, from: "me" });
+  assert.equal(textError(clash).error, "INVALID_ID");
+});
+
+test("find_contact takes query, mezzenger's name for name", async (t) => {
+  const { call, arrive } = setup(t);
+  arrive("salut", Date.now() - 3_600_000);
+  const result = await call("find_contact", { query: "Ana", include_context: false });
+  assert.equal(result.isError, undefined, JSON.stringify(result.content));
+  assert.match(JSON.stringify(result.structuredContent), new RegExp(ANA.replace(".", "\\.")));
+});

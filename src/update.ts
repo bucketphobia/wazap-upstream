@@ -1,11 +1,11 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { WAZAP_VERSION, type Config } from "./config.js";
 import { commandPath, installGlobally, whereInstalled, type Install } from "./connect.js";
 import { checkLines, isNewer, latestVersion, type Check } from "./doctor.js";
 import { asWazapError } from "./errors.js";
 import { say } from "./logger.js";
-import { installedService, writeService, type Installed } from "./service.js";
+import { installedService, unitScript, writeService, type Installed } from "./service.js";
 import { detectedTargets, installSkills, skillState, type SkillState, type SkillTarget } from "./skills.js";
 import { ok } from "./ui.js";
 
@@ -108,10 +108,21 @@ function restartService(config: Config, installed: string | null): Check {
     const failure = asWazapError(err);
     return { name: "service", state: "fail", detail: failure.message, fix: failure.fix };
   }
-  // The unit points at the global path, so a restart is what picks the new code
-  // up; the record has to say so or `status` keeps reporting a drift.
-  if (installed !== null) writeService(config.dataDir, { ...found.record, installedVersion: installed });
-  return { name: "service", state: "ok", detail: `restarted ${found.record.label}` };
+  // A restart picks up whatever the unit's own install holds, which is the one
+  // npm just upgraded only when the unit runs it: another node or prefix stays behind.
+  const runs = unitScript(found.record);
+  const expected = installed ?? WAZAP_VERSION;
+  if (runs !== null && runs.version !== null && runs.version !== expected) {
+    writeService(config.dataDir, { ...found.record, installedVersion: runs.version });
+    return {
+      name: "service",
+      state: "warn",
+      detail: `restarted ${found.record.label}, but it runs ${runs.script} (${runs.version}), another install than the one updated (${expected})`,
+      fix: `run \`wazap service install\` to point it at this install, or upgrade that one with its own npm: \`${join(dirname(runs.script), "..", "..", "..", "..", "bin", "npm")} i -g wazap-mcp@${expected}\``,
+    };
+  }
+  writeService(config.dataDir, { ...found.record, installedVersion: runs?.version ?? expected });
+  return { name: "service", state: "ok", detail: `restarted ${found.record.label} (now ${runs?.version ?? expected})` };
 }
 
 function copySkills(config: Config, targets: SkillTarget[], source: string | undefined): Check {
