@@ -88,6 +88,10 @@ export class VectorCache {
   private recoveryDelayMs = 1000;
   private scanTimeoutMs = 15000;
   private warmTimeoutMs = 60000;
+  // Slowest read-and-load rate a warm must still finish at. Measured on a desktop NVMe, a 526,297 x 3,072 byte warm
+  // (1.6 GB) loads at 100-300 MiB/s; the 60 s budget failed four times on a slower host. 4 MiB/s leaves a wide margin
+  // and bounds each pass over a 2048 MiB table at about 9.5 minutes.
+  private warmBytesPerSec = 4 * 1048576;
   private workers: Worker[] = [];
   private readonly pending = new Map<
     Worker,
@@ -247,7 +251,7 @@ export class VectorCache {
       if (this.closed || this.blocked || requestedGeneration !== this.generation || this.state === "recovering") return;
       const previousGeneration = this.generation;
       this.state = "loading";
-      const deadline = Date.now() + this.warmTimeoutMs;
+      let deadline = Date.now() + this.warmTimeoutMs;
       try {
         await this.stopWorkers();
         if (this.closed) return;
@@ -269,17 +273,25 @@ export class VectorCache {
             after
           );
           if (rows.length === 0) break;
-          for (const row of rows)
+          for (const row of rows) {
+            // The count pass reads every vector page too, so a slow disk earns time for what it has read.
+            deadline += (row.dimensions * 1000) / this.warmBytesPerSec;
             if (row.model === model) {
               if (this.dimensions === 0) this.dimensions = row.dimensions;
               if (row.dimensions === this.dimensions) count++;
               else this.completeDimensions = false;
             }
+          }
           after = rows[rows.length - 1]!.message_id;
           await this.checkedYield(generation);
         }
         const maximum = Math.floor(this.maxBytes / (this.dimensions + BOOKKEEPING_BYTES));
         if (count > maximum) throw new CacheLimit("size_limit");
+        // The load, merge and sync phases read every vector, so their budget grows with the bytes to load.
+        deadline = Math.max(
+          deadline,
+          Date.now() + this.warmTimeoutMs + Math.ceil((count * this.dimensions * 1000) / this.warmBytesPerSec)
+        );
         await this.allocate(Math.min(maximum, count + Math.max(1024, Math.ceil(count / 10))));
         this.checkGeneration(generation);
         after = 0;

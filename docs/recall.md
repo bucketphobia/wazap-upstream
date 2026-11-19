@@ -168,7 +168,11 @@ another connection during a warm uses no attempt; such warms retry with a growin
 delay (up to 64 times the base) until a warm finishes or a search is served, and ten
 in a row end in failed. Any error inside the cache
 fails the cache the same way; it never reaches the search or the server.
-Warm operations have a 60-second deadline and worker responses a 15-second
+The count pass of a warm has a 60-second deadline plus the bytes it reads at
+4 MiB per second. After it, the load loop and the check after sync get 60
+seconds plus the bytes to load at 4 MiB per second (a 526,000-vector, 1.6 GB
+archive gets about 8 minutes for each pass, so about 15 minutes in total), so a
+large archive can warm on a slow disk and the warm still ends. Worker responses have a 15-second
 deadline. Recall status includes advisory `cache` state, reason, shared bytes,
 the attempts spent in the current recovery and `capFallbacks`; a cache failure
 does not disable SQLite recall. Any filter, pending clear purges and cold caches

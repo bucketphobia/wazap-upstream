@@ -458,6 +458,57 @@ test("A-S6 a warm deadline is bounded and reported without content", async (t) =
   assert.equal(cache.status().sharedBytes, 0);
 });
 
+// A clock that jumps forward right after the count pass stands in for a host too slow to load within the old fixed budget.
+async function warmWithJump(t, jumpMs, setup) {
+  const { cache } = rawFixture(t, 2000, 3072);
+  setup(cache);
+  const allocate = cache.allocate.bind(cache);
+  const now = Date.now;
+  let offset = 0;
+  Date.now = () => now() + offset;
+  cache.allocate = (...args) => ((offset = jumpMs), allocate(...args));
+  try {
+    await cache.warm("m");
+  } finally {
+    Date.now = now;
+  }
+  return cache.status();
+}
+
+test("A-S6 a warm with many bytes to load gets a deadline in proportion to them", async (t) => {
+  const status = await warmWithJump(t, 120000, (cache) => (cache.warmBytesPerSec = 1000));
+  assert.equal(status.state, "ready", "2 minutes of load is inside the proportional budget, beyond the old 60 s");
+  assert.equal(status.reason, undefined);
+});
+
+test("A-S6 a slow count pass earns time for the bytes it has read", async (t) => {
+  const { cache } = rawFixture(t, 2000, 3072);
+  cache.warmBytesPerSec = 1000;
+  const all = cache.c.all.bind(cache.c);
+  const now = Date.now;
+  let offset = 0;
+  Date.now = () => now() + offset;
+  // After the first count page, jump past the old fixed 60 s deadline.
+  cache.c.all = (sql, ...args) => {
+    const rows = all(sql, ...args);
+    if (sql.includes("length(vec)")) offset = 120000;
+    return rows;
+  };
+  try {
+    await cache.warm("m");
+  } finally {
+    Date.now = now;
+  }
+  assert.equal(cache.status().state, "ready");
+});
+
+test("A-S6 the proportional warm deadline is still bounded", async (t) => {
+  const status = await warmWithJump(t, 86400000, (cache) => (cache.warmBytesPerSec = 1000));
+  assert.equal(status.state, "recovering");
+  assert.equal(status.reason, "warm_timeout");
+  assert.equal(status.sharedBytes, 0);
+});
+
 test("A-S4 the public zero setting installs no cache tracking triggers", async (t) => {
   const saved = process.env.WAZAP_RECALL_CACHE_MAX_MB;
   process.env.WAZAP_RECALL_CACHE_MAX_MB = "0";
