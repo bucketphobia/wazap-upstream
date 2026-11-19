@@ -115,6 +115,8 @@ test("contact search returns ambiguous candidates; exact message search ignores 
 });
 
 test("recent pages are bounded, repeatable, isolated by client and recheck deletion/private tags", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const f = fixture(t);
   f.arrive(ANA, "PRIVATE-ONE?");
   f.arrive(ANA, "PRIVATE-TWO?");
@@ -160,6 +162,8 @@ test("recent pagination constructs only each page's views and never rescans on c
 });
 
 test("recent pages preserve full-read ordering, metadata and type/system filters", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const f = fixture(t);
   f.arrive(ANA, "First question?");
   f.arrive(GROUP, "Group question?", false, DAN);
