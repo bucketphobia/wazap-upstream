@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.1
+
+- **Dependencies refreshed within their ranges.** `@modelcontextprotocol/sdk` 1.32.2 and `express-rate-limit` 8.7.5 for users. The dev tools move up too (eslint 10.15, typescript-eslint 8.73, prettier 3.10, tsx 4.23.15), which clears the minimatch denial-of-service advisory ([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)) that reached the dev tree through eslint. `npm audit` now reports nothing. Nothing else changes in what wazap does.
+
 ## 1.8.0
 
 - **`link_account` brings back an account the phone unlinked, from the agent.** When get_status says `logged_out`, `session_corrupt` or `not_linked`, `link_account` clears the dead credentials (never the account database, the kept media or any setting, writes included) and returns a pairing code; `get_status` then goes `linking` → `connected`. A pairing that failed (a code that expired, one typed wrong, WhatsApp not answering) used to leave half-made credentials that already named the number, so every later try logged in with them and was refused with "WhatsApp rejected the link"; they are now removed when the pairing fails and before every new one. `phone` is optional: left out, the number the account was linked to is reused. A second call while a code is out returns the same code. The errors and hints that said "Run `npx wazap-mcp login`" now point at `link_account`, and a `wazap login --phone …` never ends on the "Allow the agent to send messages?" question, so a scripted relink cannot block on it.
