@@ -143,6 +143,20 @@ test("get_media gives a remote session a link that serves the original as a safe
   assert.match(response.headers.get("content-security-policy"), /sandbox/);
 });
 
+test("media routes still match case-insensitively and forward rejected handlers to the HTTP error middleware", async (t) => {
+  const { svc, sid, links, local } = await setup(t);
+  const { url } = links.mint({ account: "default", ...svc.mediaLinkRef(sid) });
+  const path = local(url).replace("/media/", "/MEDIA/") + "/";
+  const head = await fetch(path, { method: "HEAD" });
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("content-type"), "application/pdf");
+
+  svc.mediaLinkTarget = () => { throw new Error("internal media failure"); };
+  const failed = await fetch(path);
+  assert.equal(failed.status, 500);
+  assert.deepEqual(await failed.json(), { error: "Internal server error" });
+});
+
 test("a tampered, expired, other-account or stale link is a 404, like a deleted message's", async (t) => {
   const { svc, sock, sid, links, config, local } = await setup(t);
   const ref = svc.mediaLinkRef(sid);

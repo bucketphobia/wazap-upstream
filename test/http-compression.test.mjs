@@ -55,6 +55,7 @@ async function boot(t) {
 
 /** One raw request: the bytes exactly as they crossed the wire, and the headers. */
 function raw(port, { method = "POST", body, sid, encoding } = {}) {
+  const unframed = method === "POST" && body === undefined;
   return new Promise((resolve, reject) => {
     const req = request(
       {
@@ -62,7 +63,9 @@ function raw(port, { method = "POST", body, sid, encoding } = {}) {
         port,
         path: "/mcp",
         method,
+        setDefaultHeaders: !unframed,
         headers: {
+          ...(unframed ? { host: `127.0.0.1:${port}` } : {}),
           ...(method === "POST" ? { "content-type": "application/json" } : {}),
           accept: method === "POST" ? "application/json, text/event-stream" : "text/event-stream",
           authorization: "Bearer w",
@@ -90,6 +93,15 @@ function raw(port, { method = "POST", body, sid, encoding } = {}) {
 
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "gzip", version: "1" } } };
 const decoded = (answer) => (answer.headers["content-encoding"] === "gzip" ? gunzipSync(answer.wire) : answer.wire).toString("utf8");
+
+test("an unframed POST to a live MCP session is still validated as an empty object", async (t) => {
+  const port = await boot(t);
+  const sid = (await raw(port, { body: initialize })).headers["mcp-session-id"];
+  assert.ok(sid);
+  const answer = await raw(port, { sid });
+  assert.equal(answer.status, 400);
+  assert.deepEqual(JSON.parse(decoded(answer)).error, { code: -32700, message: "Parse error: Invalid JSON-RPC message" });
+});
 
 test("tools/list is gzip on the wire for a client that asks, the same text decoded, and identity for one that does not", async (t) => {
   const port = await boot(t);

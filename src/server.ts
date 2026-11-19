@@ -492,6 +492,9 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
   const openRead = endpoint.openRead && !oauth;
   let resourceMetadataUrl: string | null = null;
   if (oauth) {
+    // Keep Express 4's query shape for the SDK's OAuth validation: a
+    // bracketed scalar such as resource[] must be rejected, not ignored.
+    app.set("query parser", "extended");
     // The OAuth stack (the SDK's auth router and its own limiter) is the one
     // part of this endpoint only a public server pays for, so it loads here.
     const [{ mcpAuthRouter, getOAuthProtectedResourceMetadataUrl }, { rateLimit }] = await Promise.all([
@@ -723,6 +726,9 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
 
   const handleMcp = async (req: Request, res: Response): Promise<void> => {
     try {
+      // Express 5 leaves unparsed bodies undefined. Keep the empty object for
+      // POSTs so the transport validates it rather than re-reading a body.
+      const body = req.method === "POST" ? (req.body ?? {}) : undefined;
       const sessionId = req.headers["mcp-session-id"];
       const owner = (req as AuthedRequest).sessionOwner;
       if (owner === undefined) throw new Error("MCP request bypassed authentication");
@@ -735,7 +741,7 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
         return;
       }
 
-      if (!transport && req.method === "POST" && isInitializeRequest(req.body)) {
+      if (!transport && isInitializeRequest(body)) {
         const shape = shapeOf(req as AuthedRequest, formatOf(req as AuthedRequest));
         logInitialize(req as AuthedRequest, shape.format);
         transport = await openSession(req as AuthedRequest, owner, shape);
@@ -775,7 +781,7 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
 
       // A session answering a POST is not the one to close for room.
       if (req.method === "POST" && typeof sessionId === "string") res.once("close", sessions.hold(sessionId, transport));
-      await serveMcp(transport, req, res, req.method === "POST" ? req.body : undefined);
+      await serveMcp(transport, req, res, body);
       // Ended by its client: the next call with this id is a 404, never a revival.
       if (req.method === "DELETE" && typeof sessionId === "string" && res.statusCode === 200) sessions.end(sessionId);
     } catch (err) {
@@ -790,9 +796,6 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
     }
   };
 
-  const authed = (req: Request, res: Response, next: NextFunction): void => {
-    requireAuth(req, res, next).catch(next);
-  };
   // A read credential's call fits in 100 KiB; only a write credential may send a file inside one (send_message's
   // data_base64), with its length declared up front, and only while the large bodies under way leave room.
   const smallBody = express.json({ limit: MCP_BODY_MAX_BYTES, inflate: false });
@@ -834,9 +837,9 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
     });
     largeBody(req, res, parsed(req, res, next));
   };
-  app.post("/mcp", authed, httpPostBudget((req) => (req as AuthedRequest).sessionOwner!, Date.now, config.httpPostBudget), mcpBody, handleMcp);
-  app.get("/mcp", authed, handleMcp);
-  app.delete("/mcp", authed, handleMcp);
+  app.post("/mcp", requireAuth, httpPostBudget((req) => (req as AuthedRequest).sessionOwner!, Date.now, config.httpPostBudget), mcpBody, handleMcp);
+  app.get("/mcp", requireAuth, handleMcp);
+  app.delete("/mcp", requireAuth, handleMcp);
 
   // Open to anyone, so a stranger gets liveness only: `ok`, and the default
   // socket's `status` / `since`. Which accounts exist is behind a token, read or
@@ -844,14 +847,11 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
   // that has been anything but connected for two minutes is a real outage, and
   // a 503 is what a tunnel or a monitor can act on; a reconnect in progress is
   // not. One dead account does not 503 the process while another is still up.
-  app.get("/healthz", (req: Request, res: Response, next: NextFunction) => {
+  app.get("/healthz", async (req, res) => {
     const body = healthBody(hub);
-    bearerAccess(req.headers.authorization)
-      .then((access) => {
-        const { ok, status, since } = body;
-        res.status(ok ? 200 : 503).json(access === null ? { ok, status, since } : body);
-      })
-      .catch(next);
+    const access = await bearerAccess(req.headers.authorization);
+    const { ok, status, since } = body;
+    res.status(ok ? 200 : 503).json(access === null ? { ok, status, since } : body);
   });
 
   // Signed links to originals (src/media-links.ts): only on a server with a public URL. The link is the
@@ -862,12 +862,10 @@ export async function startHttpEndpoint(hub: AccountSource, config: Config, endp
   if (links !== null) {
     const { rateLimit } = await import("express-rate-limit");
     app.set("trust proxy", config.trustedProxies ?? ["loopback"]);
-    app.get(
+    app.get<{ token: string }>(
       MEDIA_LINK_ROUTE,
       rateLimit({ windowMs: 15 * 60 * 1000, limit: 120, standardHeaders: true, legacyHeaders: false }),
-      (req: Request, res: Response, next: NextFunction) => {
-        serveMediaLink(hub, links, String(req.params.token ?? ""), res, { head: req.method === "HEAD" }).catch(next);
-      }
+      (req, res) => serveMediaLink(hub, links, req.params.token, res, { head: req.method === "HEAD" })
     );
   }
 

@@ -656,19 +656,24 @@ test("access token is invalid at its exact expiration instant", async (t) => {
 test("authorization rejects a resource other than this MCP endpoint", async (t) => {
   const ctx = await boot(t);
   const started = await begin(ctx);
+  const query = new URLSearchParams({
+    client_id: started.client.client_id,
+    redirect_uri: started.redirectUri,
+    response_type: "code",
+    code_challenge: started.challenge,
+    code_challenge_method: "S256",
+  });
   for (const resource of ["https://other.example/mcp", `${ctx.base}/other`, `${ctx.base}/mcp?extra=1`]) {
-    const query = new URLSearchParams({
-      client_id: started.client.client_id,
-      redirect_uri: started.redirectUri,
-      response_type: "code",
-      code_challenge: started.challenge,
-      code_challenge_method: "S256",
-      resource,
-    });
+    query.set("resource", resource);
     const { res } = await ctx.fetchJson(`/authorize?${query}`);
     assert.equal(res.status, 302);
     assert.equal(new URL(res.headers.get("location")).searchParams.get("error"), "invalid_target");
   }
+  query.delete("resource");
+  query.set("resource[]", `${ctx.base}/mcp`);
+  const { res } = await ctx.fetchJson(`/authorize?${query}`);
+  assert.equal(res.status, 302);
+  assert.equal(new URL(res.headers.get("location")).searchParams.get("error"), "invalid_request");
 });
 
 test("token exchange rejects a different resource without consuming the valid code", async (t) => {
@@ -1164,6 +1169,21 @@ test("a draft answers to its OAuth client across sessions and token rotations, n
   const otherSession = await mcp(other.tokens.access_token);
   const refused = await otherSession.callTool({ name: "confirm_send", arguments: { draft_id: draftId(next) } });
   assert.equal(JSON.parse(refused.content[0].text).error, "DRAFT_NOT_FOUND");
+});
+
+test("the consent form refuses an unparsed body without consuming the pending sign-in", async (t) => {
+  const ctx = await boot(t);
+  const { request } = await begin(ctx);
+  const { res, body } = await ctx.fetchJson("/oauth/approve", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: form({ request, decision: "allow", password: PASSWORD, access: "read" }),
+  });
+  assert.equal(res.status, 400);
+  assert.match(body, /sign-in link has expired/);
+  const { res: approved } = await approve(ctx, request, { decision: "allow", password: PASSWORD, access: "read" });
+  assert.equal(approved.status, 302);
+  assert.ok(new URL(approved.headers.get("location")).searchParams.has("code"));
 });
 
 test("the OAuth routes refuse compressed and oversized bodies before parsing them, and before any sign-in", async (t) => {
