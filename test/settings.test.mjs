@@ -127,6 +127,27 @@ test("setEnvSetting round-trips #, spaces and quotes through dotenv.parse", () =
   }
 });
 
+test("dotenv.parse keeps the dotenv 16 comment and newline rules used by the settings writer", () => {
+  assert.deepEqual(
+    parse([
+      "UNQUOTED=  left#right  ",
+      "HASH='left#right'",
+      'DOUBLE="first\\nsecond\\rthird"#comment',
+      "SINGLE='first\\nsecond\\rthird'",
+      "BACKTICK=`first\\nsecond\\rthird`",
+      "BARE=first\\nsecond\\rthird",
+    ].join("\r\n")),
+    {
+      UNQUOTED: "left",
+      HASH: "left#right",
+      DOUBLE: "first\nsecond\rthird",
+      SINGLE: "first\\nsecond\\rthird",
+      BACKTICK: "first\\nsecond\\rthird",
+      BARE: "first\\nsecond\\rthird",
+    }
+  );
+});
+
 const ANSWERS = [
   ["--writes", { writesAnswer: true, assumeYes: false }, "WAZAP_READ_ONLY=0\n"],
   ["--no-writes", { writesAnswer: false, assumeYes: false }, "WAZAP_READ_ONLY=1\n"],
@@ -193,6 +214,25 @@ test("the flag beats the environment, which beats .env", async () => {
   assert.match((await wazap(dir, ["config", "--read-only"])).stderr, /writes: off \(flag\)/);
   assert.match((await wazap(dir, ["config"], { WAZAP_READ_ONLY: "1" })).stderr, /writes: off \(env\)/);
   assert.match((await wazap(dir, ["config"])).stderr, /writes: on \(\.env\)/);
+});
+
+test("config loads its .env silently with the same precedence and UTF-8 even with dotenv options in the environment", async () => {
+  const dir = dataDir();
+  writeFileSync(join(dir, ".env"), "WAZAP_TRANSPORT=http#comment\nWAZAP_HOST=café\nWAZAP_READ_ONLY=0\n");
+
+  const { stdout, stderr } = await wazap(dir, ["config"], {
+    DOTENV_PATH: join(dir, "other.env"),
+    DOTENV_ENCODING: "latin1",
+    DOTENV_DEBUG: "true",
+    DOTENV_OVERRIDE: "true",
+    DOTENV_FAST: "true",
+    DOTENV_QUIET: "false",
+    WAZAP_READ_ONLY: "1",
+  });
+  assert.equal(stdout, "");
+  assert.doesNotMatch(stderr, /inject(?:ed|ing) env/i);
+  assert.match(stderr, /transport: http café:8766 \(\.env\)/);
+  assert.match(stderr, /writes: off \(env\)/);
 });
 
 test("status reflects the persisted writes setting", async () => {

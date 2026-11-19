@@ -1,9 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import dotenv from "dotenv";
 import { DEPRECATED_SETTINGS, RETIRED_SETTINGS, parseCli, readOnlySetting, settingWarnings, writesHints } from "../dist/config.js";
 
 const CASES = [
@@ -59,6 +60,22 @@ const RETIRED_VALUES = {
   WAZAP_MAX_INFLIGHT_TOTAL: "64",
   WAZAP_HTTP_BUDGET: "1000",
 };
+
+test("parseCli uses dotenv's classic parser even when DOTENV_FAST is set", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wazap-parser-config-"));
+  const previous = process.env.DOTENV_FAST;
+  t.after(() => {
+    if (previous === undefined) delete process.env.DOTENV_FAST;
+    else process.env.DOTENV_FAST = previous;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  process.env.DOTENV_FAST = "true";
+  writeFileSync(join(dir, ".env"), "# wazap settings\n");
+
+  const parse = t.mock.method(dotenv, "parse");
+  parseCli(["serve", "--data-dir", dir]);
+  assert.deepEqual(parse.mock.calls.map(({ arguments: [, options] }) => options.fast), [false]);
+});
 
 test("retired settings change nothing, and WAZAP_TRANSPORT=http still serves HTTP", () => {
   const keys = [...Object.keys(RETIRED_VALUES), "WAZAP_RETENTION", "WAZAP_TRANSPORT"];

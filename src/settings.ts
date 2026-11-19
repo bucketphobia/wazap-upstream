@@ -42,7 +42,7 @@ import {
 } from "./webhook.js";
 
 /**
- * dotenv 16 treats an unquoted `#` as a comment, even with no space, and
+ * dotenv's default parser treats an unquoted `#` as a comment, even with no space, and
  * trims unquoted padding. Quote so a secret like `p@ss#word` round-trips.
  * dotenv only expands `\n` / `\r` inside double quotes and does not unescape
  * `\"`, so the quote style is picked to avoid needing that.

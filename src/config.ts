@@ -434,7 +434,15 @@ export function parseCli(argv: string[] = process.argv.slice(2)): CliInvocation 
   // Snapshot before dotenv, which fills process.env from the data dir's .env
   // without overriding what the real environment already set.
   const shell = new Set(Object.keys(process.env).filter((key) => key.startsWith("WAZAP_")));
-  dotenv.config({ path: paths(dataDir).envFile, quiet: true });
+  // Keep dotenv's own environment options from changing how wazap loads .env.
+  dotenv.config({
+    path: paths(dataDir).envFile,
+    encoding: "utf8",
+    quiet: true,
+    debug: false,
+    override: false,
+    fast: false,
+  });
   const sourceOf = (key: string, flagged: boolean): Source => {
     if (flagged) return "flag";
     if (shell.has(key)) return "env";
