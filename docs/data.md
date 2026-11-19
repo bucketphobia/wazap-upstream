@@ -116,6 +116,34 @@ its log.
   an earlier release has those times read out of its stored descriptions once,
   at the first start after the upgrade. Schema 8 indexes the stored vectors'
   model, so counting them for `get_status` no longer reads every vector.
+- **Every message has a change number** (schema 9, `change_seq`), the order
+  messages were stored or changed in, which `new_since` reads. An upgrade
+  numbers what the file already held, oldest first, in one step; after that a
+  message takes the next number when it is stored and whenever its words, an
+  edit, its transcript, its deletion, its quote copy or the chat it sits under
+  change. The number only grows, and a message removed for good (a cleared
+  chat, expiry) never lets its number repeat. The upgrade rewrites every message
+  row inside one transaction: keep free space of roughly the file's size on top
+  of the pre-migration copy. It is atomic; a failure leaves the file at the version
+  it had. A random `change_epoch` in the file tells a `new_since` consumer which
+  numbering its cursor belongs to; a copy of the data directory keeps it.
+  Schema 9 also observes expiry and privacy changes. `messages.observed_expires_at`
+  stores disappearing deadlines even with retention off; `expires_at` alone
+  still controls retention and ordinary read visibility. Changing either takes
+  a new change number; setting the same deadline does not. SQL triggers on
+  `contact_notes` re-number the tagged person's sender rows and direct-chat
+  rows when `private` is added or removed. Other accounts' private JIDs are
+  reconciled by the service before `new_since` fixes its top, with the previous
+  set stored in `meta.change_private_others` so restarts keep the comparison.
+  These other accounts' private JIDs are persisted in this database and therefore
+  also in its later pre-migration copies. While a live account cannot answer,
+  `new_since` uses the union of the stored set and successful answers without
+  replacing the stored snapshot.
+  A content-free `expired_removals` table records physical deletions of messages
+  with an expiry using the shared counter; sweeps and `new_since` prune records
+  older than 90 days. `meta.expired_removals_pruned_through` keeps the highest
+  pruned change number; older nonzero cursors are refused with `CURSOR_EXPIRED`.
+  Schema 9 includes these columns, the table and their triggers in one upgrade.
 - **A schema upgrade copies the file first.** When a start finds a database an
   older wazap wrote, it writes `wazap.<old version>.pre-migration.sqlite` beside
   it — the file as it was, whole — and only then migrates. If the copy cannot be

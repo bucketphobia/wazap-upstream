@@ -216,6 +216,7 @@ export function classify(id: LegacyIdentity, raw: WAMessage, options: ClassifyOp
     quotedSid: quotedSidOf(id, raw, chatJid),
     status: fromMe && typeof raw.status === "number" ? raw.status : null,
     expiresAt: deadlineFor(id, raw, viewSid),
+    observedExpiresAt: messageExpiry(raw) ?? null,
   };
   return { kind: "message", input, viewSid, raw, revokes: revokedRefs(id, raw, chatJid) };
 }

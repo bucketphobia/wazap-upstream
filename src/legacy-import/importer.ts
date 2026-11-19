@@ -1197,8 +1197,9 @@ class ImportRun {
       };
       detail(phase, "textOnly");
     }
-    if (ctx.enforceExpiry && typeof row.expires === "number" && row.expires >= 0) {
-      input.expiresAt = input.expiresAt === null || input.expiresAt === undefined ? row.expires : Math.min(input.expiresAt, row.expires);
+    if (typeof row.expires === "number" && row.expires >= 0) {
+      input.observedExpiresAt = Math.min(input.observedExpiresAt ?? Infinity, row.expires);
+      if (ctx.enforceExpiry) input.expiresAt = Math.min(input.expiresAt ?? Infinity, row.expires);
     }
     const result = classified !== null ? this.importMessage(phase, classified) : this.db.messages.upsert(input);
     if (classified === null) this.count(phase, result!);
@@ -1406,6 +1407,7 @@ class ImportRun {
         text: line.text,
         raw: null,
         ...(deadline === Infinity ? {} : { expiresAt: deadline }),
+        ...(Number.isSafeInteger(line.expiresAt) && line.expiresAt! >= 0 ? { observedExpiresAt: line.expiresAt } : {}),
       });
       if (result.outcome !== "inserted") {
         skip(phase, "barrier");

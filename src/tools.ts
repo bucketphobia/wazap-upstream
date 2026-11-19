@@ -62,6 +62,7 @@ import { MESSAGE_TYPES } from "./wa-types.js";
 import type {
   ChatRead,
   ChatSummary,
+  ExpiredMessageView,
   ContactSummary,
   HandledResult,
   JoinGroupResult,
@@ -152,6 +153,25 @@ const READ_OUTPUT = {
     .optional()
     .describe("before ran past the local history: the phone was asked, and sent this many"),
   notes: NOTES,
+  sync: z.string(),
+  account_id: z.string(),
+};
+
+const NEW_SINCE_OUTPUT = {
+  epoch: z.string().describe("A cursor stored with another epoch is void: start again from after 0"),
+  after: z.number(),
+  through: z.number().describe("Pass as after next"),
+  top: z.number(),
+  more: z.boolean(),
+  count: z.number(),
+  messages: z.array(
+    BROAD_MESSAGE_OUT.extend({
+      key: z.string().describe("Upsert by this: message_id changes when a chat's lid pairs with a phone"),
+      deleted: z.literal(true).optional().describe("Deleted; no words are left"),
+      expires_at: z.string().datetime({ offset: true }).optional().describe("Disappearing message deadline"),
+      view_once: z.literal(true).optional(),
+    }).passthrough().or(z.object({ key: z.string(), chat_id: z.string(), expired: z.literal(true) }))
+  ),
   sync: z.string(),
   account_id: z.string(),
 };
@@ -393,6 +413,7 @@ const HINTS: Record<string, ToolHints> = {
   // The user's notes, kept locally: not read-only, never WhatsApp, and filing the same thing twice changes nothing.
   remember: hint(false, false, true, false),
   wait_for_messages: hint(true, false, true, true),
+  new_since: hint(true, false, true, true),
   search: hint(true, false, true, true),
   get_message: hint(true, false, true, true),
   find_contact: hint(true, false, true, true),
@@ -928,6 +949,27 @@ const TOOLS: readonly ToolDef[] = [
       });
       const named = { ...result, messages: withChatNames(ctx.wa, result.messages) };
       return ok(renderWait(named), { ...named, count: named.messages.length });
+    },
+  }),
+
+  tool({
+    name: "new_since",
+    title: "List WhatsApp messages that arrived or changed",
+    description: `Messages that arrived or changed after a cursor, in every chat but stories, as they are now. Upsert by key; deleted: true marks deletions, expired: true (key, chat_id only) expiries.`,
+    schema: {
+      after: z.number().int().min(0).default(0).describe("Previous through; 0 = all"),
+      limit: z.number().int().min(1).max(200).default(100),
+    },
+    outputSchema: NEW_SINCE_OUTPUT,
+    write: false,
+    handler: async ({ after, limit }, ctx) => {
+      const result = await ctx.wa.newSince(after, limit, { private: await privateRule(ctx.hub, ctx.accountId) });
+      const { data } = result;
+      const note = `Changes ${data.after} to ${data.through} of ${data.top}${data.more ? "; more remain: call again with after " + data.through : ""}.`;
+      return ok(
+        renderMessages("Messages that arrived or changed", data.messages, new Map(), note, listTextCap(undefined)),
+        synced(result, { ...data, count: data.messages.length })
+      );
     },
   }),
 
@@ -2105,7 +2147,7 @@ function listTextCap(fullText: boolean | undefined): number | null {
  */
 function renderMessages(
   title: string,
-  messages: ReadonlyArray<AnyMessage>,
+  messages: ReadonlyArray<AnyMessage | ExpiredMessageView>,
   labels: Map<string, string> = new Map(),
   notes: string | ReadonlyArray<string | null> | null = null,
   textCap: number | null = LIST_TEXT_CHARS,
@@ -2115,12 +2157,16 @@ function renderMessages(
   const noteText = noteLines(notes);
   if (messages.length === 0) return [`${title}: no messages found.`, ...noteText].join("\n");
   const lines = [`# ${title} (${messages.length})`, ...noteText];
-  const shown = new Set(messages.map((m) => m.message_id));
+  const shown = new Set(messages.flatMap((m) => ("expired" in m ? [] : [m.message_id])));
   const chats = new Set(messages.map((m) => m.chat_id));
   const today = localDay(Date.now());
   let day = "";
   let chat = "";
   for (const m of messages) {
+    if ("expired" in m) {
+      lines.push(`- [expired] key: \`${m.key}\` · chat: \`${m.chat_id}\``);
+      continue;
+    }
     if (m.timestamp.slice(0, 10) !== day) {
       day = m.timestamp.slice(0, 10);
       lines.push(`## ${dayHeading(day, today)}`);
@@ -2133,6 +2179,7 @@ function renderMessages(
       typeTag(m),
       m.forwarded ? "forwarded" : null,
       m.edited ? "edited" : null,
+      m.deleted ? "deleted" : null,
       m.reactions?.length ? reactionTag(m.reactions) : null,
       mentioned.length ? `mentions ${mentioned.map((person) => person.name).join(", ")}` : null,
       voteTag(m),

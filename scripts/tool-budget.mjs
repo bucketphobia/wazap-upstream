@@ -29,11 +29,12 @@ import { registerTools } from "../dist/tools.js";
 /** Bytes of tool-list JSON per Claude token, as measured (see above). */
 export const BYTES_PER_TOKEN = 2.45;
 /**
- * Metric 1 in measured tokens: 23,397 bytes, tighter than the 24,000 the old 6,000 at 4 bytes allowed.
- * Raised from 9,500 for the four argument names an agent brings from mezzenger (cursor, after,
- * sender_id, query): a client that checks arguments against the advertised schema refuses any it does not list.
+ * Metric 1 in measured tokens: about 24,010 bytes. A session that can write lists 24 tools in 23,915 bytes
+ * (9,761 tokens) with new_since; the 23 without it fit in 9,550. It includes the four argument names an agent
+ * brings from mezzenger (cursor, after, sender_id, query): a client that checks arguments against the
+ * advertised schema refuses any it does not list.
  */
-export const MAX_LIST_TOKENS = 9550;
+export const MAX_LIST_TOKENS = 9800;
 export const MAX_OUTPUT_SCHEMA_TOKENS = 13000;
 export const MAX_DESCRIPTION_CHARS = 300;
 

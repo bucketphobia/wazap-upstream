@@ -53,7 +53,7 @@ test("remote HTTP hides compatibility names but cached SDK calls remain validate
   for (const name of LEGACY) assert.ok(!names.includes(name), `${name} stays out of the catalogue`);
   for (const name of ["search", "catch_up", "find_contact", "get_media"]) assert.ok(names.includes(name), name);
   assert.ok(!names.includes("send_message"));
-  assert.equal(names.length, 15, "remote catalogue has no extra compatibility tools");
+  assert.equal(names.length, 16, "remote catalogue has no extra compatibility tools");
   assert.ok(!names.includes("list_accounts"));
   assert.ok((await client.callTool({ name: "list_accounts", arguments: {} })).structuredContent.accounts.length > 0);
   const calls = [

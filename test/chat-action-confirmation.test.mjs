@@ -290,10 +290,10 @@ test("real HTTP SDK: clean catalogues, preview without effects, same-credential 
   const owner = await connect("synthetic-write");
   const reader = await connect("synthetic-read");
   const names = (await owner.listTools()).tools.map((x) => x.name);
-  assert.equal(names.length, 23);
+  assert.equal(names.length, 24);
   for (const old of ["get_recent_messages", "search_messages", "download_media", "transcribe_audio"]) assert.ok(!names.includes(old));
   const readTools = (await reader.listTools()).tools;
-  assert.equal(readTools.length, 15);
+  assert.equal(readTools.length, 16);
   assert.ok(!readTools.some((x) => x.name === "manage_chat"));
   const p = await owner.callTool({ name: "manage_chat", arguments: { chat_id: ANA, action: "archive" } });
   assert.equal(p.structuredContent.status, "preview");

@@ -26,6 +26,7 @@ import {
   type ChatRow,
   type MessageRow,
 } from "./rows.js";
+import { NEXT_CHANGE_SEQ } from "./schema.js";
 import { styleOf, type StyleStats } from "./style.js";
 import { MESSAGE_FLAGS } from "./types.js";
 import type {
@@ -54,6 +55,13 @@ import type {
  * this, and a retraction then scrubs every quote of the retracted message.
  */
 export type ScrubQuote = (raw: Uint8Array, quotedSid: string) => Uint8Array | null;
+
+/**
+ * A hash of the content a protobuf carries, without what varies between copies
+ * of one message (messages.content_hash); supplied by the service for the same
+ * reason as ScrubQuote. Null when the bytes do not decode.
+ */
+export type ContentHasher = (raw: Uint8Array) => string | null;
 
 const MAX_PAGE = 1_000;
 /** How far back styleFor reads the user's own messages, and how many it needs in a chat before it reads the account instead. */
@@ -133,13 +141,22 @@ const FLAGS_EXPR = `(:flags | CASE WHEN :from_me = 1 AND EXISTS (SELECT 1 FROM s
 export const STORED_SEQ_TOP = `max(
   coalesce((SELECT stored_seq FROM messages INDEXED BY messages_stored WHERE stored_seq IS NOT NULL ORDER BY stored_seq DESC LIMIT 1), 0),
   coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'stored_seq_high'), 0))`;
+export type ChangedRow = { seq: number; message: StoredMessage } | { seq: number; key: string; chatJid: string; expired: true };
+
+/** The newest change_seq handed out, 0 before any: the top new_since fixes when a call starts. */
+const CHANGE_SEQ_TOP = `max(
+  coalesce((SELECT max(change_seq) FROM expired_removals), 0),
+  coalesce((SELECT change_seq FROM messages INDEXED BY messages_changed WHERE change_seq IS NOT NULL ORDER BY change_seq DESC LIMIT 1), 0),
+  coalesce((SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'change_seq_high'), 0))`;
+/** MESSAGE_FROM driven off the change_seq index. */
+const CHANGED_FROM = MESSAGE_FROM.replace("messages m ", "messages m INDEXED BY messages_changed ");
 /** The stored_seq a message stored now takes: one past every one handed out. */
 const NEXT_STORED_SEQ = `(${STORED_SEQ_TOP} + 1)`;
 const UPSERT_SQL = `
 INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, quoted_sid, quoted_from_me, quoted_key_id, status,
-  edited_at, expires_at, text, transcript, transcript_info, raw, flags, stored_seq)
+  edited_at, expires_at, observed_expires_at, text, transcript, transcript_info, raw, content_hash, flags, stored_seq)
 VALUES (:id, :chat_id, :key_id, :from_me, :sender_id, :ts, :type, :quoted_sid, :quoted_from_me, :quoted_key_id, :status,
-  :edited_at, :expires_at, :text, :transcript, :transcript_info, :raw, ${FLAGS_EXPR}, ${NEXT_STORED_SEQ})
+  :edited_at, :expires_at, :observed_expires_at, :text, :transcript, :transcript_info, :raw, :content_hash, ${FLAGS_EXPR}, ${NEXT_STORED_SEQ})
 ON CONFLICT(chat_id, from_me, key_id) DO UPDATE SET
   flags = messages.flags | excluded.flags,
   -- A stub standing in for a message (one that could not be decrypted) replaced by it: the message reaches the account now.
@@ -148,6 +165,7 @@ ON CONFLICT(chat_id, from_me, key_id) DO UPDATE SET
   type = CASE WHEN ${FRESH} THEN excluded.type ELSE messages.type END,
   text = CASE WHEN ${FRESH} THEN coalesce(excluded.text, messages.text) ELSE messages.text END,
   raw = CASE WHEN ${FRESH} THEN coalesce(excluded.raw, messages.raw) ELSE messages.raw END,
+  content_hash = CASE WHEN ${FRESH} THEN coalesce(excluded.content_hash, messages.content_hash) ELSE messages.content_hash END,
   quoted_sid = CASE WHEN ${FRESH} THEN coalesce(excluded.quoted_sid, messages.quoted_sid) ELSE messages.quoted_sid END,
   quoted_from_me = CASE WHEN ${FRESH} AND excluded.quoted_key_id IS NOT NULL THEN excluded.quoted_from_me
     ELSE messages.quoted_from_me END,
@@ -160,6 +178,9 @@ ON CONFLICT(chat_id, from_me, key_id) DO UPDATE SET
   sender_id = coalesce(messages.sender_id, excluded.sender_id),
   status = CASE WHEN excluded.status IS NULL THEN messages.status WHEN messages.status IS NULL THEN excluded.status
     WHEN ${rank("excluded.status")} > ${rank("messages.status")} THEN excluded.status ELSE messages.status END,
+  observed_expires_at = CASE WHEN excluded.observed_expires_at IS NULL THEN messages.observed_expires_at
+    WHEN messages.observed_expires_at IS NULL THEN excluded.observed_expires_at
+    ELSE min(messages.observed_expires_at, excluded.observed_expires_at) END,
   expires_at = CASE WHEN excluded.expires_at IS NULL THEN messages.expires_at WHEN messages.expires_at IS NULL
     THEN excluded.expires_at ELSE min(messages.expires_at, excluded.expires_at) END
 WHERE messages.deleted_at IS NULL`;
@@ -235,7 +256,8 @@ export class Messages {
   constructor(
     private readonly c: Connection,
     private readonly identity: Identity,
-    private readonly scrubQuote: ScrubQuote | null = null
+    private readonly scrubQuote: ScrubQuote | null = null,
+    private readonly hashContent: ContentHasher | null = null
   ) {}
 
   /**
@@ -266,6 +288,7 @@ export class Messages {
   private upsertOne(input: MessageInput): UpsertResult {
     const ts = checkTimestamp(input.ts, "ts");
     const expiresAt = checkInstant(input.expiresAt, "expiresAt");
+    checkInstant(input.observedExpiresAt, "observedExpiresAt");
     const editedAt = checkInstant(input.editedAt, "editedAt");
     if (!input.chatJid || !input.keyId || !input.type || typeof input.fromMe !== "boolean") {
       throw new StorageError("INVALID_INPUT", "A message needs a chat jid, a key id, a direction and a type.");
@@ -289,7 +312,7 @@ export class Messages {
     if (gone !== null) {
       // Its tombstone was purged with a clear, but the message stays gone.
       this.c.run(
-        `INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, deleted_at, stored_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_STORED_SEQ})`,
+        `INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, deleted_at, observed_expires_at, stored_seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_STORED_SEQ})`,
         id,
         chat.id,
         input.keyId,
@@ -297,7 +320,8 @@ export class Messages {
         senderId,
         ts,
         input.type,
-        gone
+        gone,
+        input.observedExpiresAt ?? null
       );
       return { outcome: "deleted", id, sid };
     }
@@ -308,8 +332,8 @@ export class Messages {
     }
     if (expiresAt !== null && expiresAt <= now) {
       this.c.run(
-        `INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, expires_at, deleted_at, stored_seq)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_STORED_SEQ})`,
+        `INSERT INTO messages(id, chat_id, key_id, from_me, sender_id, ts, type, expires_at, observed_expires_at, deleted_at, stored_seq)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${NEXT_STORED_SEQ})`,
         id,
         chat.id,
         input.keyId,
@@ -318,6 +342,7 @@ export class Messages {
         ts,
         input.type,
         expiresAt,
+        input.observedExpiresAt ?? null,
         now
       );
       this.recordRetracted(chat.id, input.fromMe, input.keyId, now);
@@ -336,10 +361,11 @@ export class Messages {
       status: input.status ?? null,
       edited_at: editedAt,
       expires_at: expiresAt,
+      observed_expires_at: input.observedExpiresAt ?? null,
       text: input.text ?? null,
       transcript: input.transcript ?? null,
       transcript_info: input.transcript ? transcriptInfoJson(input.transcriptInfo) : null,
-      raw: this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null),
+      ...this.rawColumns(input),
       flags: flagBits(input.flags),
     });
     return { outcome: "inserted", id, sid };
@@ -359,6 +385,7 @@ export class Messages {
     }
     const deadline = earliest(existing.expires_at, expiresAt);
     if (deadline !== null && deadline <= now) {
+      if (input.observedExpiresAt != null) this.observeExpiry(existing.sid, input.observedExpiresAt);
       // Past its deadline: the expiry sweep tombstones it and hands back its files.
       if (deadline !== existing.expires_at) {
         this.c.run("UPDATE messages SET expires_at = ? WHERE id = ?", deadline, existing.id);
@@ -378,10 +405,11 @@ export class Messages {
       status: input.status ?? null,
       edited_at: editedAt,
       expires_at: expiresAt,
+      observed_expires_at: input.observedExpiresAt ?? null,
       text: input.text ?? null,
       transcript: input.transcript ?? null,
       transcript_info: input.transcript ? transcriptInfoJson(input.transcriptInfo) : null,
-      raw: this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null),
+      ...this.rawColumns(input),
       flags: flagBits(input.flags),
     });
     return { outcome: stale ? "stale" : "updated", id: existing.id, sid: existing.sid };
@@ -432,6 +460,12 @@ export class Messages {
     return gone === undefined ? raw : this.scrubQuote(raw, quotedSid);
   }
 
+  /** The protobuf as stored (a quote of a deleted message scrubbed) and the hash of its content. */
+  private rawColumns(input: MessageInput): { raw: Uint8Array | null; content_hash: string | null } {
+    const raw = this.scrubbedRaw(input.raw ?? null, input.quotedSid ?? null);
+    return { raw, content_hash: raw === null ? null : (this.hashContent?.(raw) ?? null) };
+  }
+
   /** Every live quote of `messageId`, however its address was spelled, loses its embedded copy of it. */
   private scrubQuotesOf(messageId: number): void {
     if (this.scrubQuote === null) return;
@@ -444,7 +478,11 @@ export class Messages {
       target.from_me
     );
     for (const row of quoting) {
-      this.c.run("UPDATE messages SET raw = ? WHERE id = ?", this.scrubQuote(row.raw, row.quoted_sid), row.id);
+      const scrubbed = this.scrubQuote(row.raw, row.quoted_sid);
+      if (scrubbed !== null && Buffer.from(scrubbed).equals(row.raw)) continue;
+      this.c.run("UPDATE messages SET raw = ?, content_hash = ? WHERE id = ?", scrubbed, scrubbed === null ? null : (this.hashContent?.(scrubbed) ?? null), row.id);
+      // A row stored without a hash never reads as changed by the trigger; this copy of the quote going is a change.
+      this.c.run(`UPDATE messages SET change_seq = ${NEXT_CHANGE_SEQ} WHERE id = ?`, row.id);
     }
   }
 
@@ -453,7 +491,7 @@ export class Messages {
     const paths = this.c.all<{ path: string }>("SELECT path FROM media WHERE message_id = ?", messageId).map((r) => r.path);
     this.c.run("DELETE FROM media WHERE message_id = ?", messageId);
     this.c.run(
-      "UPDATE messages SET deleted_at = ?, text = NULL, transcript = NULL, transcript_info = NULL, raw = NULL WHERE id = ? AND deleted_at IS NULL",
+      "UPDATE messages SET deleted_at = ?, text = NULL, transcript = NULL, transcript_info = NULL, raw = NULL, content_hash = NULL WHERE id = ? AND deleted_at IS NULL",
       at,
       messageId
     );
@@ -743,6 +781,19 @@ export class Messages {
     });
   }
 
+  /** Record a disappearing deadline without changing retention or ordinary visibility. */
+  observeExpiry(sid: string, at: number): void {
+    const deadline = checkInstant(at, "at")!;
+    this.c.write(() => {
+      const key = this.identity.findMessage(sid);
+      if (key === null) return;
+      this.c.run(
+        "UPDATE messages SET observed_expires_at = ? WHERE id = ? AND (observed_expires_at IS NULL OR observed_expires_at > ?)",
+        deadline, key.id, deadline
+      );
+    });
+  }
+
   /** The earliest pending deadline, for the expiry timer. */
   nextExpiry(): number | null {
     const row = this.c.get<{ expires_at: number }>(
@@ -750,6 +801,25 @@ export class Messages {
        WHERE expires_at IS NOT NULL AND deleted_at IS NULL ORDER BY expires_at LIMIT 1`
     );
     return row?.expires_at ?? null;
+  }
+
+  /** Content-free deletion records outlive a message for 90 days, even when no more expiries are due. */
+  pruneExpiredRemovals(): Promise<void> {
+    return this.c.chunked(() => {
+      const rows = this.c.all<{ change_seq: number }>(
+        "SELECT change_seq FROM expired_removals WHERE at < ? ORDER BY at LIMIT ?",
+        this.c.now() - 90 * 86_400_000, this.c.chunkSize
+      );
+      if (rows.length === 0) return false;
+      const through = Math.max(...rows.map((row) => row.change_seq));
+      this.c.run(
+        `INSERT INTO meta(key, value) VALUES ('expired_removals_pruned_through', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE CAST(excluded.value AS INTEGER) > CAST(meta.value AS INTEGER)`,
+        String(through)
+      );
+      this.c.run("DELETE FROM expired_removals WHERE change_seq IN (SELECT value FROM json_each(?))", JSON.stringify(rows.map((row) => row.change_seq)));
+      return rows.length === this.c.chunkSize;
+    });
   }
 
   /**
@@ -760,6 +830,7 @@ export class Messages {
   expireDue(): Promise<BulkDeleteResult> {
     return this.c.bulk(async () => {
       const result: BulkDeleteResult = { count: 0, sids: [], mediaPaths: [] };
+      await this.pruneExpiredRemovals();
       await this.c.chunked(() => {
         const now = this.c.now();
         const started = performance.now();
@@ -1294,6 +1365,79 @@ export class Messages {
       limit + 1
     );
     return pageOf(rows.map(messageFromRow), limit);
+  }
+
+  /** Separate account files cannot trigger each other: reconcile privateRule's external JIDs before fixing the top. */
+  syncPrivateChanges(others: readonly string[], complete = true): readonly string[] {
+    const snapshot = JSON.parse(this.c.get<{ value: string }>("SELECT value FROM meta WHERE key = 'change_private_others'")?.value ?? "[]") as string[];
+    const current = [...new Set(complete ? others : [...snapshot, ...others])].sort();
+    if (!complete) return current;
+    const value = JSON.stringify(current);
+    this.c.write(() => {
+      const previous = this.c.get<{ value: string }>("SELECT value FROM meta WHERE key = 'change_private_others'")?.value ?? "[]";
+      if (previous === value) return;
+      const before = new Set(JSON.parse(previous) as string[]);
+      const after = new Set(current);
+      const changed = [...new Set([...before, ...after])].filter((jid) => before.has(jid) !== after.has(jid));
+      const contacts = JSON.stringify([...new Set(changed.flatMap((jid) => this.identity.contactIdsOf(jid)))]);
+      this.c.run(
+        `UPDATE messages SET change_seq = (SELECT ${CHANGE_SEQ_TOP}) + numbered.n
+         FROM (
+           SELECT id, row_number() OVER (ORDER BY id) AS n FROM messages
+           WHERE sender_id IN (SELECT value FROM json_each(?)) OR chat_id IN (
+             SELECT id FROM chats WHERE kind = 'direct' AND
+               (contact_id IN (SELECT value FROM json_each(?)) OR jid IN (SELECT value FROM json_each(?)))
+           )
+         ) AS numbered WHERE messages.id = numbered.id`,
+        contacts, contacts, JSON.stringify(changed)
+      );
+      this.c.run("INSERT OR REPLACE INTO meta(key, value) VALUES ('change_private_others', ?)", value);
+    });
+    return current;
+  }
+
+  /** The newest change_seq handed out; a new_since call fixes it first and reads no further. */
+  changeTop(): number {
+    return this.c.get<{ top: number }>(`SELECT ${CHANGE_SEQ_TOP} AS top`)?.top ?? 0;
+  }
+
+  /** Current message states and content-free physical expiry removals in (after, top], oldest first. */
+  changedSince(after: number, top: number, limit: number): ChangedRow[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE) {
+      throw new StorageError("INVALID_INPUT", `A change page holds 1 to ${MAX_PAGE} messages, not ${limit}.`);
+    }
+    const canonical = "coalesce(c.merged_into, c.id)";
+    const rank = (row: string): string => `((${row}.deleted_at IS NOT NULL) * 2 + (${row}.chat_id = ${canonical}))`;
+    const rows = this.c.all<MessageRow & { change_seq: number; observed_expires_at: number | null }>(
+      `SELECT ${MESSAGE_COLUMNS}, m.change_seq, m.observed_expires_at FROM ${CHANGED_FROM}
+       WHERE m.change_seq > ? AND m.change_seq <= ?
+         AND m.ts > coalesce(c.cleared_through_ts, 0) AND coalesce(ck.kind, c.kind) <> 'status'
+         AND NOT EXISTS (SELECT 1 FROM messages t
+           WHERE t.chat_id IN (SELECT id FROM chats WHERE id = ${canonical} OR merged_into = ${canonical})
+             AND t.chat_id <> m.chat_id AND t.from_me = m.from_me AND t.key_id = m.key_id
+             AND (${rank("t")} > ${rank("m")} OR (${rank("t")} = ${rank("m")} AND t.id < m.id)))
+       ORDER BY m.change_seq LIMIT ?`,
+      after,
+      top,
+      limit
+    );
+    // Folding can delete an expiring twin while the logical message survives in its canonical chat.
+    const removals = this.c.all<{ seq: number; key: string; chatJid: string }>(
+      `SELECT r.change_seq AS seq, r.key, r.chat_id AS chatJid FROM expired_removals r
+       WHERE r.change_seq > ? AND r.change_seq <= ? AND r.chat_id <> 'status@broadcast'
+         AND NOT EXISTS (SELECT 1 FROM messages m
+           WHERE m.chat_id IN (SELECT c.id FROM chats c WHERE c.jid = r.chat_id
+             OR c.merged_into = (SELECT id FROM chats WHERE jid = r.chat_id))
+             AND m.from_me = CASE WHEN substr(r.key, 1, 5) = 'true_' THEN 1 ELSE 0 END
+             AND m.key_id = substr(r.key, instr(r.key, '_') + 1))
+       ORDER BY r.change_seq LIMIT ?`, after, top, limit
+    );
+    return [
+      ...rows.map((row): ChangedRow => (row.observed_expires_at ?? row.expires_at) !== null && (row.observed_expires_at ?? row.expires_at)! <= this.c.now()
+        ? { seq: row.change_seq, key: `${row.from_me === 1}_${row.key_id}`, chatJid: row.chat_jid, expired: true }
+        : { seq: row.change_seq, message: messageFromRow({ ...row, expires_at: row.observed_expires_at ?? row.expires_at }) }),
+      ...removals.map((row) => ({ ...row, expired: true as const })),
+    ].sort((a, b) => a.seq - b.seq).slice(0, limit);
   }
 
   /**

@@ -108,7 +108,7 @@ async function answers(server, sid) {
 test("an assistant's session lists no outputSchema and answers in text alone; a program's keeps both", async (t) => {
   const server = await start(t, dataDir(t));
   const assistant = await answers(server, await server.open("claude-code"));
-  assert.equal(assistant.tools.length, 23);
+  assert.equal(assistant.tools.length, 24);
   assert.deepEqual(assistant.tools.filter((tool) => tool.outputSchema !== undefined).map((tool) => tool.name), []);
   assert.equal(assistant.reminders.structuredContent, undefined);
   assert.match(assistant.reminders.content[0].text, /r_1/);
@@ -117,7 +117,7 @@ test("an assistant's session lists no outputSchema and answers in text alone; a 
   assert.deepEqual(Object.keys(JSON.parse(assistant.refused.content[0].text)).sort(), ["account_id", "error", "fix", "message"]);
 
   const program = await answers(server, await server.open("acme-crm"));
-  assert.equal(program.tools.filter((tool) => tool.outputSchema !== undefined).length, 16);
+  assert.equal(program.tools.filter((tool) => tool.outputSchema !== undefined).length, 17);
   assert.equal(program.reminders.structuredContent.reminders[0].reminder_id, "r_1");
   assert.match(program.reminders.content[0].text, /r_1/, "the same text block rides beside it");
   assert.equal(program.refused.isError, true);
@@ -127,7 +127,7 @@ test("WAZAP_ANSWER_FORMAT holds every session to one format", async (t) => {
   const full = await start(t, dataDir(t), "full");
   const assistant = await answers(full, await full.open("claude-code"));
   assert.equal(assistant.reminders.structuredContent.reminders.length, 1);
-  assert.equal(assistant.tools.filter((tool) => tool.outputSchema !== undefined).length, 16);
+  assert.equal(assistant.tools.filter((tool) => tool.outputSchema !== undefined).length, 17);
   const text = await start(t, dataDir(t), "text");
   const program = await answers(text, await text.open("acme-crm"));
   assert.equal(program.reminders.structuredContent, undefined);
@@ -195,6 +195,6 @@ test("over stdio and through the bridge, the format is the client's own", async 
   const third = spawnWazap({ dataDir: dir });
   children.push(third.child);
   const program = await stdioSession(third.child, "acme-crm");
-  assert.equal(program.tools.filter((tool) => tool.outputSchema !== undefined).length, 16);
+  assert.equal(program.tools.filter((tool) => tool.outputSchema !== undefined).length, 17);
   assert.equal(program.status.structuredContent.status, "not_linked");
 });
