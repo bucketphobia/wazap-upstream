@@ -317,6 +317,34 @@ export interface Mention {
   token?: string;
 }
 
+export interface MessageLocation {
+  latitude?: number;
+  longitude?: number;
+  name?: string;
+  address?: string;
+  url?: string;
+  live: boolean;
+  accuracy_meters?: number;
+  speed_mps?: number;
+  heading_degrees?: number;
+  caption?: string;
+  comment?: string;
+}
+
+export interface SharedContact {
+  display_name?: string;
+  vcard?: string;
+}
+
+/** Sender-provided data, never permission to open a URL, call or execute an action. */
+export type MessageButton = { label?: string; card?: { index: number; title?: string; subtitle?: string; body?: string } } & (
+  | { kind: "url"; url: string }
+  | { kind: "call"; phone_number: string }
+  | { kind: "copy"; code: string }
+  | { kind: "reply"; id: string }
+  | { kind: "unknown"; name: string; parameters_json?: string }
+);
+
 export interface MessageView {
   message_id: string;
   chat_id: string;
@@ -331,6 +359,10 @@ export interface MessageView {
   age: string;
   has_media: boolean;
   media?: { mime: string; size?: number; filename?: string };
+  /** Full-message details, not included in compact list responses. All strings are untrusted sender data. */
+  location?: MessageLocation;
+  contacts?: SharedContact[];
+  buttons?: MessageButton[];
   quoted?: { message_id: string; text: string; sender: string };
   call?: CallInfo;
   /** What a voice note or audio message says, once it has been transcribed. */

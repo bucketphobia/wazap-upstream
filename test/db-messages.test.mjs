@@ -348,6 +348,36 @@ test("reactions, votes and receipts are kept for every message, survive reopen, 
   reopened.close();
 });
 
+test("reaction withdrawals survive reopen and reject older replays in single and batched reads", async () => {
+  const { db, path } = openTemp();
+  const message = textMessage(PEER, "WITHDRAWN", T0, "hello");
+  db.messages.upsert(message);
+  db.messages.react(message.sid, OTHER, "👍", T0 + 1000);
+  db.messages.react(message.sid, OTHER, null, T0 + 3000);
+  db.messages.react(message.sid, ME, "", T0 + 3000);
+  db.close();
+  const reopened = AccountDb.open(path);
+  try {
+    reopened.messages.react(message.sid, OTHER, "👍", T0 + 2000);
+    reopened.messages.react(message.sid, ME, "❤️", T0 + 2000);
+    assert.deepEqual(reopened.messages.reactions(message.sid), []);
+    const id = reopened.messages.get(message.sid).id;
+    assert.equal(reopened.messages.marksOf([id]).reactions.size, 0);
+    await reopened.learnLidPhone(PEER_LID, OTHER);
+    reopened.messages.react(message.sid, PEER_LID, "❤️", T0 + 2000);
+    assert.deepEqual(reopened.messages.reactions(message.sid), []);
+    reopened.messages.react(message.sid, OTHER, "❤️", T0 + 4000);
+    assert.equal(reopened.messages.reactions(message.sid)[0].emoji, "❤️");
+    assert.equal(reopened.messages.react("false_4072@s.whatsapp.net_MISSING", OTHER, null, T0), false);
+    assert.throws(() => reopened.messages.react(message.sid, OTHER, "👍", NaN));
+    reopened.messages.delete(message.sid);
+    assert.equal(reopened.messages.react(message.sid, OTHER, "👍", T0 + 5000), false);
+    assert.deepEqual(reopened.integrityCheck(), { ok: true, problems: [] });
+  } finally {
+    reopened.close();
+  }
+});
+
 test("derived files: a replaced path is handed back, and a tombstone hands back every path it held", () => {
   const { db } = openTemp();
   const message = textMessage(PEER, "IMG", T0, "[image] poza");

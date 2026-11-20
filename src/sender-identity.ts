@@ -156,7 +156,13 @@ async function relearnViews(wa: WhatsAppApi, messages: MessageView[]): Promise<M
   return Promise.all(
     messages.map(async (m) => {
       if (m.from_me || !m.sender.id.endsWith("@lid") || !chats.has(m.chat_id)) return m;
-      return (await wa.getMessage?.(m.message_id).catch(() => undefined)) ?? m;
+      const refreshed = await wa.getMessage?.(m.message_id).catch(() => undefined);
+      if (refreshed === undefined) return m;
+      const view = { ...refreshed };
+      if (m.location === undefined) delete view.location;
+      if (m.contacts === undefined) delete view.contacts;
+      if (m.buttons === undefined) delete view.buttons;
+      return view;
     })
   );
 }

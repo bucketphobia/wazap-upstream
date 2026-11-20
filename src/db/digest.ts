@@ -348,7 +348,7 @@ export class Digest {
       `SELECT k, id FROM (
          SELECT j.key AS k, m.id, row_number() OVER (PARTITION BY j.key ORDER BY count(*) DESC, m.id DESC) AS place
          FROM ${batch.from} CROSS JOIN reactions r ON r.message_id = m.id
-         WHERE ${batch.sql} AND ${INBOUND}
+         WHERE ${batch.sql} AND ${INBOUND} AND r.emoji <> ''
            AND (m.sender_id IS NULL OR m.sender_id NOT IN (SELECT value FROM json_each(?)))
          GROUP BY j.key, m.id HAVING count(*) >= ?)
        WHERE place = 1`,
@@ -449,7 +449,7 @@ export class Digest {
     return (
       this.c.get<{ id: number }>(
         `SELECT m.id FROM messages m CROSS JOIN chats c ON c.id = m.chat_id CROSS JOIN reactions r ON r.message_id = m.id
-         WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND}
+         WHERE ${inChat.sql} AND ${inSpan.sql} AND ${INBOUND} AND r.emoji <> ''
            AND (m.sender_id IS NULL OR m.sender_id NOT IN (SELECT value FROM json_each(?)))
          GROUP BY m.id HAVING count(*) >= ? ORDER BY count(*) DESC, m.id DESC LIMIT 1`,
         ...inChat.params,

@@ -964,19 +964,15 @@ export class Messages {
       const key = this.visibleKey(sid);
       if (key === null) return false;
       const contactId = this.identity.ensureContact(reactorJid);
-      if (!emoji) {
-        this.c.run("DELETE FROM reactions WHERE message_id = ? AND contact_id = ? AND ts <= ?", key.id, contactId, at);
-      } else {
-        this.c.run(
-          `INSERT INTO reactions(message_id, contact_id, emoji, ts) VALUES (?, ?, ?, ?)
-           ON CONFLICT(message_id, contact_id) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts
-           WHERE excluded.ts >= reactions.ts`,
-          key.id,
-          contactId,
-          emoji,
-          at
-        );
-      }
+      this.c.run(
+        `INSERT INTO reactions(message_id, contact_id, emoji, ts) VALUES (?, ?, ?, ?)
+         ON CONFLICT(message_id, contact_id) DO UPDATE SET emoji = excluded.emoji, ts = excluded.ts
+         WHERE excluded.ts >= reactions.ts`,
+        key.id,
+        contactId,
+        emoji || "",
+        at
+      );
       return true;
     });
   }
@@ -1044,7 +1040,7 @@ export class Messages {
     return this.c
       .all<{ contact_id: number; jid: string | null; emoji: string; ts: number }>(
         `SELECT r.contact_id, coalesce(k.phone_jid, k.lid) AS jid, r.emoji, r.ts
-         FROM reactions r JOIN contacts k ON k.id = r.contact_id WHERE r.message_id = ? ORDER BY r.ts, r.rowid`,
+         FROM reactions r JOIN contacts k ON k.id = r.contact_id WHERE r.message_id = ? AND r.emoji <> '' ORDER BY r.ts, r.rowid`,
         key.id
       )
       .map((row) => ({ contactId: row.contact_id, jid: row.jid, emoji: row.emoji, ts: row.ts }));
@@ -1106,7 +1102,7 @@ export class Messages {
     for (const row of this.c.all<{ message_id: number; contact_id: number; jid: string | null; emoji: string; ts: number }>(
       `SELECT r.message_id, r.contact_id, coalesce(k.phone_jid, k.lid) AS jid, r.emoji, r.ts
        FROM reactions r JOIN contacts k ON k.id = r.contact_id
-       WHERE r.message_id IN (SELECT value FROM json_each(?)) ORDER BY r.message_id, r.ts, r.rowid`,
+       WHERE r.message_id IN (SELECT value FROM json_each(?)) AND r.emoji <> '' ORDER BY r.message_id, r.ts, r.rowid`,
       list
     )) {
       push(reactions, row.message_id, { contactId: row.contact_id, jid: row.jid, emoji: row.emoji, ts: row.ts });

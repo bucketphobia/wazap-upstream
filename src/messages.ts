@@ -6,6 +6,7 @@
 import { extractMessageContent, getContentType, proto, type WAMessage, type WAMessageContent, type WAMessageKey } from "baileys";
 import type { Receipt } from "./store.js";
 import type { TranscriptRecord } from "./transcribe/index.js";
+import { detailsOf } from "./message-details.js";
 import type {
   CallDirection,
   CallInfo,
@@ -1465,6 +1466,10 @@ export function buildMessageView(raw: WAMessage, ctx: MessageViewContext): Messa
   const delivery = raw.key.fromMe && ctx.receipt ? deliveryView(ctx.receipt, ctx) : undefined;
   if (delivery) view.delivery = delivery;
   return view;
+}
+
+export function fullMessageDetails(raw: WAMessage): Pick<MessageView, "location" | "contacts" | "buttons"> {
+  return detailsOf(analyze(raw).content);
 }
 
 const DELIVERY_STATUS: Record<number, DeliveryStatus> = {

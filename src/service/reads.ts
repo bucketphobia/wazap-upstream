@@ -27,7 +27,7 @@ import { idLowerBound, idUpperBound, secondOfId, type AccountDb, type ActivityKe
 import { draftContextFor, styleCheckFor, type DraftContext, type StyleCheck } from "../draft-style.js";
 import { isGroupId, isNoiseJid, STATUS_JID } from "../ids.js";
 import { decodeChatBytes } from "../store.js";
-import { formatAge, isoWithOffset, mentionedJids, quotedSenderJid, viewText } from "../messages.js";
+import { formatAge, fullMessageDetails, isoWithOffset, mentionedJids, quotedSenderJid, viewText } from "../messages.js";
 import { normalizeTag, withoutPrivateQuote, withoutWords } from "../private-contacts.js";
 import { frozenReceiptText } from "../drafts.js";
 import { STORY_TTL_MS } from "./ingest.js";
@@ -596,7 +596,10 @@ export class AccountReads {
   getMessage(messageId: string): Promise<MessageView> {
     return this.host.guarded(async () => {
       this.host.ensureConnected();
-      return this.views.viewOfStored(this.views.storedOrThrow(messageId));
+      const stored = this.views.storedOrThrow(messageId);
+      const view = this.views.viewOfStored(stored);
+      const raw = this.views.rawOf(stored);
+      return raw === null ? view : { ...view, ...fullMessageDetails(raw) };
     });
   }
 

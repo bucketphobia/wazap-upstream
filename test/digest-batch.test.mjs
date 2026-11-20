@@ -93,6 +93,23 @@ test("a batch of chats reads what each chat's own read reads", () => {
   assert.ok(db.digest.mostReactedMany(floorSets[0], spans[0], now).filter((id) => id !== null).length >= 2);
 });
 
+test("withdrawn reactions do not qualify a digest highlight", () => {
+  const { db } = seeded();
+  const chatId = db.identity.chat(GROUP).id;
+  const span = spanOf(db);
+  const now = T0 + 3_600_000;
+  const floors = [{ chatId, afterId: 0 }];
+  const winner = db.messages.get(sid(false, GROUP, "K4")).id;
+  const other = db.messages.get(sid(false, GROUP, "K8")).id;
+  assert.equal(db.digest.mostReacted([chatId], span, now), winner);
+  for (const reactor of people.slice(0, 3)) db.messages.react(sid(false, GROUP, "K4"), reactor, null, T0 + 110_000);
+  assert.equal(db.digest.mostReacted([chatId], span, now), other);
+  assert.deepEqual(db.digest.mostReactedMany(floors, span, now), [other]);
+  for (const reactor of people.slice(0, 2)) db.messages.react(sid(false, GROUP, "K8"), reactor, null, T0 + 110_000);
+  assert.equal(db.digest.mostReacted([chatId], span, now), null);
+  assert.deepEqual(db.digest.mostReactedMany(floors, span, now), [null]);
+});
+
 test("a row count goes into the statement as an integer, or not at all", () => {
   assert.equal(sqlLimit(30), "30");
   assert.equal(sqlLimit(0), "0");
