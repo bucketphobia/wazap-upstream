@@ -114,9 +114,9 @@ test("the trigram path reports its cap too, when filters reject most candidates"
   const { db } = openTemp();
   db.messages.upsert(textMessage(OTHER, "WANTED", T0, "raport lunar"));
   for (let i = 1; i <= 600; i++) db.messages.upsert(textMessage(PEER, `R${i}`, T0 + i * 1000, `raport ${i}`));
-  const capped = db.search.text({ query: "raport", chat: OTHER, limit: 5, scanCap: 300 });
+  const capped = db.search.text({ query: "raport", from: OTHER, limit: 5, scanCap: 300 });
   assert.deepEqual([capped.items.length, capped.scanCapped, capped.hasMore], [0, true, true]);
-  const found = db.search.text({ query: "raport", chat: OTHER, limit: 5, before: capped.nextBefore });
+  const found = db.search.text({ query: "raport", from: OTHER, limit: 5, before: capped.nextBefore });
   assert.deepEqual(found.items.map((m) => m.keyId), ["WANTED"]);
   db.close();
 });
@@ -130,6 +130,37 @@ test("quotes and operators in a query are literal", () => {
   db.close();
 });
 
+test("a small chat searches only its own rows, with bounded resumable scans", async () => {
+  const { db, clock } = openTemp();
+  try {
+    db.messages.upsert(textMessage(OTHER, "WANTED", T0, "Ședință OR raport"));
+    db.messages.upsert(textMessage(OTHER, "VOICE", T0 + 1000, "[voice]", { transcript: "ședință nouă", fromMe: true }));
+    db.messages.upsert(textMessage(OTHER, "GONE", T0 + 2000, "ședință", { expiresAt: clock.now + 1 }));
+    db.messages.upsert(textMessage(OTHER, "UNRELATED", T0 + 3000, "altceva"));
+    for (let i = 1; i <= 600; i++) db.messages.upsert(textMessage(PEER, `R${i}`, T0 + (i + 4) * 1000, "ședință"));
+    clock.now++;
+    const search = (extra = {}) => db.search.text({ query: "SEDINTA", chat: OTHER, limit: 1, ...extra });
+    const capped = search({ scanCap: 1 });
+    assert.deepEqual([capped.items.length, capped.scanCapped, capped.hasMore], [0, true, true]);
+    const first = search({ before: capped.nextBefore });
+    assert.deepEqual(first.items.map((m) => m.keyId), ["VOICE"]);
+    const last = search({ before: first.nextBefore });
+    assert.deepEqual(last.items.map((m) => m.keyId), ["WANTED"]);
+    assert.equal(last.hasMore, false);
+    assert.deepEqual(search({ from: "me" }).items.map((m) => m.keyId), ["VOICE"]);
+    assert.deepEqual(search({ since: T0, until: T0 }).items.map((m) => m.keyId), ["WANTED"]);
+    assert.deepEqual(search({ query: "OR raport" }).items.map((m) => m.keyId), ["WANTED"]);
+    assert.deepEqual(search({ query: '" OR ' }).items, []);
+    assert.equal(search({ query: "absent" }).hasMore, false);
+    await db.learnLidPhone("456789012345@lid", OTHER);
+    assert.deepEqual(search({ chat: "456789012345@lid" }).items.map((m) => m.keyId), ["VOICE"]);
+    db.messages.delete(sid(true, OTHER, "VOICE"));
+    assert.deepEqual(search().items.map((m) => m.keyId), ["WANTED"]);
+  } finally {
+    db.close();
+  }
+});
+
 test("finding 12a: an empty or whitespace-only query names nothing and returns nothing", () => {
   const { db } = openTemp();
   db.messages.upsert(textMessage(PEER, "Q", T0, "orice"));
@@ -138,6 +169,73 @@ test("finding 12a: an empty or whitespace-only query names nothing and returns n
     assert.deepEqual([result.items, result.hasMore, result.scanCapped], [[], false, false], JSON.stringify(query));
   }
   db.close();
+});
+
+test("small chats keep sender-filtered queries on FTS instead of an account-wide sender scan", async () => {
+  const { db } = openTemp();
+  try {
+    db.messages.upsert(textMessage(GROUP, "PEER", T0, "raretoken", { senderJid: PEER }));
+    db.messages.upsert(textMessage(GROUP, "ME", T0 + 1000, "raretoken", { fromMe: true }));
+    await db.learnLidPhone(PEER_LID, PEER);
+    let scans = 0;
+    const scanIds = db.search.scanIds.bind(db.search);
+    db.search.scanIds = (...args) => { scans++; return scanIds(...args); };
+    const find = (extra = {}) => db.search.text({ query: "raretoken", chat: GROUP, limit: 10, ...extra }).items.map((m) => m.keyId);
+    assert.deepEqual(find(), ["ME", "PEER"]);
+    assert.equal(scans, 1, "unfiltered small chats retain their local scan");
+    assert.deepEqual(find({ from: PEER }), ["PEER"]);
+    assert.deepEqual(find({ from: PEER_LID }), ["PEER"]);
+    assert.deepEqual(find({ from: "me" }), ["ME"]);
+    assert.deepEqual(find({ from: PEER, query: "absent" }), []);
+    assert.deepEqual(find({ from: OTHER }), []);
+    assert.equal(scans, 1, "sender filters never enter the local trigram scan");
+  } finally {
+    db.close();
+  }
+});
+
+test("scoped scans agree with FTS for decomposed and precomposed diacritics in both directions", async () => {
+  const { db } = openTemp();
+  const { foldText, foldedIncludes } = await import("../dist/db/fold.js");
+  try {
+    for (const [i, text] of ["câine", "ca\u0302ine", "câine", "ca\u0302ine"].entries()) {
+      db.messages.upsert(textMessage(PEER, `D${i}`, T0 + i * 1000, i < 2 ? text : "[voice]", i < 2 ? {} : { transcript: text }));
+    }
+    for (const query of ["câine", "ca\u0302ine", "CAINE"]) {
+      const indexed = db.search.text({ query, limit: 10 }).items.map((m) => m.keyId);
+      const scoped = db.search.text({ query, chat: PEER, limit: 10 }).items.map((m) => m.keyId);
+      assert.deepEqual(indexed, ["D3", "D2", "D1", "D0"]);
+      assert.deepEqual(scoped, indexed, query);
+      for (const text of ["câine", "ca\u0302ine"]) assert.equal(foldedIncludes(text, foldText(query)), true);
+    }
+    assert.equal(foldText("\u0302"), "\u0302");
+    assert.deepEqual(db.search.text({ query: "\u0302", chat: PEER, limit: 10 }).items, []);
+    for (const query of ["ca\u0302", "c\u0302\u0302"]) {
+      assert.deepEqual(db.search.text({ query, limit: 10 }).items, []);
+      assert.deepEqual(db.search.text({ query, chat: PEER, limit: 10 }).items, [], "a folded query too short for a trigram keeps FTS semantics");
+    }
+  } finally {
+    db.close();
+  }
+});
+
+test("scan folding removes exactly the combining marks removed by the trigram tokenizer", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const { foldSearchText, foldedIncludes } = await import("../dist/db/fold.js");
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("CREATE VIRTUAL TABLE t USING fts5(text, tokenize = 'trigram remove_diacritics 1')");
+    const insert = db.prepare("INSERT INTO t(rowid, text) VALUES (?, ?)");
+    for (let cp = 0x0300; cp < 0x0370; cp++) insert.run(cp, `a${String.fromCodePoint(cp)}bc`);
+    const removed = new Set(db.prepare("SELECT rowid FROM t WHERE t MATCH ?").all('"abc"').map((r) => r.rowid));
+    for (let cp = 0x0300; cp < 0x0370; cp++) {
+      const text = `a${String.fromCodePoint(cp)}bc`;
+      assert.equal(foldSearchText(text) === "abc", removed.has(cp), `U+${cp.toString(16)}`);
+      assert.equal(foldedIncludes(text, "abc"), removed.has(cp), `U+${cp.toString(16)}`);
+    }
+  } finally {
+    db.close();
+  }
 });
 
 test("finding 12a: a short query folds exactly like the trigram index, in Greek and Cyrillic as in Romanian", () => {

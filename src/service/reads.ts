@@ -536,22 +536,30 @@ export class AccountReads {
     const author = people !== null && from !== undefined && people.names(from) ? from : undefined;
     const stored: StoredMessage[] = [];
     const rows: SearchRefresh["rows"] = [];
+    const sources = new Map<number, SearchSource>();
     for (const source of messages) {
       const message = db.messages.get(source.message_id);
       if (message === null || message.chatJid === STATUS_JID
         || (author === undefined && people?.message(message))
         || message.ts < (opts.sinceMs ?? 0) || message.ts > (opts.untilMs ?? Number.MAX_SAFE_INTEGER)) continue;
-      const fresh = this.views.viewOfStored(message);
+      stored.push(message);
+      sources.set(message.id, source);
+    }
+    const lookups = this.views.viewLookups(stored);
+    const unchanged: StoredMessage[] = [];
+    for (const message of stored) {
+      const source = sources.get(message.id)!;
+      const fresh = this.views.viewOfStored(message, lookups);
       // An edit has invalidated the rank: leave it for a fresh search rather
       // than attaching yesterday's semantic score to today's words.
       if (fresh.text !== source.text || fresh.transcript !== source.transcript) continue;
-      stored.push(message);
+      unchanged.push(message);
       rows.push({ source_id: source.message_id, message: people === null ? fresh : withoutPrivateQuote(fresh, people, author) });
     }
     let contexts: SearchRefresh["contexts"];
     if (opts.includeContext) {
-      const windows = new Map(stored.slice(0, CONTEXT_SHOWN).map((m) => [m.id, contextRows(db, m, opts, people, author)]));
-      contexts = renderContexts(stored, windows, this.views, people, author, query, laterOf(db, stored, windows, opts, people, author));
+      const windows = new Map(unchanged.slice(0, CONTEXT_SHOWN).map((m) => [m.id, contextRows(db, m, opts, people, author)]));
+      contexts = renderContexts(unchanged, windows, this.views, people, author, query, laterOf(db, unchanged, windows, opts, people, author));
     }
     return { rows, dropped: messages.length - rows.length, ...(contexts === undefined ? {} : { contexts }) };
   }

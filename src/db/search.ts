@@ -8,7 +8,7 @@
 import type { Connection } from "./connection.js";
 import { idLowerBound, idUpperBound } from "./ids.js";
 import type { Identity } from "./identity.js";
-import { foldedMatcher, foldText } from "./fold.js";
+import { foldedMatcher, foldSearchText } from "./fold.js";
 import { chatCondition, type Messages } from "./messages.js";
 import type { SQLInputValue } from "./sqlite.js";
 import type { ChatKind, MessageFilter, SearchCoverage, TextSearchInput, TextSearchResult } from "./types.js";
@@ -22,6 +22,7 @@ export const DEFAULT_SCAN_CAP = 20_000;
 export const DEFAULT_TRIGRAM_CAP = 50_000;
 const FTS_BATCH = 256;
 const MIN_TRIGRAM_CHARS = 3;
+const SCOPED_SCAN_MAX = 4_096;
 const NO_UPPER_BOUND = Number.MAX_SAFE_INTEGER;
 
 export { foldText } from "./fold.js";
@@ -34,6 +35,7 @@ export interface ResolvedFilter {
   params: SQLInputValue[];
   /** Whether the filter needs more than an id range; a pure range lets the vector scan skip the join. */
   narrowsRows: boolean;
+  chatSize?: number;
   since?: number;
   until?: number;
 }
@@ -53,10 +55,18 @@ export class Search {
     const conditions = ["m.deleted_at IS NULL", "(m.expires_at IS NULL OR m.expires_at > ?)", "m.ts > coalesce(c.cleared_through_ts, 0)"];
     const params: SQLInputValue[] = [this.c.now()];
     let narrowsRows = false;
+    let chatSize: number | undefined;
     if (filter.chat !== undefined) {
       const chat = this.identity.chat(filter.chat);
       if (chat === null) return null;
-      const inChat = chatCondition(this.identity.chatIdsOf(chat));
+      const chatIds = this.identity.chatIdsOf(chat);
+      const inChat = chatCondition(chatIds);
+      if (filter.from === undefined) {
+        chatSize = this.c.get<{ n: number }>(
+          "SELECT coalesce(sum(visible), 0) AS n FROM chats WHERE id IN (SELECT value FROM json_each(?))",
+          JSON.stringify(chatIds)
+        )!.n;
+      }
       conditions.push(inChat.sql);
       params.push(...inChat.params);
       narrowsRows = true;
@@ -102,6 +112,7 @@ export class Search {
       where: conditions.join(" AND "),
       params,
       narrowsRows,
+      ...(chatSize === undefined ? {} : { chatSize }),
       ...(filter.since === undefined ? {} : { since: filter.since }),
       ...(filter.until === undefined ? {} : { until: filter.until }),
     };
@@ -223,6 +234,10 @@ export class Search {
     cap: number,
     matchExpression = ftsPhrase(match)
   ): { ids: number[]; cappedAt: number | null } {
+    if (filter.chatSize !== undefined && filter.chatSize <= SCOPED_SCAN_MAX && matchExpression === ftsPhrase(match)
+      && [...foldSearchText(match)].length >= MIN_TRIGRAM_CHARS) {
+      return this.scanIds(match, filter, upper, want, cap);
+    }
     const ids: number[] = [];
     let cursor = upper;
     let examined = 0;
@@ -257,7 +272,9 @@ export class Search {
 
   /** The short-query path: recent messages newest first, matched in JavaScript, at most `cap` of them. */
   scanIds(query: string, filter: ResolvedFilter, upper: number, want: number, cap: number): { ids: number[]; cappedAt: number | null } {
-    const matches = foldedMatcher(foldText(query));
+    const folded = foldSearchText(query);
+    if (folded.length === 0) return { ids: [], cappedAt: null };
+    const matches = foldedMatcher(folded);
     const ids: number[] = [];
     let examined = 0;
     const rows = this.c

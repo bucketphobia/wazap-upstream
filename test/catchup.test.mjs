@@ -93,6 +93,18 @@ function errorOf(result) {
 }
 const chatsOf = (result, section) => result.structuredContent[section].map((entry) => entry.chat);
 
+test("catch-up keeps the address marker when a later word contains a combining mark", async (t) => {
+  const { svc, arrive } = account();
+  t.after(() => svc.stop());
+  const { call } = toolsOf(svc);
+  arrive(ANA, "Vino pe Calea Victoriei cu un ca\u0302ine", { at: Date.now() - HOUR });
+  const result = await call("catch_up");
+  assert.equal(result.isError, undefined);
+  const entry = result.structuredContent.direct.find((entry) => entry.chat === ANA);
+  assert.ok(entry);
+  assert.ok(entry.sig.split(",").includes("address"));
+});
+
 /** A client of `source` over the SDK's own transport, so answers meet the validation real clients run. */
 async function sdkClient(source, { name = "catch-up-test", opts = {} } = {}) {
   const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");

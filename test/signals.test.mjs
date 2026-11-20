@@ -133,6 +133,7 @@ const CASES = [
   // address
   ["Adresa e Str. Mihai Eminescu nr. 12", "address"],
   ["Vino pe Calea Victoriei 45", "address"],
+  ["Vino pe Calea Victoriei cu un ca\u0302ine", "address"],
   ["Bl. A3, sc. 2, ap. 14", "address"],
   ["Stau pe Bulevardul Unirii, lângă metrou", "address"],
   ["Livrare: Strada Florilor 7, Cluj", "address"],
