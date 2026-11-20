@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.0
+
+- **`get_message` opens the details behind a shared location, contact or button.** The full message now includes coordinates at their original precision and any supplied location details, every shared contact's name and original vCard, and button actions: URLs, phone numbers, copy codes and reply ids. Carousel buttons carry their card's index and any supplied title, subtitle and body, so identical labels on different cards can be told apart. Unsupported or malformed native-flow actions keep their original parameters as data. These details appear in the structured answer and a marked untrusted-data line in the text; compact lists keep their labels. Reading a message executes no action and fetches no URL. A live location is the stored sample, not a current position.
+- **A withdrawn reaction stays withdrawn when an older update arrives late.** The withdrawal's timestamp is kept, so an earlier reaction cannot bring it back. Withdrawn reactions are left out of message reads and no longer count toward reaction highlights in `catch_up`.
+- **Search batches the lookups that fill its final results.** A literal search within a chat of at most 4,096 visible messages, with no sender filter and at least three characters after search folding, scans that chat instead of the archive-wide text index. Search matching also discards the removable combining marks that SQLite's text index ignores, keeping decomposed accents consistent between the scan and index paths. A result edited since it was ranked is left out of both the results and their context.
+- **The HTTP server moves to Express 5, and settings loading to dotenv 18.** Express is now 5.3.0 and dotenv 18.0.10. Settings keep the classic `.env` parser, load as UTF-8 without diagnostic output, and never override values already set in the environment; dotenv's own environment options cannot change those choices.
+
 ## 1.8.1
 
 - **Dependencies refreshed within their ranges.** `@modelcontextprotocol/sdk` 1.32.2 and `express-rate-limit` 8.7.5 for users. The dev tools move up too (eslint 10.15, typescript-eslint 8.73, prettier 3.10, tsx 4.23.15), which clears the minimatch denial-of-service advisory ([GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249)) that reached the dev tree through eslint. `npm audit` now reports nothing. Nothing else changes in what wazap does.
