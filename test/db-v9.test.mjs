@@ -453,8 +453,9 @@ test("folding duplicate messages preserves the earliest observed expiry, includi
       if (tombstone !== null) db.messages.delete(tombstone === "phone" ? phone.sid : lid.sid);
       await db.learnLidPhone(PEER_LID, PEER);
       clock.now += 30_000;
-      assert.deepEqual(db.messages.changedSince(0, db.messages.changeTop(), 10).map(({ seq: _seq, ...row }) => row),
-        [{ key: "false_SAME", chatJid: PEER, expired: true }], `deadline survives the ${tombstone ?? "live"} fold`);
+      // Retention is off, so the earliest deadline survives the fold as information, not as removal.
+      assert.deepEqual(db.messages.changedSince(0, db.messages.changeTop(), 10).map(({ message }) => [message?.keyId, message?.chatJid, message?.expiresAt]),
+        [["SAME", PEER, clock.now]], `deadline survives the ${tombstone ?? "live"} fold`);
       const through = db.messages.changeTop();
       await db.messages.clearChat(PEER, clock.now);
       assert.deepEqual(db.messages.changedSince(through, db.messages.changeTop(), 10).map(({ seq: _seq, ...row }) => row),

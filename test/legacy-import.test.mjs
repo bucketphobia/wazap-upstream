@@ -515,8 +515,9 @@ test("retention-off legacy import observes raw, beta and recall-only deadlines w
     const rows = db.messages.changedSince(0, db.messages.changeTop(), 100);
     const ephemeral = rows.find((row) => row.message?.sid === r.ephemeral)?.message;
     assert.equal(ephemeral.expiresAt, ephemeral.ts + 7 * 86_400_000);
-    for (const key of ["false_E2", "false_VO1", "false_IDX1"]) {
-      assert.ok(rows.some((row) => row.key === key && row.expired), `${key} must be content-free`);
+    for (const key of ["E2", "VO1", "IDX1"]) {
+      const row = rows.find((row) => row.message?.keyId === key);
+      assert.ok(row?.message.expiresAt <= fx.now, `${key} lists its past observed deadline as information`);
     }
     for (const sid of [r.ephemeral, r.expired, r.betaViewOnce, r.indexOnly]) {
       assert.equal(db.messages.get(sid).expiresAt, null, "ordinary reads do not enforce observed deadlines");

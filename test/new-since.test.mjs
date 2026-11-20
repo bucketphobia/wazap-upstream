@@ -562,7 +562,13 @@ for (const retention of [false, true]) {
     sock.ev.emit("messages.update", [{ key: raw.key, update: { ephemeralDuration: 30 } }]);
     assert.deepEqual((await call("new_since", { after: changed.through })).structuredContent.messages, []);
     now = start + 30_000;
-    assert.deepEqual((await call("new_since", {})).structuredContent.messages, [{ key: "false_M1", chat_id: ANA, expired: true }]);
+    const full = (await call("new_since", {})).structuredContent.messages;
+    if (retention) assert.deepEqual(full, [{ key: "false_M1", chat_id: ANA, expired: true }]);
+    else {
+      // Without retention nothing is removed, so a fresh sync and an incremental one agree on the words.
+      assert.deepEqual([full[0]?.text, Date.parse(full[0]?.expires_at)], ["temporary", start + 30_000]);
+      assert.deepEqual((await call("new_since", { after: changed.through })).structuredContent.messages, []);
+    }
     assert.equal(svc.db.messages.get(`false_${ANA}_M1`) !== null, !retention, "ordinary reads still follow retention");
     await svc.db.messages.clearChat(ANA, now);
     assert.deepEqual((await call("new_since", { after: changed.through })).structuredContent.messages, [{ key: "false_M1", chat_id: ANA, expired: true }]);

@@ -543,7 +543,10 @@ each in the shape `read_messages` gives, in its current state, plus `key`,
 even with retention off) and
 `view_once: true` for view-once messages. Consumers can exclude disappearing
 and view-once messages using these fields; both fields are omitted when inapplicable.
-A message past its deadline instead carries only `{key, chat_id, expired: true}`.
+A message past a deadline that retention enforces (`WAZAP_RETENTION=1`) instead
+carries only `{key, chat_id, expired: true}`. With retention off, nothing is
+removed at the deadline: the message keeps its words, as in `read_messages`, and
+`expires_at` is only information.
 Physical deletion of any message with an expiry leaves a durable, content-free
 `expired_removals` record, so a sweep before the next poll cannot hide the removal.
 These records use the same change counter and page in order alongside messages.

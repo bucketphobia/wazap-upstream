@@ -1433,7 +1433,8 @@ export class Messages {
        ORDER BY r.change_seq LIMIT ?`, after, top, limit
     );
     return [
-      ...rows.map((row): ChangedRow => (row.observed_expires_at ?? row.expires_at) !== null && (row.observed_expires_at ?? row.expires_at)! <= this.c.now()
+      // Hide only what retention enforces, as the other reads do; an observed deadline is metadata.
+      ...rows.map((row): ChangedRow => row.expires_at !== null && row.expires_at <= this.c.now()
         ? { seq: row.change_seq, key: `${row.from_me === 1}_${row.key_id}`, chatJid: row.chat_jid, expired: true }
         : { seq: row.change_seq, message: messageFromRow({ ...row, expires_at: row.observed_expires_at ?? row.expires_at }) }),
       ...removals.map((row) => ({ ...row, expired: true as const })),
