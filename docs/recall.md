@@ -169,8 +169,10 @@ delay (up to 64 times the base) until a warm finishes or a search is served, and
 in a row end in failed. Any error inside the cache
 fails the cache the same way; it never reaches the search or the server.
 The count pass of a warm has a 60-second deadline plus the bytes it reads at
-4 MiB per second. After it, the load loop and the check after sync get 60
-seconds plus the bytes to load at 4 MiB per second (a 526,000-vector, 1.6 GB
+4 MiB per second, and it stops at the first page that shows the vectors of the
+current model cannot fit the cache. After it, the load loop and the checks before
+and after sync get 60 seconds plus every byte the count pass scanned, other models
+included, at 4 MiB per second (a 526,000-vector, 1.6 GB
 archive gets about 8 minutes for each pass, so about 15 minutes in total), so a
 large archive can warm on a slow disk and the warm still ends. Worker responses have a 15-second
 deadline. Recall status includes advisory `cache` state, reason, shared bytes,

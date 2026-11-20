@@ -262,7 +262,8 @@ export class VectorCache {
         if (this.maxBytes === 0) throw new CacheLimit("disabled");
         this.version = this.dataVersion();
         let after = 0,
-          count = 0;
+          count = 0,
+          scanned = 0;
         this.completeDimensions = true;
         this.dimensions = dimensions ?? 0;
         // Count bounded primary-key pages, not a synchronous full-table COUNT.
@@ -276,21 +277,25 @@ export class VectorCache {
           for (const row of rows) {
             // The count pass reads every vector page too, so a slow disk earns time for what it has read.
             deadline += (row.dimensions * 1000) / this.warmBytesPerSec;
+            scanned += row.dimensions;
             if (row.model === model) {
               if (this.dimensions === 0) this.dimensions = row.dimensions;
               if (row.dimensions === this.dimensions) count++;
               else this.completeDimensions = false;
             }
           }
+          // Stop as soon as the compatible vectors cannot fit; the rest of the archive cannot change that.
+          if (this.dimensions > 0 && count > Math.floor(this.maxBytes / (this.dimensions + BOOKKEEPING_BYTES)))
+            throw new CacheLimit("size_limit");
           after = rows[rows.length - 1]!.message_id;
           await this.checkedYield(generation);
         }
         const maximum = Math.floor(this.maxBytes / (this.dimensions + BOOKKEEPING_BYTES));
         if (count > maximum) throw new CacheLimit("size_limit");
-        // The load, merge and sync phases read every vector, so their budget grows with the bytes to load.
+        // The load pass reads every BLOB, other models included, so its budget grows with all the bytes scanned.
         deadline = Math.max(
           deadline,
-          Date.now() + this.warmTimeoutMs + Math.ceil((count * this.dimensions * 1000) / this.warmBytesPerSec)
+          Date.now() + this.warmTimeoutMs + Math.ceil((scanned * 1000) / this.warmBytesPerSec)
         );
         await this.allocate(Math.min(maximum, count + Math.max(1024, Math.ceil(count / 10))));
         this.checkGeneration(generation);
@@ -314,6 +319,7 @@ export class VectorCache {
         }
         await this.mergeOrder();
         this.checkGeneration(generation);
+        this.checkDeadline(deadline);
         await this.sync();
         this.checkGeneration(generation);
         this.checkDeadline(deadline);

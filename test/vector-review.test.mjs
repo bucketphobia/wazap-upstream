@@ -502,6 +502,45 @@ test("A-S6 a slow count pass earns time for the bytes it has read", async (t) =>
   assert.equal(cache.status().state, "ready");
 });
 
+test("A-S6 a mixed-model archive gets load time for every BLOB it scans", async (t) => {
+  const { raw, cache, insert } = rawFixture(t, 20, 3072);
+  raw.exec("BEGIN");
+  for (let i = 21; i <= 2000; i++) insert.run(i, "old", new Uint8Array(3072).fill(1));
+  raw.exec("COMMIT");
+  cache.warmBytesPerSec = 1000;
+  const allocate = cache.allocate.bind(cache);
+  const all = cache.c.all.bind(cache.c);
+  const now = Date.now;
+  let offset = 0;
+  Date.now = () => now() + offset;
+  // The slow count pass spends 6,000 of its ~6,200 s, then the load of all 2,000 BLOBs takes 3,000 s more:
+  // inside a load budget for every BLOB scanned, beyond one for only the 20 compatible vectors.
+  cache.c.all = (sql, ...args) => {
+    const rows = all(sql, ...args);
+    if (sql.includes("length(vec)") && rows.length === 0) offset = 6000000;
+    return rows;
+  };
+  cache.allocate = (...args) => ((offset = 9000000), allocate(...args));
+  try {
+    await cache.warm("m");
+  } finally {
+    Date.now = now;
+  }
+  assert.equal(cache.status().state, "ready");
+  assert.equal(cache.status().reason, undefined);
+});
+
+test("A-S6 the count pass stops at the first page past the size limit", async (t) => {
+  const { cache } = rawFixture(t, 2000, 3072);
+  cache.maxBytes = 3 * 3072;
+  const all = cache.c.all.bind(cache.c);
+  let pages = 0;
+  cache.c.all = (sql, ...args) => (sql.includes("length(vec)") && pages++, all(sql, ...args));
+  await cache.warm("m");
+  assert.equal(cache.status().reason, "size_limit");
+  assert.equal(pages, 1, "a full scan reads 9 pages");
+});
+
 test("A-S6 the proportional warm deadline is still bounded", async (t) => {
   const status = await warmWithJump(t, 86400000, (cache) => (cache.warmBytesPerSec = 1000));
   assert.equal(status.state, "recovering");
